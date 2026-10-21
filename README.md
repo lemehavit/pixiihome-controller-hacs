@@ -131,8 +131,9 @@ Back up Home Assistant before updating. Download updates through HACS and restar
 Home Assistant. Review the changelog before enabling new control behavior.
 
 Before removing the integration, disable its automatic controllers and verify
-that its owned operations have ended. Turning off authority blocks new commands;
-it does not establish that an existing native Gateway interval has stopped.
+that its owned operations have ended. Turning off authority first removes the
+integration's own future price schedules and leases where it can, then blocks new
+commands; it does not establish that an existing native Gateway interval has stopped.
 Remove the config entry under **Devices & services**, remove its files through
 HACS, then restart. External schedules are managed at their source.
 

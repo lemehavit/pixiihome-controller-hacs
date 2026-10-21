@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.8 — 2026-10-21
+
+- Price optimization plans with the remaining known prices instead of waiting for
+  next-day data, and replans when it is published. New attribute
+  `next_day_prices_available`.
+- Turning production authority off first stops integration-owned APS/solar leases,
+  deletes future price schedules and stops a running price interval while Gateway
+  writes are still allowed. Anything left is reported in a persistent notification.
+
 ## 0.3.7 — 2026-10-21
 
 First standalone public distribution of the community integration (beta).

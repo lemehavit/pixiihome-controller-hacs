@@ -46,7 +46,8 @@ entities:
 ```
 
 Replace the calendar ID. A Planförslag event is an estimate, not a created native
-schedule. The current controller can wait for next-day prices, an idle window,
+schedule. The current controller plans with the remaining known prices and replans when
+next-day prices arrive. It can still wait for an idle window,
 complete inventory or usable capacity even with live writes off.
 
 ## 3. Interpret a solar-charging setup

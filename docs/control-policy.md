@@ -79,8 +79,10 @@ and power. Merely enabling a feature switch does not fill in a valid policy.
    still allow its normal cleanup. Check the resulting native service/output and
    any remaining owned schedules before withdrawing authority.
 
-Turning authority off blocks new writes; it is not a universal stop command and
-does not prove an already-running native interval ended. Cleanup can itself
+Turning authority off first asks the integration to stop its own APS/solar leases,
+delete its future price schedules and stop a running price interval while writes
+are still allowed. Anything it could not remove is listed in a persistent
+notification. It still does not prove an already-running native interval ended. Cleanup can itself
 fail or require reconciliation. Do not bypass that state by editing storage or
 replaying the same command.
 

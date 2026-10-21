@@ -43,7 +43,9 @@ Supported attribute layouts, in detection order:
 Timestamped items accept timezone-aware ISO timestamps or Home Assistant datetime
 values. Include an explicit offset/`Z`; naive times are rejected. Missing,
 duplicate or invalid intervals and unsupported formats do not become an empty
-"successful" plan. Daily adapters can wait until next-day data is available.
+"successful" plan. Daily adapters plan with the remaining current-day intervals until next-day data
+is published; the `next_day_prices_available` attribute shows which case applies.
+Publication triggers a replan that replaces obsolete future owned schedules.
 
 ### Generic attribute example
 
