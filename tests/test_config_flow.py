@@ -255,6 +255,7 @@ async def test_load_balancing_options_menu_and_preserved_authority():
     assert menu["menu_options"] == [
         "load_balancing",
         "price_optimization",
+        "energy_forecast",
         "scheduler",
     ]
     result = await flow.async_step_load_balancing(

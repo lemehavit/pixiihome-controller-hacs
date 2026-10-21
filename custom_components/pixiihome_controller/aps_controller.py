@@ -15,6 +15,7 @@ from .control.phase_gateway import PhaseGateway
 from .control.policy import AutomationPolicy
 from .control.production import ProductionAdapterRequest
 from .control.settings import OperationalSettings
+from .reasons import reason_text
 from .solar_controller import APS_SERVICE, IDLE_SERVICE, SCHEDULER_SERVICE
 
 if TYPE_CHECKING:
@@ -128,6 +129,10 @@ class AdaptivePeakShavingController:
         return remove
 
     def _publish(self, status: str, reason: str | None = None) -> None:
+        if self.status == "active" and status not in {"active", "starting"}:
+            why = reason_text(reason) or status.replace("_", " ")
+            log_activity(self.runtime, "adaptive_peak_shaving_status",
+                         f"Stopping adaptive peak shaving: {why}")
         self.status, self.reason = status, reason
         for listener in tuple(self._listeners):
             listener()

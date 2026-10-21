@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from math import isfinite
 from time import monotonic
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 from .activity import log_activity
 from .control.models import ControlOperation
@@ -15,12 +16,15 @@ from .control.phase_gateway import PhaseGateway
 from .control.policy import AutomationPolicy
 from .control.production import ProductionAdapterRequest
 from .control.settings import OperationalSettings
+from .control.smart_solar import SmartSolarDecision, evaluate_deferral
+from .reasons import reason_text
 
 if TYPE_CHECKING:
     from .runtime import RuntimeData
 
 
 APS_SERVICE = 105
+_STOCKHOLM = ZoneInfo("Europe/Stockholm")
 IDLE_SERVICE = 0
 SCHEDULER_SERVICE = 101
 
@@ -91,6 +95,11 @@ class SolarChargingController:
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
         self._listeners: list[Callable[[], None]] = []
+        self.smart_decision: SmartSolarDecision | None = None
+        self._smart_checked_at: float | None = None
+        self._smart_hold_until: datetime | None = None
+        self._smart_blocked_day: str | None = None
+        self._smart_deferring = False
 
     def add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
         self._listeners.append(listener)
@@ -102,6 +111,9 @@ class SolarChargingController:
         return remove
 
     def _publish(self, status: str, reason: str | None = None) -> None:
+        if self.status == "active" and status not in {"active", "starting"}:
+            why = reason_text(reason) or status.replace("_", " ")
+            log_activity(self.runtime, "solar_charging_status", f"Stopping solar charging: {why}")
         self.status, self.reason = status, reason
         for listener in tuple(self._listeners):
             listener()
@@ -111,6 +123,7 @@ class SolarChargingController:
         settings = self.runtime.operational_settings
         return {
             "reason": self.reason,
+            "reason_text": reason_text(self.reason) if self.reason else None,
             "grid_power_w": self.grid_power_w,
             "battery_power_w": self.battery_power_w,
             "potential_surplus_w": self.potential_surplus_w,
@@ -130,6 +143,11 @@ class SolarChargingController:
             "discharge_max_w": 0,
             "surplus_formula": "max(0, battery_power_w - grid_power_w)",
             "schedule_precedence_required": True,
+            "smart_solar_charging": bool(settings.get("solar_smart_enabled")),
+            **(self.smart_decision.as_dict() if self.smart_decision is not None else {}),
+            "smart_hold_until": (
+                self._smart_hold_until.isoformat() if self._smart_hold_until else None
+            ),
         }
 
     def _priority(self, service: int) -> int | None:
@@ -355,6 +373,10 @@ class SolarChargingController:
             if self._retiring:
                 self._publish("lease_expiring", "solar_lease_not_renewed")
                 return
+            if self._smart_defers(max_soc):
+                self._retiring = True
+                self._publish("lease_expiring", "smart_solar_deferring")
+                return
             if self.potential_surplus_w < stop_w:
                 if self._shortage_since is None:
                     self._shortage_since = now
@@ -388,12 +410,109 @@ class SolarChargingController:
             self._surplus_since = None
             self._publish("waiting_surplus")
             return
+        if self._smart_defers(max_soc):
+            self._surplus_since = None
+            self._publish("deferring", "smart_solar_export_now_charge_later")
+            return
         if self._surplus_since is None:
             self._surplus_since = now
         if now - self._surplus_since < int(settings.get("solar_start_debounce_seconds")):
             self._publish("waiting_surplus", "solar_start_debounce")
             return
         await self._write_lease(renewal=False)
+
+    def _smart_defers(self, max_soc: float) -> bool:
+        """Whether smart solar charging lets the surplus be exported for now.
+
+        Any missing input, a solar shortfall today or a margin that is no longer
+        enough answers False (charge now). After deferring ends for lack of
+        margin, charging is held on for 30 minutes to avoid flapping.
+        """
+        settings = self.runtime.operational_settings
+        forecast = getattr(self.runtime, "energy_forecast", None)
+        if not bool(settings.get("solar_smart_enabled")) or forecast is None:
+            self.smart_decision = None
+            return self._smart_transition(False, "off")
+        clock_now = self.clock()
+        if (
+            self._smart_checked_at is not None
+            and clock_now - self._smart_checked_at < 60
+            and self.smart_decision is not None
+        ):
+            return self.smart_decision.defer
+        self._smart_checked_at = clock_now
+        now = datetime.now(UTC)
+        today = now.astimezone(_STOCKHOLM).date().isoformat()
+        battery = self.runtime.battery
+        policy = self.runtime._automation_policy()
+        if self._smart_blocked_day == today:
+            self.smart_decision = SmartSolarDecision(False, "solar_below_forecast_today")
+            return self._smart_transition(False, self.smart_decision.reason)
+        if forecast.config.solar_power_entity_id:
+            ratio = forecast.correction.ratio(now, timedelta(minutes=30))
+            if ratio is not None and ratio < 0.6:
+                self._smart_blocked_day = today
+                self.smart_decision = SmartSolarDecision(False, "solar_below_forecast_today")
+                return self._smart_transition(False, self.smart_decision.reason)
+        if self._smart_hold_until is not None and now < self._smart_hold_until:
+            self.smart_decision = SmartSolarDecision(False, "charging_held_after_deferral")
+            return self._smart_transition(False, self.smart_decision.reason)
+        if battery.usable_soc is None or battery.charge_power_limit_w is None:
+            self.smart_decision = SmartSolarDecision(False, "battery_state_unknown")
+            return self._smart_transition(False, self.smart_decision.reason)
+
+        def surplus(start: datetime, end: datetime) -> float | None:
+            solar = forecast.solar_forecast_kw(start, end, conservative=True)
+            if solar is None:
+                return None
+            return solar - forecast.load_kw(start, end, high=True)
+
+        decision = evaluate_deferral(
+            now=now,
+            usable_soc_percent=float(battery.usable_soc),
+            target_soc_percent=max_soc,
+            capacity_kwh=float(settings.get("price_usable_capacity_kwh")),
+            charge_kw=min(
+                float(settings.get("solar_max_charge_power_kw")),
+                max(0.0, float(battery.charge_power_limit_w) / 1000),
+                policy.max_power_kw,
+            ),
+            round_trip_efficiency_percent=float(
+                settings.get("price_round_trip_efficiency_percent")
+            ),
+            safety_margin_percent=float(settings.get("solar_smart_safety_margin_percent")),
+            minimum_advantage_sek_per_kwh=float(
+                settings.get("solar_smart_min_advantage_sek_per_kwh")
+            ),
+            prices=forecast.price_intervals(),
+            surplus_kw=surplus,
+        )
+        self.smart_decision = decision
+        if (
+            not decision.defer
+            and self._smart_deferring
+            and decision.reason in {"surplus_too_small_later", "forecast_unavailable"}
+        ):
+            self._smart_hold_until = now + timedelta(minutes=30)
+        return self._smart_transition(decision.defer, decision.reason)
+
+    def _smart_transition(self, defer: bool, reason: str) -> bool:
+        if defer and not self._smart_deferring:
+            decision = self.smart_decision
+            assert decision is not None
+            log_activity(
+                self.runtime, "solar_charging_status",
+                "Smart solar charging is exporting now at "
+                f"{decision.export_price_now or 0:.2f} kr/kWh and will charge later at about "
+                f"{decision.charge_price or 0:.2f} kr/kWh (conservative surplus later "
+                f"{decision.available_later_kwh or 0:.1f} kWh, needed "
+                f"{decision.need_kwh or 0:.1f} kWh)",
+            )
+        elif not defer and self._smart_deferring:
+            log_activity(self.runtime, "solar_charging_status",
+                         f"Smart solar charging stopped waiting ({reason}); charging normally")
+        self._smart_deferring = defer
+        return defer
 
     async def _write_lease(self, *, renewal: bool) -> None:
         try:

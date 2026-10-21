@@ -35,6 +35,13 @@ configured. Preparation checks native priority and can add APS below Scheduler
 when it is absent from the active priority list. It does not acquire an unrelated
 APS operation merely because service 105 is already running.
 
+### Smart solar charging
+
+Switch **Smart solar charging** lets the controller sell surplus during
+expensive hours and charge later the same day, only when the solar forecast
+safely reaches **Solar maximum SoC**. Status `deferring` means it is waiting.
+See [Energy forecast](energy-forecast.md#smart-solar-charging).
+
 ### Observe and stop
 
 Check **Solar charging status**. `waiting_surplus` is normal without sustained

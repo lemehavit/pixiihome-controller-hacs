@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.5.0 — 2026-10-21
+
+- **Energy forecast** (Configure → Energy forecast): household consumption is
+  learned per hour of the week (bootstrapped from up to 70 days of Home Assistant
+  statistics; medians of the last six weeks, a daily temperature regression and
+  a high 80th-percentile value). Optional Solcast or Open-Meteo solar forecast with
+  intraday correction from the inverter's production.
+- New switch **Smart solar charging**: solar charging waits and the surplus is
+  sold while the price now is clearly higher than later today, only when the
+  conservative solar forecast still fills the battery to Solar maximum SoC with
+  a safety margin. Anything uncertain charges at once.
+- Price optimization limits self-consumption discharge to the forecast household
+  load. New switch **Plan for high consumption** uses the high forecast.
+- New switch **Use whole-day planner**: a dynamic-programming plan over the full
+  price horizon with consumption and solar. Always calculated and shown in
+  `whole_day_plan` for comparison; used only when switched on.
+- Adjacent identical price intervals are merged into one schedule.
+- New sensors: Household consumption, Consumption forecast next 24 h, Solar
+  forecast remaining today and Battery savings today (with daily logbook entry).
+- Notification when price optimization has been stopped longer than
+  **Notify when price optimization is stopped for** (default 3 h).
+- Swedish `reason_text` attribute on the status sensors.
+- New **Battery activity** sensor and logbook entries for everything the battery
+  does and why: each service start with its cause (integration feature, external
+  Gateway schedule or unknown), charge/discharge changes, external schedules
+  added or removed, each new price plan or why nothing was planned, and why solar
+  charging or adaptive peak shaving stopped.
+
 ## 0.4.2 — 2026-10-21
 
 - Activity log entries for actions actually taken, shown on each feature's status

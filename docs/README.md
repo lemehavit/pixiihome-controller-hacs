@@ -2,7 +2,7 @@
 
 This guide explains what each part of Pixiihome Controller does, where to
 configure it, and how to tell whether it is working. It describes the public
-0.4.2 code. Read the [disclaimer and hardware limits](../README.md) before control.
+0.5.0 code. Read the [disclaimer and hardware limits](../README.md) before control.
 
 ## Contents
 
@@ -12,11 +12,12 @@ configure it, and how to tell whether it is working. It describes the public
 4. [Solar charging and adaptive peak shaving](solar-and-aps.md)
 5. [Load balancing and phase measurements](load-balancing.md)
 6. [Price optimization and price sources](price-optimization.md)
-7. [Schedules, calendars and dashboards](schedules-and-dashboard.md)
-8. [Complete entity and number-setting reference](entities.md)
-9. [Actions, advanced controls and simulator](actions-and-simulator.md)
-10. [Worked examples](examples.md)
-11. [Status messages and troubleshooting](troubleshooting.md)
+7. [Energy forecast, smart solar charging and whole-day planning](energy-forecast.md)
+8. [Schedules, calendars and dashboards](schedules-and-dashboard.md)
+9. [Complete entity and number-setting reference](entities.md)
+10. [Actions, advanced controls and simulator](actions-and-simulator.md)
+11. [Worked examples](examples.md)
+12. [Status messages and troubleshooting](troubleshooting.md)
 
 Each feature guide follows the same sequence: purpose, prerequisites,
 configuration, expected behavior and what to check when it waits or blocks.
@@ -44,6 +45,7 @@ Tables distinguish accepted input ranges from settings suitable for your site.
 | Integration **Configure → Scheduler** | Gateway HTTPS access, certificate settings and the automation-policy object. |
 | **Configure → Load balancing** | Observer enable, meter source, fuses, phase bindings and sampling. |
 | **Configure → Price optimization** | Price entity, horizon, refresh/lead times and optional managed source ID. |
+| **Configure → Energy forecast** | Solar forecast, solar production and outdoor temperature entities. |
 | Device page **Configuration** entities | Numeric operating limits, production authority and controller switches. |
 | Optional Lovelace card | Scheduler browsing, preview and explicit apply/reconciliation. |
 | **Developer tools → Actions** | Read actions and specialist maintenance actions; see their separate reference. |

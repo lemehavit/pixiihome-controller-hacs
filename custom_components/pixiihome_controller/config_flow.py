@@ -29,6 +29,7 @@ from .control.load_balancing import CONF_LOAD_BALANCING, LoadBalancingConfig
 from .control.models import RuntimeMode
 from .control.policy import AutomationPolicy
 from .control.price_optimization import CONF_PRICE_OPTIMIZATION, PriceOptimizationConfig
+from .energy_forecast_service import CONF_ENERGY_FORECAST, EnergyForecastConfig
 from .scheduler.client import normalize_scheduler_bootstrap_id, normalize_scheduler_url
 from .scheduler.tls import normalize_scheduler_ca_filename
 
@@ -240,7 +241,9 @@ class PixiihomeControllerOptionsFlow(config_entries.OptionsFlow):
             return await self.async_step_scheduler(user_input)
         return self.async_show_menu(
             step_id="init",
-            menu_options=["load_balancing", "price_optimization", "scheduler"],
+            menu_options=[
+                "load_balancing", "price_optimization", "energy_forecast", "scheduler",
+            ],
         )
 
     async def async_step_price_optimization(
@@ -322,6 +325,45 @@ class PixiihomeControllerOptionsFlow(config_entries.OptionsFlow):
                 }
             ),
             errors=errors,
+        )
+
+    async def async_step_energy_forecast(self, user_input: dict[str, Any] | None = None):
+        """Select the solar forecast, solar power and temperature entities."""
+        current = self._config_entry.options.get(CONF_ENERGY_FORECAST)
+        try:
+            config = EnergyForecastConfig.from_mapping(current)
+        except ValueError:
+            config = EnergyForecastConfig()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                config = EnergyForecastConfig.from_mapping(user_input)
+            except (TypeError, ValueError):
+                errors["base"] = "invalid_energy_forecast"
+            else:
+                options = {**self._config_entry.options, CONF_ENERGY_FORECAST: config.as_dict()}
+                return self.async_create_entry(title="", data=options)
+        schema: dict[Any, Any] = {
+            vol.Optional(
+                "solar_forecast_entity_ids",
+                default=list(config.solar_forecast_entity_ids),
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(filter={"domain": "sensor"}, multiple=True)
+            ),
+        }
+        for key, value, domains in (
+            ("solar_power_entity_id", config.solar_power_entity_id, ["sensor"]),
+            ("temperature_entity_id", config.temperature_entity_id, ["sensor", "weather"]),
+        ):
+            marker = (
+                vol.Optional(key, description={"suggested_value": value})
+                if value else vol.Optional(key)
+            )
+            schema[marker] = selector.EntitySelector(
+                selector.EntitySelectorConfig(filter={"domain": domains})
+            )
+        return self.async_show_form(
+            step_id="energy_forecast", data_schema=vol.Schema(schema), errors=errors,
         )
 
     async def async_step_load_balancing(self, user_input: dict[str, Any] | None = None):

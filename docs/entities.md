@@ -58,6 +58,11 @@ some unavailable fields simply mean the firmware does not publish that value.
 | `price_next_charge` — Next price-optimized charge | Timestamp for current/next unexpired charge interval. Read `schedule_status`, power, start/end and local-time attributes. It may be a proposal. |
 | `price_next_discharge` — Next price-optimized discharge | Same for discharge, including export/self-consumption mode. A currently running interval can have a past start timestamp. |
 | `price_scheduled_count` — Created price schedules | Count of unexpired reconciled `scheduled` price intervals; includes `schedules` list. Does not count all proposals or lifetime operations. |
+| `battery_activity` — Battery activity | What the battery does now and who caused it, for example `Discharging – price optimization`. Attributes: running service, cause, SOC, power and the 30 latest entries (`recent`). Every change is written to the logbook; see [activity log](troubleshooting.md#activity-log). |
+| `household_load_power` — Household consumption | W, grid − battery + solar. See [energy forecast](energy-forecast.md). |
+| `household_load_forecast` — Consumption forecast next 24 h | kWh; attributes hold the hourly forecast, learned days and forecast error. |
+| `solar_forecast_remaining_today` — Solar forecast remaining today | kWh from the configured solar forecast, corrected by today's production. |
+| `battery_savings_today` — Battery savings today | kr; attributes `yesterday_sek`, `this_month_sek`, `last_30_days_sek` and `daily` (14 days). |
 
 Load-balancing numeric readings require appropriate current observer status;
 current measurements can remain visible while direction evidence is missing.
@@ -84,7 +89,7 @@ displayed by Home Assistant; the card's local fields use Europe/Stockholm.
 
 ## Switches
 
-All seven switches default to **off** and persist across restarts. Operations
+All switches default to **off** and persist across restarts. Operations
 are administrator-controlled; an on switch is not proof of active battery power.
 
 | Key / label | Function and intended use |
@@ -96,6 +101,9 @@ are administrator-controlled; an on switch is not proof of active battery power.
 | `automatic_price_optimization` — Automatic price optimization | Run the price controller; authority/policy are required even for its no-schedule-write preview mode. |
 | `price_schedule_writes_enabled` — Allow creating schedules | Permit live price reconciliation. Off permits proposals after prerequisites, but does not prove old schedules were removed. |
 | `price_export_allowed` — Allow grid export | Allow export when the separate net-profit floor passes. Does not enable the controller or bypass any other gate. |
+| `solar_smart_enabled` — Smart solar charging | Let solar charging wait while selling is worth more now, only when the forecast safely reaches the target later today. |
+| `price_whole_day_planner` — Use whole-day planner | Plan the whole horizon with consumption and solar forecasts. Off: the plan is still shown in attributes. |
+| `price_plan_high_consumption` — Plan for high consumption | Use the high (80th percentile) consumption forecast in price planning. |
 
 ## Buttons
 
@@ -164,6 +172,8 @@ phase, service and ownership checks.
 | `solar_max_soc_percent`<br>Solar maximum SoC | 90 | 0–100; 1 | % | Usable-SOC charging ceiling. Does not request discharge if SOC starts above the ceiling. |
 | `solar_start_debounce_seconds`<br>Solar start debounce | 60 | 0–3600; 1 | s | Time sustained export must satisfy the start condition; filters brief surplus spikes. |
 | `solar_stop_debounce_seconds`<br>Solar stop debounce | 60 | 0–3600; 1 | s | Time the stop condition must persist; filters brief changes before stopping/ending renewal. |
+| `solar_smart_min_advantage_sek_per_kwh`<br>Smart solar minimum price advantage | 0.2 | 0–5 | SEK/kWh | How much higher the price now must be than the later charging price before smart solar waits. |
+| `solar_smart_safety_margin_percent`<br>Smart solar safety margin | 25 | 0–200 | % | Extra forecast solar energy required, beyond what is needed, before smart solar waits. |
 
 ### Price optimization numbers
 
@@ -181,6 +191,7 @@ phase, service and ownership checks.
 | `price_usable_capacity_kwh`<br>Usable battery capacity for price planning | 0 | 0–1000; 0.1 | kWh | Explicit usable energy capacity for price planning. Default zero blocks planning; it is not inferred from nameplate capacity. |
 | `price_round_trip_efficiency_percent`<br>Battery round-trip efficiency | 90 | 50–100; 1 | % | Estimated AC round-trip efficiency for energy/profit calculations. Enter percent, for example 90 rather than 0.9. |
 | `price_cycle_cost_sek_per_kwh`<br>Battery cycle cost per delivered kWh | 0 | 0–20; 0.01 | SEK/kWh | Estimated battery-wear cost per delivered AC kWh. Default zero omits this expense; it does not mean wear is free. |
+| `price_blocked_notify_hours`<br>Notify when price optimization is stopped for | 3 | 0–48; 1 | h | Create a Home Assistant notification when price optimization has been blocked this long. 0 turns it off. |
 
 ### Retired settings and compatibility
 

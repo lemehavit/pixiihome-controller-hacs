@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -273,8 +273,14 @@ def build_price_plan(
     grid_import_cost_sek_per_kwh: float,
     end_before: datetime | None = None,
     external_windows: Sequence[ExternalWindow] = (),
+    net_load_kw: Callable[[datetime, datetime], float | None] | None = None,
 ) -> PricePlan:
     """Plan using minimum net profit per AC kWh delivered by the battery.
+
+    ``net_load_kw`` optionally forecasts household load minus solar for an
+    interval. Zero-export self-consumption can only deliver that much, so the
+    simulated energy and expected margin of such a discharge are capped by it
+    (the schedule itself still allows the full power in case load is higher).
 
     The legacy ``*_difference`` parameter names remain for persisted-entity
     compatibility. Their values are net-profit floors, after all costs.
@@ -488,6 +494,12 @@ def build_price_plan(
                 if power < 0.05:
                     continue
                 delivered = power * hours
+                if mode is PriceDischargeMode.SELF_CONSUMPTION and net_load_kw is not None:
+                    demand = net_load_kw(item.start, item.end)
+                    if demand is not None:
+                        if min(power, demand) < 0.05:
+                            continue
+                        delivered = min(power, demand) * hours
                 energy -= delivered / discharge_efficiency
                 if closing is not None:
                     charged_energy = max(0.0, charged_energy - delivered / discharge_efficiency)
@@ -537,6 +549,7 @@ def build_price_plan(
             "grid_import_cost": grid_import_cost_sek_per_kwh,
             "minimum_soc": minimum_soc_percent,
             "maximum_soc": maximum_soc_percent,
+            "load_forecast": net_load_kw is not None,
         },
         "external_windows": [
             [window.start.isoformat(), window.end.isoformat(),
@@ -553,6 +566,76 @@ def build_price_plan(
         tuple(actions), (), fingerprint, min_soc, max_soc, expected_margin,
         tuple(sorted(window_socs.items())),
     )
+
+
+def merge_adjacent_actions(
+    actions: Sequence[PricePlanAction],
+    max_duration_seconds: int | None = None,
+) -> tuple[PricePlanAction, ...]:
+    """Join back-to-back actions with identical native values into one schedule.
+
+    Fewer, longer schedules mean fewer Gateway writes and readbacks. Prices are
+    averaged by duration; margins add up; the projected SOC is the later one.
+    """
+    merged: list[PricePlanAction] = []
+    for action in actions:
+        previous = merged[-1] if merged else None
+        if (
+            previous is not None
+            and previous.end == action.start
+            and previous.direction is action.direction
+            and previous.service == action.service
+            and previous.discharge_mode is action.discharge_mode
+            and _freeze_values(previous.values) == _freeze_values(action.values)
+            and (
+                max_duration_seconds is None
+                or previous.duration_seconds + action.duration_seconds <= max_duration_seconds
+            )
+        ):
+            first, second = previous.duration_seconds, action.duration_seconds
+            total = first + second
+
+            def weighted(a: float, b: float, first: int = first, second: int = second,
+                         total: int = total) -> float:
+                return (a * first + b * second) / total
+
+            energy_first = previous.power_kw * first / 3600
+            energy_second = action.power_kw * second / 3600
+            margin = previous.expected_margin_sek + action.expected_margin_sek
+            merged[-1] = PricePlanAction(
+                previous.start,
+                action.end,
+                action.direction,
+                action.power_kw,
+                action.service,
+                action.values,
+                action.discharge_mode,
+                weighted(previous.price_sek_per_kwh, action.price_sek_per_kwh),
+                weighted(
+                    previous.reference_price_sek_per_kwh, action.reference_price_sek_per_kwh
+                ),
+                weighted(previous.spread_sek_per_kwh, action.spread_sek_per_kwh),
+                action.projected_usable_soc_percent,
+                margin,
+                (
+                    previous.net_profit_sek_per_kwh * energy_first
+                    + action.net_profit_sek_per_kwh * energy_second
+                )
+                / (energy_first + energy_second)
+                if energy_first + energy_second > 0
+                else action.net_profit_sek_per_kwh,
+            )
+            continue
+        merged.append(action)
+    return tuple(merged)
+
+
+def _freeze_values(value: object) -> object:
+    if isinstance(value, Mapping):
+        return tuple(sorted((str(key), _freeze_values(item)) for key, item in value.items()))
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_values(item) for item in value)
+    return value
 
 
 def _qualifying_discharge(
@@ -717,5 +800,6 @@ __all__ = [
     "PricePlanAction",
     "PriceSeries",
     "build_price_plan",
+    "merge_adjacent_actions",
     "normalize_price_series",
 ]

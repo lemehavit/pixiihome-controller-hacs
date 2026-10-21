@@ -34,7 +34,8 @@
         "menu_options": {
           "load_balancing": "Load balancing",
           "scheduler": "Scheduler and control policy",
-          "price_optimization": "Price optimization"
+          "price_optimization": "Price optimization",
+          "energy_forecast": "Energy forecast"
         }
       },
       "scheduler": {
@@ -96,6 +97,15 @@
           "minimum_lead_minutes": "Minimum scheduler lead time",
           "refresh_minutes": "Automatic plan refresh interval"
         }
+      },
+      "energy_forecast": {
+        "title": "Energy forecast",
+        "description": "Optional entities for the consumption and solar forecasts. Solar forecast: one or more Solcast sensors (forecast today, tomorrow) or Open-Meteo Solar Forecast sensors with a watts attribute. Solar power: the inverter's current production, needed to separate solar from consumption. Temperature: outdoor temperature sensor or weather entity. Nothing here sends commands.",
+        "data": {
+          "solar_forecast_entity_ids": "Solar forecast sensors",
+          "solar_power_entity_id": "Solar production power sensor",
+          "temperature_entity_id": "Outdoor temperature (sensor or weather)"
+        }
       }
     },
     "error": {
@@ -103,7 +113,8 @@
       "margin_exceeds_fuse": "Margin must be below the fuse rating on every used phase.",
       "stale_interval_too_short": "Maximum measurement age must be at least twice the polling interval.",
       "invalid_meter_entities": "Select distinct current and voltage sensors for every phase. Each sensor can be selected only once.",
-      "invalid_price_optimization": "Check the price sensor, source ID and planning intervals."
+      "invalid_price_optimization": "Check the price sensor, source ID and planning intervals.",
+      "invalid_energy_forecast": "Select sensors (and a weather entity for temperature only)."
     }
   },
   "services": {
@@ -236,7 +247,8 @@
           "active": "Charging solar surplus",
           "lease_expiring": "Stopping solar charging",
           "soc_limit": "Maximum usable SoC reached",
-          "blocked": "Blocked"
+          "blocked": "Blocked",
+          "deferring": "Waiting: exporting now, charging later"
         }
       },
       "adaptive_peak_shaving_status": {
@@ -274,6 +286,21 @@
       },
       "price_scheduled_count": {
         "name": "Created price schedules"
+      },
+      "household_load_power": {
+        "name": "Household consumption"
+      },
+      "household_load_forecast": {
+        "name": "Consumption forecast next 24 h"
+      },
+      "solar_forecast_remaining_today": {
+        "name": "Solar forecast remaining today"
+      },
+      "battery_savings_today": {
+        "name": "Battery savings today"
+      },
+      "battery_activity": {
+        "name": "Battery activity"
       }
     },
     "number": {
@@ -408,6 +435,15 @@
       },
       "price_cycle_cost_sek_per_kwh": {
         "name": "Battery cycle cost per delivered kWh"
+      },
+      "solar_smart_min_advantage_sek_per_kwh": {
+        "name": "Smart solar minimum price advantage"
+      },
+      "solar_smart_safety_margin_percent": {
+        "name": "Smart solar safety margin"
+      },
+      "price_blocked_notify_hours": {
+        "name": "Notify when price optimization is stopped for"
       }
     },
     "button": {
@@ -460,6 +496,15 @@
       },
       "price_adjust_external_target_soc": {
         "name": "Allow changing aggregator schedules"
+      },
+      "price_whole_day_planner": {
+        "name": "Use whole-day planner"
+      },
+      "price_plan_high_consumption": {
+        "name": "Plan for high consumption"
+      },
+      "solar_smart_enabled": {
+        "name": "Smart solar charging"
       }
     }
   }

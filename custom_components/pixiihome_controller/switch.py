@@ -69,6 +69,21 @@ SWITCH_DESCRIPTIONS: tuple[PixiiSwitchDescription, ...] = (
         feature=PixiiFeature.PRICE_OPTIMIZATION,
     ),
     PixiiSwitchDescription(
+        "price_whole_day_planner",
+        setting_key="price_whole_day_planner",
+        feature=PixiiFeature.PRICE_OPTIMIZATION,
+    ),
+    PixiiSwitchDescription(
+        "price_plan_high_consumption",
+        setting_key="price_plan_high_consumption",
+        feature=PixiiFeature.PRICE_OPTIMIZATION,
+    ),
+    PixiiSwitchDescription(
+        "solar_smart_enabled",
+        setting_key="solar_smart_enabled",
+        feature=PixiiFeature.SOLAR_CHARGING,
+    ),
+    PixiiSwitchDescription(
         "adaptive_peak_shaving",
         controller_key="adaptive_peak_shaving_enabled",
         # Reuse the old entity identity so existing dashboards keep working.

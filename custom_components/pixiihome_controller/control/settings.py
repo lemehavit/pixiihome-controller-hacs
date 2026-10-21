@@ -79,6 +79,13 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     ),
     "solar_min_soc_percent": SettingSpec("solar_min_soc_percent", 10.0, 0.0, 100.0, 1.0, "%"),
     "solar_max_soc_percent": SettingSpec("solar_max_soc_percent", 90.0, 0.0, 100.0, 1.0, "%"),
+    "solar_smart_enabled": SettingSpec("solar_smart_enabled", False),
+    "solar_smart_min_advantage_sek_per_kwh": SettingSpec(
+        "solar_smart_min_advantage_sek_per_kwh", 0.2, 0.0, 5.0, 0.01, "SEK/kWh"
+    ),
+    "solar_smart_safety_margin_percent": SettingSpec(
+        "solar_smart_safety_margin_percent", 25.0, 0.0, 200.0, 1.0, "%"
+    ),
     "solar_start_debounce_seconds": SettingSpec(
         "solar_start_debounce_seconds", 60, 0, 3600, 1, "s"
     ),
@@ -115,6 +122,11 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "price_schedule_writes_enabled": SettingSpec("price_schedule_writes_enabled", False),
     "price_adjust_external_target_soc": SettingSpec(
         "price_adjust_external_target_soc", False
+    ),
+    "price_whole_day_planner": SettingSpec("price_whole_day_planner", False),
+    "price_plan_high_consumption": SettingSpec("price_plan_high_consumption", False),
+    "price_blocked_notify_hours": SettingSpec(
+        "price_blocked_notify_hours", 3, 0, 48, 1, "h"
     ),
     "price_min_difference_sek_per_kwh": SettingSpec(
         "price_min_difference_sek_per_kwh", 0.5, 0.0, 20.0, 0.01, "SEK/kWh"
