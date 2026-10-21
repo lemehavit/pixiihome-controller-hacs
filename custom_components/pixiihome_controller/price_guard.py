@@ -196,6 +196,8 @@ class PriceSocGuard:
                         f"({reason.replace('_', ' ')})"
                         if soc is not None and reason is not None
                         else f"SOC guard stopped the price {direction}",
+                        "Who: the price SOC guard. Why: the battery reached the SOC limit "
+                        "of the price plan, so the running price schedule was stopped early.",
                     )
                     controller = self.runtime.price_optimization_controller
                     if controller is not None:

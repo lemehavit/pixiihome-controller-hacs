@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from math import ceil, isfinite
@@ -159,7 +159,11 @@ class PriceOptimizationController:
                 parts.append(f"and {len(plan.actions) - 6} more")
             log_activity(self.runtime, PRICE_STATUS,
                          f"New plan ({engine} planner): " + "; ".join(parts)
-                         + f". Expected profit {plan.expected_margin_sek:.2f} kr")
+                         + f". Expected profit {plan.expected_margin_sek:.2f} kr",
+                         f"Who: price optimization, {engine} planner. Why: prices, SOC or the "
+                         "forecast changed, so the plan was recalculated. Each interval is "
+                         "only planned when its net profit after losses, grid cost and cycle "
+                         "cost reaches your minimum.")
             return
         settings = self.runtime.operational_settings
         best = best_net_profit(
@@ -178,6 +182,9 @@ class PriceOptimizationController:
             f"Nothing planned ({engine} planner): the best charge-then-use price pair "
             f"gives about {best:.2f} kr/kWh net profit after losses, your minimum is "
             f"{minimum:.2f} kr/kWh (or the battery is already at its SOC limits)",
+            "Who: price optimization. Why: no charge-then-use pair in the price horizon "
+            "pays enough after losses and costs. Lower Minimum net profit for "
+            "self-consumption, or wait for a day with a larger price difference.",
         )
 
     def attributes(self) -> dict[str, Any]:
@@ -366,7 +373,9 @@ class PriceOptimizationController:
                     return
                 self.delete_count += 1
                 log_activity(self.runtime, PRICE_STATUS, f"Removed {_describe(record)} "
-                             "(price optimization turned off)")
+                             "(price optimization turned off)",
+                             "Who: price optimization. Why: the switch Automatic price "
+                             "optimization was turned off, so its own schedules are removed.")
             self._publish("disabled")
 
     async def release_for_authority_off(self) -> list[str]:
@@ -575,7 +584,7 @@ class PriceOptimizationController:
         schedules = manager.normalized_schedules
         if any(
             _record_has_schedule_shape(record, schedule)
-            and not _record_matches_schedule(record, schedule)
+            and not _record_matches_schedule(record, schedule, schedules)
             for record in self._price_records()
             for schedule in schedules if schedule.enabled
         ):
@@ -970,7 +979,10 @@ class PriceOptimizationController:
             and schedule.service_type == service
             and schedule.start_epoch <= now < schedule.end_epoch
             and schedule.recurrence.recurring is False
-            and not any(_record_matches_schedule(record, schedule) for record in owned)
+            and not any(
+                _record_matches_schedule(record, schedule, manager.normalized_schedules)
+                for record in owned
+            )
         ]
         if len(running) != 1:
             return None
@@ -1001,7 +1013,7 @@ class PriceOptimizationController:
             if (
                 not schedule.enabled
                 or schedule.end_epoch <= now
-                or any(_record_matches_schedule(record, schedule) for record in owned)
+                or any(_record_matches_schedule(record, schedule, schedules) for record in owned)
             ):
                 continue
             target: float | None = None
@@ -1170,7 +1182,12 @@ class PriceOptimizationController:
                     self.external_target_adjust_count += 1
                     log_activity(self.runtime, PRICE_STATUS,
                                  f"Lowered aggregator Target SOC {when} from {reference:.0f} % "
-                                 f"to {desired:.0f} % to keep the planned discharge")
+                                 f"to {desired:.0f} % to keep the planned discharge",
+                                 "Who: price optimization, with Allow changing aggregator "
+                                 "schedules on. Why: the aggregator target would recharge "
+                                 "from the grid between a planned discharge and the next "
+                                 "planned charge; it is lowered to the planned level, never "
+                                 "below your minimum SOC.")
                 else:
                     self._lowered.pop(key, None)
                     log_activity(self.runtime, PRICE_STATUS,
@@ -1214,7 +1231,10 @@ class PriceOptimizationController:
                 return False
             self.delete_count += 1
             log_activity(self.runtime, PRICE_STATUS,
-                         f"Removed {_describe(record)} (no longer in the plan)")
+                         f"Removed {_describe(record)} (no longer in the plan)",
+                         "Who: price optimization. Why: the plan was recalculated with new "
+                         "prices, SOC or forecast and this interval is no longer profitable "
+                         "or needed; its own schedule was removed before it started.")
         for key, action in desired.items():
             if key in existing:
                 continue
@@ -1242,6 +1262,7 @@ class PriceOptimizationController:
                 f"Scheduled {action.direction.value} {time_span(action.start, action.end)} "
                 f"at {action.power_kw:.1f} kW, price {action.price_sek_per_kwh:.2f} kr/kWh, "
                 f"expected net profit {action.net_profit_sek_per_kwh:.2f} kr/kWh",
+                _action_cause(action, self.planner_engine, self.runtime.operational_settings),
             )
         return True
 
@@ -1253,6 +1274,30 @@ def _action_text(action: PricePlanAction) -> str:
     return (
         f"{action.direction.value}{mode} {time_span(action.start, action.end)} "
         f"{action.power_kw:.1f} kW at {action.price_sek_per_kwh:.2f} kr/kWh"
+    )
+
+
+def _action_cause(action: PricePlanAction, engine: str, settings: Any) -> str:
+    planner = "whole-day" if engine == "whole_day" else "standard"
+    minimum = float(settings.get("price_min_difference_sek_per_kwh"))
+    if action.direction is PriceDirection.CHARGE:
+        why = (
+            f"charge now at {action.price_sek_per_kwh:.2f} kr/kWh to use the energy later "
+            f"at about {action.reference_price_sek_per_kwh:.2f} kr/kWh"
+        )
+    else:
+        mode = "covering the house" if action.discharge_mode is not None and (
+            action.discharge_mode.value == "self_consumption"
+        ) else "exporting to the grid"
+        why = (
+            f"use stored energy now at {action.price_sek_per_kwh:.2f} kr/kWh by {mode}; "
+            f"it was charged at about {action.reference_price_sek_per_kwh:.2f} kr/kWh"
+        )
+    return (
+        f"Who: price optimization, {planner} planner. Why: {why}. Net profit "
+        f"{action.net_profit_sek_per_kwh:.2f} kr/kWh after losses and costs, your minimum is "
+        f"{minimum:.2f} kr/kWh. Battery SOC after this interval about "
+        f"{action.projected_usable_soc_percent:.0f} %."
     )
 
 
@@ -1319,19 +1364,42 @@ def _record_start(record: SchedulerOwnershipRecord) -> datetime | None:
         return None
 
 
-def _record_matches_schedule(record: SchedulerOwnershipRecord, schedule: Any) -> bool:
-    return (
-        # A matching time/service shape cannot prove ownership: a different
-        # actor may have posted an identical interval with different values.
-        # service_no and MQTT m_id belong to different identity namespaces.
-        # Numeric equality is insufficient without independently proven ownership.
-        schedule.ownership.ownership is Ownership.INTEGRATION_OWNED
-        and schedule.service_no == record.m_id
-        and _record_has_schedule_shape(record, schedule)
+def _record_matches_schedule(
+    record: SchedulerOwnershipRecord,
+    schedule: Any,
+    schedules: Iterable[Any] = (),
+) -> bool:
+    """Whether a Gateway list entry is this owned price record.
+
+    The Gateway list carries no owner, so an explicit integration ownership is
+    rarely available. The fallback accepts an entry only when the record is
+    OWNED (its own keyed readback proved it exists), the entry is a complete,
+    consistent one-shot with exactly the record's start, duration and service,
+    and no other enabled entry in the list has that shape. Two identical
+    entries stay ambiguous and keep planning blocked.
+    """
+    if not (
+        _record_has_schedule_shape(record, schedule)
         and schedule.recurrence.recurring is False
         and schedule.completeness is ScheduleCompleteness.COMPLETE
         and schedule.consistency is ScheduleConsistency.CONSISTENT
-    )
+    ):
+        return False
+    if (
+        # Explicit proof: integration ownership and the same identity.
+        schedule.ownership.ownership is Ownership.INTEGRATION_OWNED
+        and schedule.service_no == record.m_id
+    ):
+        return True
+    if record.lifecycle is not OwnershipLifecycle.OWNED:
+        return False
+    if schedule.ownership.ownership is Ownership.EXTERNAL:
+        return False
+    same_shape = [
+        item for item in schedules
+        if item.enabled and _record_has_schedule_shape(record, item)
+    ]
+    return len(same_shape) == 1 and same_shape[0] is schedule
 
 
 def _record_has_schedule_shape(record: SchedulerOwnershipRecord, schedule: Any) -> bool:

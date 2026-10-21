@@ -132,7 +132,8 @@ class AdaptivePeakShavingController:
         if self.status == "active" and status not in {"active", "starting"}:
             why = reason_text(reason) or status.replace("_", " ")
             log_activity(self.runtime, "adaptive_peak_shaving_status",
-                         f"Stopping adaptive peak shaving: {why}")
+                         f"Stopping adaptive peak shaving: {why}",
+                         f"Who: adaptive peak shaving. Why: {why}.")
         self.status, self.reason = status, reason
         for listener in tuple(self._listeners):
             listener()
@@ -425,7 +426,9 @@ class AdaptivePeakShavingController:
         limits = {k: v for k, v in request.payload.items() if k != "duration_seconds"}
         if not renewal:
             log_activity(self.runtime, "adaptive_peak_shaving_status",
-                         "Started adaptive peak shaving: " + _limits_text(limits))
+                         "Started adaptive peak shaving: " + _limits_text(limits),
+                         "Who: adaptive peak shaving. Why: the switch is on and the battery "
+                         "keeps grid power inside the configured limits.")
         elif {k: v for k, v in previous.items() if k != "duration_seconds"} != limits:
             log_activity(self.runtime, "adaptive_peak_shaving_status",
                          "Changed adaptive peak shaving limits: " + _limits_text(limits))

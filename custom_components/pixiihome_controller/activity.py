@@ -16,10 +16,17 @@ from .const import DOMAIN
 EVENT_LOGBOOK_ENTRY = "logbook_entry"
 
 
-def log_activity(runtime: Any, status_key: str, message: str) -> None:
+EVENT_CAUSE = f"{DOMAIN}_cause"
+
+
+def log_activity(
+    runtime: Any, status_key: str, message: str, cause: str | None = None
+) -> None:
     """Fire one logbook entry attached to the feature's status sensor.
 
-    Logging must never affect control, so every failure is swallowed.
+    ``cause`` says who did it and why. It is fired first as its own event in
+    the same context, so the logbook shows it under *What happened* for the
+    entry. Logging must never affect control, so every failure is swallowed.
     """
     try:
         hass = getattr(runtime, "hass", None)
@@ -30,7 +37,14 @@ def log_activity(runtime: Any, status_key: str, message: str) -> None:
         entity_id = _status_entity_id(hass, runtime, status_key)
         if entity_id is not None:
             data["entity_id"] = entity_id
-        fire(EVENT_LOGBOOK_ENTRY, data)
+        if not cause:
+            fire(EVENT_LOGBOOK_ENTRY, data)
+            return
+        from homeassistant.core import Context
+
+        context = Context()
+        fire(EVENT_CAUSE, {"message": cause}, context=context)
+        fire(EVENT_LOGBOOK_ENTRY, data, context=context)
     except Exception:  # noqa: BLE001 - activity logging is best effort only
         return
 
@@ -55,4 +69,4 @@ def _status_entity_id(hass: Any, runtime: Any, status_key: str) -> str | None:
         return None
 
 
-__all__ = ["clock", "log_activity", "span"]
+__all__ = ["EVENT_CAUSE", "clock", "log_activity", "span"]

@@ -7,6 +7,15 @@
 - The scheduler card lists upcoming schedules first, marks ended ones, and
   names schedules created by this integration (for example *Prisoptimering*).
 - **Battery savings today** gains a `this_week_sek` attribute (Monday to today).
+- Logbook entries now fill Home Assistant's **What happened** with who caused the
+  activity and why (price, expected profit and minimum for price schedules,
+  the external source for foreign schedules, the reason for stops).
+- Fix: price optimization no longer blocks with `price_schedule_identity_ambiguous`,
+  and no longer treats its own schedule as an unknown external window, while
+  one of its own schedules is in the Gateway list. The Gateway list carries no
+  owner, so an OWNED record (proven by its keyed readback) now matches the one
+  complete, consistent one-shot entry with exactly its start, duration and
+  service. Two identical entries still block.
 
 ## 0.5.0 — 2026-10-21
 
