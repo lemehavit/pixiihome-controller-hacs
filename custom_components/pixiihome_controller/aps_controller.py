@@ -9,6 +9,7 @@ from math import isfinite
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
+from .activity import log_activity
 from .control.models import ControlOperation
 from .control.phase_gateway import PhaseGateway
 from .control.policy import AutomationPolicy
@@ -414,11 +415,29 @@ class AdaptivePeakShavingController:
             return
         self._message_id = message_id
         self._lease_deadline = self.clock() + duration
+        previous = dict(self._applied_payload or ())
         self._applied_payload = tuple(sorted(request.payload.items()))
+        limits = {k: v for k, v in request.payload.items() if k != "duration_seconds"}
+        if not renewal:
+            log_activity(self.runtime, "adaptive_peak_shaving_status",
+                         "Started adaptive peak shaving: " + _limits_text(limits))
+        elif {k: v for k, v in previous.items() if k != "duration_seconds"} != limits:
+            log_activity(self.runtime, "adaptive_peak_shaving_status",
+                         "Changed adaptive peak shaving limits: " + _limits_text(limits))
         self.writes += 1
         if renewal:
             self.renewals += 1
         self._publish("active")
+
+
+def _limits_text(limits: dict[str, Any]) -> str:
+    parts = []
+    for key, value in sorted(limits.items()):
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            continue
+        label = key.removesuffix("_w").replace("_", " ")
+        parts.append(f"{label} {value / 1000:.1f} kW" if key.endswith("_w") else f"{label} {value}")
+    return ", ".join(parts) or "no limits"
 
 
 __all__ = ["AdaptivePeakShavingController", "build_aps_lease_request"]

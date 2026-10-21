@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers.event import async_track_state_change_event
 
+from .activity import log_activity
+from .activity import span as time_span
 from .control.price_optimization import (
     CONF_PRICE_OPTIMIZATION,
     ExternalWindow,
@@ -274,6 +276,8 @@ class PriceOptimizationController:
                     self._publish("blocked", f"price_delete_{result.reason}")
                     return
                 self.delete_count += 1
+                log_activity(self.runtime, PRICE_STATUS, f"Removed {_describe(record)} "
+                             "(price optimization turned off)")
             self._publish("disabled")
 
     async def release_for_authority_off(self) -> list[str]:
@@ -309,6 +313,11 @@ class PriceOptimizationController:
                         }
                     if stopped:
                         self.delete_count += 1
+                        log_activity(
+                            self.runtime, PRICE_STATUS,
+                            f"{'Removed' if start > now else 'Stopped'} {_describe(record)} "
+                            "(control authority turned off)",
+                        )
                     else:
                         problems.append(f"price_{record.m_id}_{result.reason}")
             if problems:
@@ -462,7 +471,6 @@ class PriceOptimizationController:
         if not await self._priority_allows_mutation():
             self._publish("waiting_for_priority", "non_idle_service_active")
             return
-        self._publish("planning")
         coordinator = self.runtime.scheduler_coordinator
         if coordinator is None:
             self._publish("blocked", "price_scheduler_inventory_unavailable")
@@ -1017,16 +1025,29 @@ class PriceOptimizationController:
                 result = {"status": "refused"}
             status = result.get("status")
             self._target_cache.pop(key, None)
+            when = time_span(window.start, window.end)
             if status == "adjusted":
                 if window.adjustable:
                     self._lowered.setdefault(key, reference)
                     self.external_target_adjust_count += 1
+                    log_activity(self.runtime, PRICE_STATUS,
+                                 f"Lowered aggregator Target SOC {when} from {reference:.0f} % "
+                                 f"to {desired:.0f} % to keep the planned discharge")
                 else:
                     self._lowered.pop(key, None)
+                    log_activity(self.runtime, PRICE_STATUS,
+                                 f"Restored aggregator Target SOC {when} to {desired:.0f} %")
             elif status == "deleted":
                 self._lowered.pop(key, None)
                 self.external_target_delete_count += 1
+                log_activity(self.runtime, PRICE_STATUS,
+                             f"Deleted aggregator Target SOC {when} ({reference:.0f} %); "
+                             "the Gateway kept the old target")
             elif window.adjustable:
+                log_activity(self.runtime, PRICE_STATUS,
+                             f"Could not lower aggregator Target SOC {when} ({status}); "
+                             "nothing after it was scheduled")
+            if status not in {"adjusted", "deleted"} and window.adjustable:
                 failed_from = window.start if failed_from is None else failed_from
                 if status == "recovery_required":
                     self._publish("blocked", "price_external_target_recovery_required")
@@ -1054,6 +1075,8 @@ class PriceOptimizationController:
                 self._publish("blocked", f"price_delete_{result.reason}")
                 return False
             self.delete_count += 1
+            log_activity(self.runtime, PRICE_STATUS,
+                         f"Removed {_describe(record)} (no longer in the plan)")
         for key, action in desired.items():
             if key in existing:
                 continue
@@ -1076,6 +1099,12 @@ class PriceOptimizationController:
                 self._publish("blocked", f"price_create_{result.reason}")
                 return False
             self.create_count += 1
+            log_activity(
+                self.runtime, PRICE_STATUS,
+                f"Scheduled {action.direction.value} {time_span(action.start, action.end)} "
+                f"at {action.power_kw:.1f} kW, price {action.price_sek_per_kwh:.2f} kr/kWh, "
+                f"expected net profit {action.net_profit_sek_per_kwh:.2f} kr/kWh",
+            )
         return True
 
 
@@ -1097,6 +1126,23 @@ def _record_key(record: SchedulerOwnershipRecord) -> tuple[object, ...]:
         state.get("duration"),
         _freeze(state.get("values", {})),
     )
+
+
+PRICE_STATUS = "price_optimization_status"
+
+
+def _describe(record: SchedulerOwnershipRecord) -> str:
+    """``price charge 14:00–15:00`` for an owned price record."""
+    start = _record_start(record)
+    duration = record.intended_state.get("duration")
+    values = record.intended_state.get("values", {})
+    direction = "discharge" if (
+        record.service == "peakshaving"
+        or (isinstance(values, Mapping) and float(values.get("pacref", 0) or 0) < 0)
+    ) else "charge"
+    if start is None or type(duration) is not int:
+        return f"price {direction}"
+    return f"price {direction} {time_span(start, start + timedelta(seconds=duration))}"
 
 
 def _record_start(record: SchedulerOwnershipRecord) -> datetime | None:

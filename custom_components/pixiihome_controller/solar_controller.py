@@ -9,6 +9,7 @@ from math import isfinite
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
+from .activity import log_activity
 from .control.models import ControlOperation
 from .control.phase_gateway import PhaseGateway
 from .control.policy import AutomationPolicy
@@ -437,6 +438,10 @@ class SolarChargingController:
         self.writes += 1
         if renewal:
             self.renewals += 1
+        else:
+            log_activity(self.runtime, "solar_charging_status",
+                         f"Started solar charging of surplus ({duration // 60} min lease, renewed "
+                         "while surplus lasts)")
         self._publish("active")
 
     async def _retire_at_soc_limit(self) -> None:

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from math import isfinite
 from typing import TYPE_CHECKING, Any
 
+from .activity import log_activity
 from .scheduler.mutations import SchedulerTransactionStatus
 from .scheduler.ownership import OwnershipLifecycle, SchedulerOwnershipRecord
 
@@ -189,6 +190,13 @@ class PriceSocGuard:
                     self.stops += 1
                     self.last_stop_at = now
                     self.status, self.reason = "stopped", reason
+                    log_activity(
+                        self.runtime, "price_optimization_status",
+                        f"SOC guard stopped the price {direction} at {soc:.0f} % usable SOC "
+                        f"({reason.replace('_', ' ')})"
+                        if soc is not None and reason is not None
+                        else f"SOC guard stopped the price {direction}",
+                    )
                     controller = self.runtime.price_optimization_controller
                     if controller is not None:
                         controller.request_refresh()

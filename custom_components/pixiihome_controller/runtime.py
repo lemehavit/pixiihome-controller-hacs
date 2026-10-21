@@ -672,6 +672,15 @@ class RuntimeData:
                 if enabled
                 else {"production_control_disabled", "state_changing_control_not_live_validated"}
             )
+        if not enabled:
+            from .activity import log_activity
+
+            log_activity(
+                self, "price_optimization_status",
+                "Control authority turned off"
+                + (f"; could not remove: {', '.join(cleanup_problems)}" if cleanup_problems
+                   else "; integration-owned schedules and leases were removed first"),
+            )
         if cleanup_problems:
             from homeassistant.components import persistent_notification
 

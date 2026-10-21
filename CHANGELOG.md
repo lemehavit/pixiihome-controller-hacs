@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.2 — 2026-10-21
+
+- Activity log entries for actions actually taken, shown on each feature's status
+  sensor: price schedules created or removed (time, power, price, expected profit),
+  aggregator Target SOC lowered, restored or deleted, SOC-guard stops, control
+  authority cleanup, solar charging start, adaptive peak shaving start and limit
+  changes, and load-balancing limit changes.
+- Price optimization no longer shows a transient "planning" state on every pass.
+
 ## 0.4.1 — 2026-10-21
 
 - Shorter switch names so they fit: **Allow creating schedules**, **Allow grid

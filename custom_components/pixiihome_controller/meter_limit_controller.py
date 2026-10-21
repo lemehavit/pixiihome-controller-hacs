@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers.storage import Store
 
+from .activity import log_activity
 from .control.load_balancing import PhaseSample, finite
 from .idle_phase_controller import IdlePhaseLoadBalancer
 
@@ -262,6 +263,8 @@ class MeterLimitLoadBalancer:
                 raise
             self.applied_limit_w = int(wanted["exp_soft_limit"])
             self.status, self.reason = "active", None
+            log_activity(self.runtime, "load_balancing_observation",
+                         f"Load balancing on: soft limit {int(wanted['exp_soft_limit'])} W")
 
     async def tick(self) -> None:
         """Maintain only owned fields and update SoC-dependent discharge permission."""
@@ -302,6 +305,11 @@ class MeterLimitLoadBalancer:
                     updated = {**self.lease, "owned": [*owned[-3:], wanted]}
                     await self._save_lease(updated)
                     await self._write(wanted)
+                    log_activity(
+                        self.runtime, "load_balancing_observation",
+                        f"Load balancing soft limit {int(current['exp_soft_limit'])} W → "
+                        f"{int(wanted['exp_soft_limit'])} W",
+                    )
                 self.applied_limit_w = int(wanted["exp_soft_limit"])
                 self.status, self.reason = "active", None
             except asyncio.CancelledError:
@@ -338,6 +346,8 @@ class MeterLimitLoadBalancer:
             await self._save_lease(None)
             self.applied_limit_w = None
             self.status, self.reason = "disabled", None
+            log_activity(self.runtime, "load_balancing_observation",
+                         "Load balancing off: original meter limitation restored")
 
     async def stop(self) -> None:
         """Release the owned overlay during unload without touching another actor."""

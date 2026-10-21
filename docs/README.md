@@ -2,7 +2,7 @@
 
 This guide explains what each part of Pixiihome Controller does, where to
 configure it, and how to tell whether it is working. It describes the public
-0.4.1 code. Read the [disclaimer and hardware limits](../README.md) before control.
+0.4.2 code. Read the [disclaimer and hardware limits](../README.md) before control.
 
 ## Contents
 
