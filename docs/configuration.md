@@ -1,5 +1,22 @@
 # Configuration
 
+[Guide contents](README.md) · [Next: control authority and policy](control-policy.md)
+
+## First setup
+
+1. Install through HACS and restart Home Assistant as described in the
+   [installation instructions](../README.md#install-with-hacs).
+2. Add **Pixiihome Controller** in **Settings → Devices & services**.
+3. Choose the runtime below. For production, verify your serial and MQTT data
+   before enabling scheduler access. Leave control switches off initially.
+4. Open **Configure** on the integration entry for its three options pages.
+   Operational numbers and switches are on the device pages instead.
+
+| Initial field | Default / accepted input | Meaning and intended use |
+| --- | --- | --- |
+| `runtime_mode` | Production Gateway; alternatively Local Simulator | Production uses your real Gateway; simulator is isolated. This is an entry-creation choice. |
+| `serial` | No default; 1–64 letters, digits, `_` or `-` | Required in production. Match the serial in status topics exactly. Unused in simulator mode. |
+
 ## Connect telemetry first
 
 Configure Home Assistant's MQTT integration using your existing broker. The
@@ -40,6 +57,33 @@ hostname verification remain enabled. Compatibility relaxes only
 without `keyUsage`; it does not change global Home Assistant or MQTT TLS settings.
 Use a hostname covered by the Gateway's certificate.
 
+### Scheduler option reference
+
+These fields are in **Configure → Scheduler**. Saving valid options reloads the
+entry. A blank password/bootstrap field preserves an existing saved value.
+
+| Field | Default / range | What to enter and why |
+| --- | --- | --- |
+| `scheduler_enabled` | Selected when a scheduler URL is configured | Enable HTTPS inventory and supported controller access. Disable for MQTT-only monitoring. |
+| `scheduler_url` | Empty | Local Gateway HTTPS URL, for example `https://pixii-gateway.example`. The example hostname must be replaced with your certificate-matching address. |
+| `scheduler_username` | Empty | Gateway account used for scheduler access. Write features can require installer privileges. |
+| `scheduler_password` | Empty on the form | Password for that account. Keep it private; a blank edit preserves the saved password. |
+| `scheduler_bootstrap_id` | Empty on the form; exactly 32 characters | Owner-supplied trusted ID. Do not use another site's ID or obtain it from a public example. |
+| `scheduler_timeout` | 10 s; 1–60 s | HTTPS timeout. A longer timeout does not resolve invalid credentials or uncertain command delivery. |
+| `scheduler_ca_compatibility` | Off | Enable only for a Gateway requiring the private-CA compatibility described above. |
+| `scheduler_ca_filename` | Empty; safe filename only | Public CA file under `/config/ssl/`. Required when compatibility is enabled. |
+| `automation_policy` | Disabled policy object | Shared automatic-control authorization. See the complete [policy reference](control-policy.md#automation-policy-fields). |
+
+### Other options pages
+
+| Page | Complete field reference | Use it when |
+| --- | --- | --- |
+| Load balancing | [Meter, phase and fuse settings](load-balancing.md#options-reference) | Enabling the observer or configuring physical phase protection support. |
+| Price optimization | [Price source and scheduling settings](price-optimization.md#source-and-timing-options) | Selecting a price sensor, horizon or optional aggregator source. |
+
+There is no integration YAML configuration to copy into `configuration.yaml`.
+Examples in this guide describe UI settings, dashboard cards or read actions.
+
 ## Enable control deliberately
 
 Production control authority, automatic controllers, live price schedule writes
@@ -79,3 +123,5 @@ Do not edit the journal, clear ownership or replay a command to bypass this stat
 Administrative validation/recovery actions are for a separately reviewed,
 bounded maintenance procedure. They are not needed to install or monitor the system.
 Do not run them from unattended automations or copy a test identity from another site.
+
+[← Guide contents](README.md) · [Next: control authority and policy →](control-policy.md)

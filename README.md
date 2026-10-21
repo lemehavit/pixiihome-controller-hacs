@@ -73,8 +73,28 @@ steps 4–6. The manifest must be directly inside that folder.
   and price export. New installations start with control switches off.
 - An MQTT-independent simulator, previews, diagnostics and a durable command journal.
 
-Configure the optional card as `type: custom:pixiihome-control-card`. The device page
-and native entities work without it. The integration registers the card resource.
+Configure the optional card as `type: custom:pixiihome-control-card`. Add
+`/pixiihome_controller/lovelace.js` as a JavaScript module in dashboard resources
+first; see the [dashboard guide](docs/schedules-and-dashboard.md). The device page
+and native entities work without the custom card.
+
+## Documentation
+
+Start with the **[complete user guide](docs/README.md)**. It has a reading order,
+task-based navigation, field references and practical examples for each function.
+
+| Topic | Guide |
+| --- | --- |
+| Connect a Gateway or simulator | [Setup and connection settings](docs/configuration.md) |
+| Understand permissions before control | [Authority and automation policy](docs/control-policy.md) |
+| Charge/discharge once or request a SOC target | [Manual controls](docs/manual-control.md) |
+| Store solar surplus or limit grid power | [Solar charging and APS](docs/solar-and-aps.md) |
+| Configure fuses, phases and meter inputs | [Load balancing](docs/load-balancing.md) |
+| Configure prices, profit floors and schedules | [Price optimization](docs/price-optimization.md) |
+| Browse schedules and build a dashboard | [Schedules and dashboards](docs/schedules-and-dashboard.md) |
+| Look up every entity, default, range and unit | [Entity reference](docs/entities.md) |
+| Understand actions and simulator scenarios | [Actions and simulator](docs/actions-and-simulator.md) |
+| Follow examples or diagnose a blocked state | [Examples](docs/examples.md) · [Troubleshooting](docs/troubleshooting.md) |
 
 ## Control status and limitations
 
