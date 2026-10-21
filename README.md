@@ -14,6 +14,18 @@ the integration without a Gateway or a physical battery.
 This is an **independent community integration, currently in beta**. It is not
 affiliated with or endorsed by Pixii, Home Assistant or an electricity aggregator.
 
+## Disclaimer — use at your own risk
+
+**All installation, configuration and use, including physical battery control,
+are entirely at your own risk and responsibility.** You are responsible for
+checking compatibility, safe settings, applicable requirements and any agreements
+with your energy provider or aggregator before enabling control.
+
+The software is provided **"as is", without warranty of any kind**, as set out in
+the [MIT license](LICENSE). To the extent permitted by applicable law, the authors
+and contributors accept no liability for equipment damage, battery degradation,
+financial losses, service interruptions or other losses arising from its use.
+
 ## Requirements
 
 - Home Assistant **2026.9.3 or newer**. This is the tested baseline, not a promise
@@ -108,3 +120,15 @@ HACS, then restart. External schedules are managed at their source.
 
 [MIT](LICENSE). The project icon is original artwork for this community integration.
 Pixii and other product names remain the property of their respective owners.
+
+## Support development
+
+If Pixiihome Controller helps you, support is welcome but never expected:
+
+<a href="https://buymeacoffee.com/lemehavit">
+  <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" height="50" alt="Buy Me a Coffee">
+</a>
+
+<a href="https://paypal.me/lemehavit">
+  <img src="https://img.shields.io/badge/PayPal-Support%20me-0070BA?logo=paypal&logoColor=white" height="50" alt="PayPal">
+</a>
