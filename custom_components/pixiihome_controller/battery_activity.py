@@ -145,7 +145,7 @@ class BatteryActivityTracker:
             if direction is not None:
                 self.direction, self._pending = direction, None
             if not first or service != 0:
-                self._log(now, self._service_text(service))
+                self._log(now, self._service_text(service), self._why())
             changed = True
         if direction is not None and direction != self.direction:
             if self.direction is None:
@@ -158,7 +158,7 @@ class BatteryActivityTracker:
                 self._pending = None
                 if self.service is not None:
                     self.cause = self._cause(self.service, now)
-                self._log(now, self._direction_text(direction))
+                self._log(now, self._direction_text(direction), self._why())
                 changed = True
         elif direction == self.direction:
             self._pending = None
@@ -169,9 +169,35 @@ class BatteryActivityTracker:
         for listener in tuple(self._listeners):
             listener()
 
-    def _log(self, now: datetime, message: str) -> None:
+    def _log(self, now: datetime, message: str, cause: str | None = None) -> None:
         self.recent.appendleft((now.isoformat(), message))
-        log_activity(self.runtime, STATUS_KEY, message)
+        log_activity(self.runtime, STATUS_KEY, message, cause)
+
+    def _why(self) -> str:
+        """Who made the battery do this and why, in full sentences."""
+        measured = self._measurements()
+        tail = f" Measured: {measured}." if measured else ""
+        if self.service in (None, 0):
+            return "No service is running, so the battery follows no command." + tail
+        label = service_type_label(self.service)
+        cause = self.cause
+        if cause is None:
+            return f"The battery runs {label}; the cause is unknown." + tail
+        window = f" ({cause.window})" if cause.window else ""
+        if cause.source.startswith("external") or cause.source.startswith("schedule of"):
+            return (
+                f"Who: {cause.source}{window}, {cause.detail}. Why: that schedule runs {label} "
+                "now. It was not created by this integration, which leaves it untouched."
+                + tail
+            )
+        if cause.source == "not started by this integration":
+            return (
+                f"Who: unknown. Why: the battery runs {label}, but no schedule from this "
+                "integration or in the Gateway list covers this time. It may be the "
+                "Gateway's own control, the aggregator directly or a manual command." + tail
+            )
+        detail = f" Why: {cause.detail}." if cause.detail else ""
+        return f"Who: {cause.source}{window} (this integration).{detail}" + tail
 
     # ----- texts -------------------------------------------------------------------
 
@@ -360,10 +386,20 @@ class BatteryActivityTracker:
             return
         for key, (text, _end) in current.items():
             if key not in previous:
-                self._log(now, f"New external schedule in the Gateway: {text}")
+                self._log(
+                    now, f"New external schedule in the Gateway: {text}",
+                    "Who: created outside this integration (for example by the aggregator, "
+                    "the Pixii app or the installer). Why: unknown to this integration; it "
+                    "was found in the Gateway's schedule list and will run at that time "
+                    "unless it is removed. This integration never changes it.",
+                )
         for key, (text, end) in previous.items():
             if key not in current and end > epoch:
-                self._log(now, f"External schedule removed from the Gateway: {text}")
+                self._log(
+                    now, f"External schedule removed from the Gateway: {text}",
+                    "Who: removed outside this integration before it ended. This "
+                    "integration did not remove it.",
+                )
 
 
 def own_schedule_owner(runtime: Any, schedule: Any) -> str | None:

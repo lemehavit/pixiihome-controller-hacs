@@ -620,3 +620,42 @@ async def test_lowered_target_is_restored_when_no_longer_held():
 
     assert calls and calls[-1]["new_reference"] == 90.0
     assert calls[-1]["allow_delete"] is False
+
+
+def test_owned_record_matches_its_unique_gateway_entry_only():
+    from custom_components.pixiihome_controller.price_controller import _record_matches_schedule
+    from custom_components.pixiihome_controller.scheduler.models import (
+        Ownership,
+        ScheduleCompleteness,
+        ScheduleConsistency,
+        SchedulerOwnership,
+    )
+    from custom_components.pixiihome_controller.scheduler.ownership import OwnershipLifecycle
+
+    start = datetime(2026, 10, 21, 21, 0, tzinfo=UTC)
+    record = SimpleNamespace(
+        m_id=1000000000042,
+        service="peakshaving",
+        lifecycle=OwnershipLifecycle.OWNED,
+        intended_state={"starttime": "2026-10-21T21:00:00Z", "duration": 2700},
+    )
+
+    def entry(index, ownership=Ownership.UNKNOWN):
+        epoch = int(start.timestamp())
+        return SimpleNamespace(
+            sch_index=index, service_no=index, start_epoch=epoch, end_epoch=epoch + 2700,
+            duration_seconds=2700, service_type=104, enabled=True,
+            recurrence=SimpleNamespace(recurring=False),
+            completeness=ScheduleCompleteness.COMPLETE,
+            consistency=ScheduleConsistency.CONSISTENT,
+            ownership=SchedulerOwnership(ownership),
+        )
+
+    ours = entry(1)
+    assert _record_matches_schedule(record, ours, [ours])
+    twin = entry(2)
+    assert not _record_matches_schedule(record, ours, [ours, twin])
+    foreign = entry(3, Ownership.EXTERNAL)
+    assert not _record_matches_schedule(record, foreign, [foreign])
+    provisional = SimpleNamespace(**{**vars(record), "lifecycle": OwnershipLifecycle.PROVISIONAL})
+    assert not _record_matches_schedule(provisional, ours, [ours])

@@ -100,7 +100,9 @@ installation reports locally. See [SECURITY.md](../SECURITY.md) for private repo
 ## Activity log
 
 Open **Logbook** and filter on the **Battery activity** sensor (or a feature's
-status sensor) to see what happened and why:
+status sensor) to see what happened. Click an entry: **What happened** says who
+caused it and why. In the unfiltered logbook these explanations also appear as
+separate *Pixiihome Controller* rows.
 
 | Entry | Means |
 | --- | --- |

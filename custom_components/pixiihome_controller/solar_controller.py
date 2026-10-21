@@ -113,7 +113,8 @@ class SolarChargingController:
     def _publish(self, status: str, reason: str | None = None) -> None:
         if self.status == "active" and status not in {"active", "starting"}:
             why = reason_text(reason) or status.replace("_", " ")
-            log_activity(self.runtime, "solar_charging_status", f"Stopping solar charging: {why}")
+            log_activity(self.runtime, "solar_charging_status", f"Stopping solar charging: {why}",
+                         f"Who: automatic solar charging. Why: {why}.")
         self.status, self.reason = status, reason
         for listener in tuple(self._listeners):
             listener()
@@ -560,7 +561,10 @@ class SolarChargingController:
         else:
             log_activity(self.runtime, "solar_charging_status",
                          f"Started solar charging of surplus ({duration // 60} min lease, renewed "
-                         "while surplus lasts)")
+                         "while surplus lasts)",
+                         "Who: automatic solar charging. Why: export to the grid stayed above "
+                         "the start threshold for the debounce time, so the surplus is stored "
+                         "instead of sold.")
         self._publish("active")
 
     async def _retire_at_soc_limit(self) -> None:
