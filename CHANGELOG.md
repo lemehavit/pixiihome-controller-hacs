@@ -1,12 +1,7 @@
 # Changelog
 
-## 0.5.1 — 2026-10-21
+## 0.5.2 — 2026-10-21
 
-- Battery activity no longer reports this integration's own price, solar or
-  APS schedules as external schedules of unknown source.
-- The scheduler card lists upcoming schedules first, marks ended ones, and
-  names schedules created by this integration (for example *Prisoptimering*).
-- **Battery savings today** gains a `this_week_sek` attribute (Monday to today).
 - Logbook entries now fill Home Assistant's **What happened** with who caused the
   activity and why (price, expected profit and minimum for price schedules,
   the external source for foreign schedules, the reason for stops).
@@ -16,6 +11,14 @@
   owner, so an OWNED record (proven by its keyed readback) now matches the one
   complete, consistent one-shot entry with exactly its start, duration and
   service. Two identical entries still block.
+
+## 0.5.1 — 2026-10-21
+
+- Battery activity no longer reports this integration's own price, solar or
+  APS schedules as external schedules of unknown source.
+- The scheduler card lists upcoming schedules first, marks ended ones, and
+  names schedules created by this integration (for example *Prisoptimering*).
+- **Battery savings today** gains a `this_week_sek` attribute (Monday to today).
 
 ## 0.5.0 — 2026-10-21
 
