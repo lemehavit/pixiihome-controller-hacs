@@ -33,7 +33,9 @@ class Telemetry:
 
 def _runtime(schedules: tuple[Any, ...] = ()) -> SimpleNamespace:
     events: list[dict[str, Any]] = []
-    hass = SimpleNamespace(bus=SimpleNamespace(async_fire=lambda event, data: events.append(data)))
+    hass = SimpleNamespace(bus=SimpleNamespace(
+        async_fire=lambda event, data, **_: events.append(data) if event == "logbook_entry" else None
+    ))
     snapshot = SimpleNamespace(schedules=schedules)
     return SimpleNamespace(
         hass=hass,

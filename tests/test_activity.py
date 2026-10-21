@@ -12,8 +12,9 @@ class Bus:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict]] = []
 
-    def async_fire(self, event: str, data: dict) -> None:
-        self.events.append((event, data))
+    def async_fire(self, event: str, data: dict, **_: object) -> None:
+        if event == "logbook_entry":
+            self.events.append((event, data))
 
 
 def test_activity_entry_is_a_logbook_event_and_never_raises() -> None:
@@ -50,3 +51,19 @@ async def test_price_schedule_creation_is_logged_with_time_power_and_profit() ->
     assert all(message.startswith("Scheduled ") and " kW" in message and "kr/kWh" in message
                for message in messages)
     assert controller.status != "planning"
+
+
+def test_cause_is_fired_first_in_the_same_context() -> None:
+    from custom_components.pixiihome_controller.activity import EVENT_CAUSE
+
+    fired: list[tuple[str, dict, object]] = []
+
+    class ContextBus:
+        def async_fire(self, event: str, data: dict, context: object = None) -> None:
+            fired.append((event, data, context))
+
+    runtime = SimpleNamespace(hass=SimpleNamespace(bus=ContextBus()), serial="1")
+    log_activity(runtime, "price_optimization_status", "Scheduled charge", "Who: price")
+    assert [event for event, _, _ in fired] == [EVENT_CAUSE, "logbook_entry"]
+    assert fired[0][1]["message"] == "Who: price"
+    assert fired[0][2] is fired[1][2] is not None
