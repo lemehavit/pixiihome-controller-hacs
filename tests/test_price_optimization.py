@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from custom_components.pixiihome_controller.control.price_optimization import (
+    ExternalWindow,
     PriceDirection,
     PriceDischargeMode,
     PriceOptimizationConfig,
@@ -29,7 +30,7 @@ def greenely(*prices: float):
 def plan(
     series, *, export_allowed=False, export_delta=1.0, grid_import_cost=0.0,
     initial_soc=50, charge_kw=2, discharge_kw=2,
-    minimum_profit=0.5, cycle_cost=0.0, end_before=None,
+    minimum_profit=0.5, cycle_cost=0.0, end_before=None, windows=(),
 ):
     return build_price_plan(
         series,
@@ -49,6 +50,7 @@ def plan(
         cycle_cost_sek_per_kwh=cycle_cost,
         grid_import_cost_sek_per_kwh=grid_import_cost,
         end_before=end_before,
+        external_windows=windows,
     )
 
 
@@ -301,3 +303,47 @@ def test_config_requires_sensor_entity_and_explicit_optional_source() -> None:
     assert config.managed_source_id == 7
     with pytest.raises(ValueError, match="price_entity_invalid"):
         PriceOptimizationConfig.from_mapping({"price_entity_id": "switch.wrong"})
+
+
+def _hour(index: int) -> datetime:
+    return datetime(2026, 10, 15, 22, tzinfo=UTC) + timedelta(hours=index)
+
+
+def test_plan_continues_past_known_target_soc_window_from_its_target() -> None:
+    window = ExternalWindow(_hour(1), _hour(2), 90.0)
+
+    result = plan(greenely(0.5, 1.0, 0.5, 3.0), windows=(window,))
+
+    assert result.ready
+    assert not any(a.start < window.end and window.start < a.end for a in result.actions)
+    discharge = [a for a in result.actions if a.direction is PriceDirection.DISCHARGE]
+    assert discharge and discharge[-1].start == _hour(3)
+    # Energy after the window is the target, bought at the window's price.
+    assert discharge[-1].reference_price_sek_per_kwh == pytest.approx(1.0)
+
+
+def test_unknown_external_energy_still_ends_the_plan_at_its_start() -> None:
+    window = ExternalWindow(_hour(1), _hour(2), None)
+
+    result = plan(greenely(0.5, 1.0, 0.5, 3.0), windows=(window,))
+
+    assert all(a.end <= window.start for a in result.actions)
+
+
+def test_stored_energy_is_only_sold_before_a_target_window_above_its_refill_price() -> None:
+    prices = greenely(0.4, 0.4, 2.0, 3.0, 0.5)
+    window = ExternalWindow(_hour(3), _hour(4), 90.0)
+
+    unconstrained = plan(prices, initial_soc=80, end_before=_hour(3))
+    constrained = plan(prices, initial_soc=80, windows=(window,))
+
+    sold = [a for a in unconstrained.actions if a.direction is PriceDirection.DISCHARGE]
+    assert sold and sold[0].reference_price_sek_per_kwh < 3.0
+    for action in constrained.actions:
+        assert action.end <= window.start or action.start >= window.end
+        if action.direction is PriceDirection.DISCHARGE and action.end <= window.start:
+            # Anything sold here must have been charged here, never the
+            # stored energy that the window would rebuy at 3.0.
+            assert action.reference_price_sek_per_kwh < 3.0
+            assert any(a.direction is PriceDirection.CHARGE and a.end <= action.start
+                       for a in constrained.actions)

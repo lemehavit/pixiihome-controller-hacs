@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.9 — 2026-10-21
+
+- Price optimization plans past one-shot external Target SOC schedules: it reads
+  each target, assumes that level after the window and keeps planning instead of
+  stopping at the next external schedule. Stored energy sold before such a window
+  is valued at the window's price; energy charged in the same gap keeps its own.
+- While a known external schedule runs, owned schedules that start after its end
+  may be written. Unknown external activity still blocks writes.
+- New attribute `busy_until` shows when such a running external schedule ends.
+
 ## 0.3.8 — 2026-10-21
 
 - Price optimization plans with the remaining known prices instead of waiting for

@@ -13,6 +13,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 
 from .control.price_optimization import (
     CONF_PRICE_OPTIMIZATION,
+    ExternalWindow,
     PriceDirection,
     PriceOptimizationConfig,
     PricePlan,
@@ -67,7 +68,9 @@ class PriceOptimizationController:
         self.external_move_count = 0
         self.current_service: int | None = None
         self._source_fingerprint: str | None = None
-        self._available_until: datetime | None = None
+        self._external_windows: tuple[ExternalWindow, ...] = ()
+        self._target_cache: dict[tuple[int, int, int, int], float] = {}
+        self.busy_until: datetime | None = None
         self._planned_settings: dict[str, Any] | None = None
         self._planned_policy: dict[str, Any] | None = None
         self._external_move_times: deque[datetime] = deque()
@@ -154,6 +157,12 @@ class PriceOptimizationController:
             "deleted_schedule_count": self.delete_count,
             "managed_external_move_count": self.external_move_count,
             "current_service": self.current_service,
+            "busy_until": self.busy_until.isoformat() if self.busy_until else None,
+            "external_windows": [
+                {"start": w.start.isoformat(), "end": w.end.isoformat(),
+                 "target_usable_soc_percent": w.target_usable_soc_percent}
+                for w in self._external_windows
+            ],
             "last_planned_at": (
                 self.last_planned_at.isoformat() if self.last_planned_at is not None else None
             ),
@@ -468,8 +477,8 @@ class PriceOptimizationController:
         if not bool(
             self.runtime.operational_settings.get("price_schedule_writes_enabled")
         ):
-            self._without_external_conflicts(plan.actions)
-            self.plan = self._build_plan(series, limits, self._available_until)
+            await self._load_external_windows(plan.actions)
+            self.plan = self._build_plan(series, limits, windows=self._external_windows)
             self._publish("preview", "price_schedule_writes_disabled")
             return
         move_count_before = self.external_move_count
@@ -477,12 +486,16 @@ class PriceOptimizationController:
             return
         if self.external_move_count > move_count_before:
             await coordinator.async_refresh()
-        self._without_external_conflicts(plan.actions)
-        self.plan = self._build_plan(series, limits, self._available_until)
+        await self._load_external_windows(plan.actions)
+        self.plan = self._build_plan(series, limits, windows=self._external_windows)
         if not self.plan.ready:
             self._publish("waiting_for_priority", "price_external_schedule_energy_unknown")
             return
         actions = self.plan.actions
+        if self.busy_until is not None:
+            # Written while a known external interval runs: never anything
+            # that could start before that interval has ended.
+            actions = tuple(a for a in actions if a.start >= self.busy_until)
         # Only apply the first cycle. Self-consumption, background controllers
         # and support interruptions can change the real energy before another
         # cycle. Later cycles remain proposals until fresh SoC is measured.
@@ -497,13 +510,20 @@ class PriceOptimizationController:
         self._publish("active" if actions else "ready")
 
     async def _priority_allows_mutation(self) -> bool:
-        """Allow idle or our verified background APS; protect every other actor."""
+        """Allow idle, our verified background APS, or writes after a known external end.
+
+        A running external service is only tolerated when the scheduler
+        inventory shows exactly which enabled schedule it is and when it ends;
+        then only schedules starting after that end may be written.
+        """
         service = self.runtime.telemetry.value("core", "srv_type")
         self.current_service = service if type(service) is int else None
+        self.busy_until = None
         if self.current_service == 0:
             return True
         if self.current_service != 105:
-            return False
+            self.busy_until = self._known_external_end(self.current_service)
+            return self.busy_until is not None
         for name in ("solar_charging_controller", "adaptive_peak_shaving_controller"):
             controller = getattr(self.runtime, name, None)
             if controller is not None and controller.owns_live_lease():
@@ -546,7 +566,12 @@ class PriceOptimizationController:
         return True
 
     def _build_plan(
-        self, series: PriceSeries, limits: dict[str, float], end_before: datetime | None = None,
+        self,
+        series: PriceSeries,
+        limits: dict[str, float],
+        end_before: datetime | None = None,
+        *,
+        windows: tuple[ExternalWindow, ...] = (),
     ) -> PricePlan:
         config = self.config
         battery = self.runtime.battery
@@ -591,6 +616,7 @@ class PriceOptimizationController:
             cycle_cost_sek_per_kwh=limits["cycle_cost"],
             grid_import_cost_sek_per_kwh=limits["grid_import_cost"],
             end_before=end_before,
+            external_windows=windows,
         )
 
     def _validated_limits(self) -> dict[str, float]:
@@ -765,36 +791,94 @@ class PriceOptimizationController:
         self.owned_schedule_count = len(records)
         return records
 
-    def _without_external_conflicts(
-        self, actions: tuple[PricePlanAction, ...]
-    ) -> tuple[PricePlanAction, ...]:
+    def _known_external_end(self, service: int | None) -> datetime | None:
+        """End of the single enabled foreign schedule explaining ``service`` now."""
         manager = self.runtime.scheduler_manager
-        owned_records = self._price_records()
+        if manager is None or service is None:
+            return None
+        owned = self._price_records()
+        now = int(datetime.now(UTC).timestamp())
+        running = [
+            schedule for schedule in manager.normalized_schedules
+            if schedule.enabled
+            and schedule.service_type == service
+            and schedule.start_epoch <= now < schedule.end_epoch
+            and schedule.recurrence.recurring is False
+            and not any(_record_matches_schedule(record, schedule) for record in owned)
+        ]
+        if len(running) != 1:
+            return None
+        return datetime.fromtimestamp(running[0].end_epoch, UTC)
+
+    async def _load_external_windows(self, actions: tuple[PricePlanAction, ...]) -> None:
+        """Describe every protected foreign schedule for the planner.
+
+        A Target SOC window carries its expected resulting usable SOC, read from
+        the Gateway; any other service, or an unreadable target, has unknown
+        resulting energy and ends planning at its start.
+        """
+        manager = self.runtime.scheduler_manager
+        owned = self._price_records()
         schedules = () if manager is None else tuple(manager.normalized_schedules)
-        accepted: list[PricePlanAction] = []
-        conflicts = 0
-        # Any external action can change stored energy. Never retain a later
-        # discharge which relied on a filtered charge or an unknown future SoC.
-        # Replan after that external interval using fresh measured battery SoC.
-        protected = [schedule for schedule in schedules if schedule.enabled and not any(
-            _record_matches_schedule(record, schedule) for record in owned_records
-        )]
-        now_epoch = int(datetime.now(UTC).timestamp())
-        cutoff = min(
-            (schedule.start_epoch for schedule in protected if schedule.end_epoch > now_epoch),
-            default=None,
+        now = int(datetime.now(UTC).timestamp())
+        battery = self.runtime.battery
+        gateway = self.runtime.gateway_scheduler
+        span = (
+            battery.effective_max_soc - battery.effective_min_soc
+            if battery.effective_min_soc is not None and battery.effective_max_soc is not None
+            else None
         )
-        self._available_until = (datetime.fromtimestamp(cutoff, UTC)
-                                 if cutoff is not None else None)
-        for action in actions:
-            end = int(action.end.timestamp())
-            overlap = cutoff is not None and end > cutoff
-            if overlap:
-                conflicts += 1
-            else:
-                accepted.append(action)
-        self.external_conflict_count = conflicts
-        return tuple(accepted)
+        windows: list[ExternalWindow] = []
+        keys: set[tuple[int, int, int, int]] = set()
+        for schedule in sorted(schedules, key=lambda item: item.start_epoch):
+            if (
+                not schedule.enabled
+                or schedule.end_epoch <= now
+                or any(_record_matches_schedule(record, schedule) for record in owned)
+            ):
+                continue
+            target: float | None = None
+            if (
+                schedule.service_type == _SERVICE_TYPE["targetsoc"]
+                and gateway is not None
+                and span is not None
+                and span > 0
+                and battery.effective_min_soc is not None
+            ):
+                key = (schedule.sch_index, schedule.service_no,
+                       schedule.start_epoch, schedule.duration_seconds)
+                keys.add(key)
+                reference = self._target_cache.get(key)
+                if reference is None:
+                    try:
+                        value = float(
+                            (await gateway.client.read_target_soc(schedule.service_no))[
+                                "reference"
+                            ]
+                        )
+                    except Exception:  # noqa: BLE001 - unreadable means unknown energy
+                        value = float("nan")
+                    if isfinite(value):
+                        reference = self._target_cache[key] = value
+                if reference is not None:
+                    target = min(
+                        100.0,
+                        max(0.0, (reference - battery.effective_min_soc) * 100 / span),
+                    )
+            windows.append(ExternalWindow(
+                datetime.fromtimestamp(schedule.start_epoch, UTC),
+                datetime.fromtimestamp(schedule.end_epoch, UTC),
+                target,
+            ))
+        for stale in set(self._target_cache) - keys:
+            del self._target_cache[stale]
+        self._external_windows = tuple(windows)
+        unknown_from = min((window.start for window in windows if not window.known), default=None)
+        self.external_conflict_count = sum(
+            1 for action in actions
+            if (unknown_from is not None and action.end > unknown_from)
+            or any(window.start < action.end and action.start < window.end for window in windows)
+        )
 
     async def _reconcile(self, actions: tuple[PricePlanAction, ...]) -> bool:
         manager = self.runtime.scheduler_mutation_manager

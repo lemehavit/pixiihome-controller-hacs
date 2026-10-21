@@ -50,7 +50,7 @@ returned action errors. They explain blockers rather than authorizing bypasses.
 | `production_control_disabled`, `release_gate_closed` | Required production authority is not enabled. | Leave off for monitoring, or review [authority/policy](control-policy.md) before enabling the intended operation. |
 | `automation_policy_not_authorized`, `price_automation_policy_not_authorized` | Policy disabled, incomplete or missing required services/classes/limits. | Review every field and increase revision when changing it. A switch does not create a policy. |
 | `waiting_telemetry`, `plant_telemetry_not_safe`, `telemetry_stale` | Required fresh safe measurements are missing. | Verify each family; connectivity on only proves at least one is fresh. |
-| `waiting_for_idle`, `waiting_for_priority`, `non_idle_service_active` | Another native operation or unverified state prevents this operation. | Inspect current service and schedules; wait for the conflicting actor. |
+| `waiting_for_idle`, `waiting_for_priority`, `non_idle_service_active` | Another native operation or unverified state prevents this operation. Price writes during an external run are only allowed when that run matches one known schedule. | Inspect current service and schedules; wait for the conflicting actor. |
 | `solar_conflicts_with_adaptive_peak_shaving`, `aps_conflicts_with_automatic_solar_charging` | Both controllers would own native APS. | Choose one and verify cleanup before switching modes. |
 | `waiting_surplus` | No sustained solar surplus, or start debounce has not elapsed. | Compare thresholds/debounce with actual meter power. |
 | `soc_limit` | Solar usable-SOC ceiling reached. | Expected waiting behavior; do not change a ceiling just to force charging. |

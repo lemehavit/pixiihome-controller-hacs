@@ -99,6 +99,33 @@ class PriceInterval:
 
 
 @dataclass(frozen=True, slots=True)
+class ExternalWindow:
+    """A protected external interval the plan must route around.
+
+    ``target_usable_soc_percent`` is the usable SOC the external Target SOC
+    service is expected to leave behind. ``None`` means the energy after the
+    window is unknown, so planning ends at its start.
+    """
+
+    start: datetime
+    end: datetime
+    target_usable_soc_percent: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.start.tzinfo is None or self.end.tzinfo is None or self.end <= self.start:
+            raise ValueError("external_window_invalid")
+        target = self.target_usable_soc_percent
+        if target is not None and (not isfinite(target) or not 0 <= target <= 100):
+            object.__setattr__(self, "target_usable_soc_percent", None)
+        object.__setattr__(self, "start", self.start.astimezone(UTC))
+        object.__setattr__(self, "end", self.end.astimezone(UTC))
+
+    @property
+    def known(self) -> bool:
+        return self.target_usable_soc_percent is not None
+
+
+@dataclass(frozen=True, slots=True)
 class PriceSeries:
     intervals: tuple[PriceInterval, ...]
     unit: str
@@ -240,11 +267,17 @@ def build_price_plan(
     cycle_cost_sek_per_kwh: float,
     grid_import_cost_sek_per_kwh: float,
     end_before: datetime | None = None,
+    external_windows: Sequence[ExternalWindow] = (),
 ) -> PricePlan:
     """Plan using minimum net profit per AC kWh delivered by the battery.
 
     The legacy ``*_difference`` parameter names remain for persisted-entity
     compatibility. Their values are net-profit floors, after all costs.
+
+    External windows are never planned over. A window with a known Target SOC
+    resets the simulated energy to that target afterwards, so the plan
+    continues past it; the energy it buys is valued at the window's price.
+    A window with unknown resulting energy ends the plan at its start.
     """
     if now.tzinfo is None:
         raise ValueError("price_plan_now_naive")
@@ -285,6 +318,15 @@ def build_price_plan(
         if end_before.tzinfo is None:
             raise ValueError("price_plan_end_naive")
         end_limit = min(end_limit, end_before.astimezone(UTC))
+    windows = sorted(
+        (window for window in external_windows if window.end > current),
+        key=lambda window: window.start,
+    )
+    for window in windows:
+        if not window.known:
+            end_limit = min(end_limit, max(window.start, current))
+            break
+    windows = [window for window in windows if window.known and window.start < end_limit]
     candidates = tuple(
         item for item in series.intervals if item.start >= start_limit and item.end <= end_limit
     )
@@ -306,22 +348,51 @@ def build_price_plan(
     min_soc = max_soc = usable_soc_percent
     expected_margin = 0.0
     actions: list[PricePlanAction] = []
+    # A segment is the stretch between two known external windows. Energy is
+    # only moved within one segment: the next Target SOC window overwrites the
+    # state of charge, and any energy discharged before it is bought back at
+    # that window's price.
+    blocked = [
+        any(window.start < item.end and item.start < window.end for window in windows)
+        for item in candidates
+    ]
+    segment = [sum(1 for window in windows if window.end <= item.start) for item in candidates]
+    refill_price = [_mean_price(series, window.start, window.end) for window in windows]
+    active_segment: int | None = None
+    closing: float | None = None
+    stored_price = acquisition_price
+    charged_energy = charged_price = 0.0
 
     for index, item in enumerate(candidates):
+        if segment[index] != active_segment:
+            active_segment = segment[index]
+            if active_segment > 0:
+                reset = windows[active_segment - 1]
+                assert reset.target_usable_soc_percent is not None
+                energy = usable_capacity_kwh * reset.target_usable_soc_percent / 100
+                bought_at = refill_price[active_segment - 1]
+                if bought_at is not None:
+                    acquisition_price = bought_at
+            # Energy already stored when a segment starts and discharged before
+            # its closing Target SOC window is bought back at that window's
+            # price. Energy charged inside the segment keeps its own price and
+            # is sold first, so a short charge/discharge cycle stays possible.
+            closing = refill_price[active_segment] if active_segment < len(windows) else None
+            if closing is not None:
+                stored_price = max(acquisition_price, closing)
+                charged_energy = charged_price = 0.0
+        if blocked[index]:
+            continue
         price = item.price_sek_per_kwh
         hours = item.duration_hours
-        future_high = max(
-            (future.price_sek_per_kwh for future in candidates[index + 1 :]),
-            default=price,
-        )
-        future_low = min(
-            (future.price_sek_per_kwh for future in candidates[index:]),
-            default=price,
-        )
-        future_peak = max(
-            (future.price_sek_per_kwh for future in candidates[index:]),
-            default=price,
-        )
+        reachable = [
+            candidates[j].price_sek_per_kwh
+            for j in range(index, len(candidates))
+            if segment[j] == active_segment and not blocked[j]
+        ]
+        future_high = max(reachable[1:], default=price)
+        future_low = min(reachable, default=price)
+        future_peak = max(reachable, default=price)
         charge_spread = future_high - price
         charge_mode, charge_net = _qualifying_discharge(
             price, future_high,
@@ -343,7 +414,7 @@ def build_price_plan(
             maximum_charge_kw > 0
             and maximum_discharge_kw > 0
             and headroom > 1e-6
-            and index + 1 < len(candidates)
+            and len(reachable) > 1
             and price <= future_low + 1e-9
             and charge_mode is not None
         ):
@@ -351,9 +422,15 @@ def build_price_plan(
             if power < 0.05:
                 continue
             added_energy = power * hours * charge_efficiency
-            acquisition_price = (energy * acquisition_price + added_energy * price) / (
-                energy + added_energy
-            )
+            if closing is not None:
+                charged_price = (charged_energy * charged_price + added_energy * price) / (
+                    charged_energy + added_energy
+                )
+                charged_energy += added_energy
+            else:
+                acquisition_price = (energy * acquisition_price + added_energy * price) / (
+                    energy + added_energy
+                )
             energy += added_energy
             projected_soc = energy / usable_capacity_kwh * 100
             action = PricePlanAction(
@@ -372,8 +449,14 @@ def build_price_plan(
                 charge_net,
             )
         else:
+            basis = acquisition_price
+            if closing is not None:
+                if charged_energy > 1e-6:
+                    basis, available = charged_price, min(available, charged_energy)
+                else:
+                    basis = stored_price
             mode, discharge_net = _qualifying_discharge(
-                acquisition_price, price,
+                basis, price,
                 efficiency=round_trip_efficiency_percent / 100,
                 grid_cost=grid_import_cost_sek_per_kwh,
                 cycle_cost=cycle_cost_sek_per_kwh,
@@ -392,6 +475,8 @@ def build_price_plan(
                     continue
                 delivered = power * hours
                 energy -= delivered / discharge_efficiency
+                if closing is not None:
+                    charged_energy = max(0.0, charged_energy - delivered / discharge_efficiency)
                 projected_soc = energy / usable_capacity_kwh * 100
                 margin = delivered * discharge_net
                 expected_margin += margin
@@ -416,8 +501,8 @@ def build_price_plan(
                     values,
                     mode,
                     price,
-                    acquisition_price,
-                    price - acquisition_price,
+                    basis,
+                    price - basis,
                     projected_soc,
                     margin,
                     discharge_net,
@@ -439,6 +524,10 @@ def build_price_plan(
             "minimum_soc": minimum_soc_percent,
             "maximum_soc": maximum_soc_percent,
         },
+        "external_windows": [
+            [window.start.isoformat(), window.end.isoformat(), window.target_usable_soc_percent]
+            for window in windows
+        ],
     }
     fingerprint = sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -468,6 +557,17 @@ def _qualifying_discharge(
     if self_profit > 1e-9 and self_profit + 1e-9 >= minimum_profit:
         return PriceDischargeMode.SELF_CONSUMPTION, self_profit
     return None, 0.0
+
+
+def _mean_price(series: PriceSeries, start: datetime, end: datetime) -> float | None:
+    """Time-weighted price over one window; ``None`` when no price covers it."""
+    weighted = covered = 0.0
+    for item in series.intervals:
+        overlap = (min(item.end, end) - max(item.start, start)).total_seconds()
+        if overlap > 0:
+            weighted += item.price_sek_per_kwh * overlap
+            covered += overlap
+    return weighted / covered if covered > 0 else None
 
 
 def _blocked_plan(series: PriceSeries, blockers: tuple[str, ...], soc: float) -> PricePlan:
@@ -588,6 +688,7 @@ def _integer(value: object, minimum: int, maximum: int) -> int:
 
 __all__ = [
     "CONF_PRICE_OPTIMIZATION",
+    "ExternalWindow",
     "PriceDirection",
     "PriceDischargeMode",
     "PriceInterval",

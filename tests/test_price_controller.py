@@ -470,3 +470,45 @@ async def test_authority_release_reports_failures_without_retrying():
     assert problems == ["price_1000000000104_ack_timeout"]
     assert mutations.deleted == [1000000000104]
     assert controller.status == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_known_running_target_soc_allows_writes_only_after_its_end():
+    from dataclasses import replace
+
+    instance, mutations = runtime()
+    now = datetime.now(UTC).replace(microsecond=0)
+    running = external_schedule(now - timedelta(minutes=30), duration=3600)
+    instance.scheduler_manager.normalized_schedules = [running]
+    instance.telemetry.value = lambda family, key: 107
+    instance.battery = replace(instance.battery, effective_min_soc=0, effective_max_soc=100)
+
+    async def read_target(service_no):
+        assert service_no == running.service_no
+        return {"reference": 50}
+
+    instance.gateway_scheduler = SimpleNamespace(
+        client=SimpleNamespace(read_target_soc=read_target),
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    end = datetime.fromtimestamp(running.end_epoch, UTC)
+    assert controller.busy_until == end
+    assert mutations.created
+    assert all(request.starttime >= end for request in mutations.created)
+
+
+@pytest.mark.asyncio
+async def test_running_service_without_a_matching_schedule_still_blocks_writes():
+    instance, mutations = runtime()
+    later = datetime.now(UTC).replace(microsecond=0) + timedelta(hours=6)
+    instance.scheduler_manager.normalized_schedules = [external_schedule(later)]
+    instance.telemetry.value = lambda family, key: 107
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert controller.status == "waiting_for_priority"
+    assert mutations.created == []

@@ -120,8 +120,20 @@ schedules** permits its guarded reconciliation. It is not an immediate manual
 active service are checked again before each mutation.
 
 Only the first charge/discharge cycle is applied; later cycles remain proposals
-until fresh energy/SOC evidence is available. External activity, recurring or
-incomplete inventory and ambiguous identity can block the plan. The controller
+until fresh energy/SOC evidence is available. Recurring or incomplete inventory and
+ambiguous identity can block the plan.
+
+External schedules are never planned over. For a one-shot external Target SOC
+schedule the controller reads its target from the Gateway and assumes the battery
+is at that level when the window ends, so planning continues past it. Energy that
+was already stored and is sold before such a window is valued at the window's
+price, because the window buys it back; energy charged inside the same gap keeps
+its own price. Any other external service, or a target that cannot be read, has
+unknown resulting energy and ends the plan at that schedule's start.
+
+While a known external schedule is running (its service matches exactly one
+enabled one-shot schedule in the inventory), owned schedules that start after its
+end may still be written. An external service without such a schedule blocks writes. The controller
 does not infer ownership from a matching time, service number or `m_id` value.
 
 Enable **Allow price-optimized grid export** only if intended and compatible with
