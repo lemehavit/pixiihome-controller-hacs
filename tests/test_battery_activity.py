@@ -54,6 +54,7 @@ def _schedule(start: datetime, minutes: int, service: int, label: str | None) ->
     epoch = int(start.timestamp())
     return SimpleNamespace(
         sch_index=7, start_epoch=epoch, end_epoch=epoch + minutes * 60,
+        duration_seconds=minutes * 60,
         service_type=service, enabled=True,
         ownership=SchedulerOwnership(Ownership.EXTERNAL, label),
     )
@@ -123,3 +124,23 @@ def test_new_and_removed_external_schedules_are_logged() -> None:
     clock[0] += timedelta(seconds=15)
     tracker.sample()
     assert "removed" in runtime.events[-1]["message"]
+
+
+def test_our_own_price_schedule_is_not_reported_as_external() -> None:
+    start = NOW + timedelta(hours=1)
+    ours = _schedule(start, 45, 104, None)
+    record = SimpleNamespace(
+        lifecycle=SimpleNamespace(value="owned"),
+        owner="automatic_price_optimization",
+        service="peakshaving",
+        intended_state={"starttime": start.strftime("%Y-%m-%dT%H:%M:%SZ"), "duration": 2700},
+    )
+    runtime = _runtime()
+    runtime.scheduler_ownership = SimpleNamespace(records={1: record})
+    clock = [NOW]
+    tracker = _tracker(runtime, clock)
+    tracker.sample()
+    runtime.scheduler_coordinator.last_good_snapshot = SimpleNamespace(schedules=(ours,))
+    clock[0] += timedelta(seconds=15)
+    tracker.sample()
+    assert runtime.events == []

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 DOMAIN = "pixiihome_controller"
 NAME = "Pixiihome Controller"
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 CONF_SERIAL = "serial"
 CONF_RUNTIME_MODE = "runtime_mode"
 CONF_COMMAND_STATE = "command_state"

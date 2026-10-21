@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from math import isfinite
 from typing import Any
 
@@ -68,6 +68,13 @@ class SavingsTracker:
     @property
     def yesterday_sek(self) -> float | None:
         return self.history[-1][1] if self.history else None
+
+    def week_sek(self, instant: datetime) -> float:
+        """Monday to today, local time."""
+        local = instant.astimezone(STOCKHOLM).date()
+        monday = (local - timedelta(days=local.weekday())).isoformat()
+        total = sum(value for day, value in self.history if day >= monday)
+        return total + (self.today_sek if self.day and self.day >= monday else 0.0)
 
     def month_sek(self, instant: datetime) -> float:
         month = instant.astimezone(STOCKHOLM).strftime("%Y-%m")

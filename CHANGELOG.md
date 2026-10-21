@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1 — 2026-10-21
+
+- Battery activity no longer reports this integration's own price, solar or
+  APS schedules as external schedules of unknown source.
+- The scheduler card lists upcoming schedules first, marks ended ones, and
+  names schedules created by this integration (for example *Prisoptimering*).
+- **Battery savings today** gains a `this_week_sek` attribute (Monday to today).
+
 ## 0.5.0 — 2026-10-21
 
 - **Energy forecast** (Configure → Energy forecast): household consumption is

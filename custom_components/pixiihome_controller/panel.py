@@ -25,6 +25,7 @@ from homeassistant.components.websocket_api.decorators import (
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
+from .battery_activity import own_schedule_owner
 from .const import DOMAIN
 from .control.adapters import AdapterRequest
 from .control.journal import JournalPhase, JournalTargetIdentity
@@ -159,6 +160,13 @@ async def async_panel_state(hass: HomeAssistant) -> dict[str, Any]:
                     continue
     return panel_state(hass)
 
+OWNER_LABELS_SV = {
+    "price optimization": "Prisoptimering (denna integration)",
+    "solar charging": "Solladdning (denna integration)",
+    "adaptive peak shaving": "Adaptiv effekttoppskapning (denna integration)",
+}
+
+
 def _schedule_snapshot(runtime: RuntimeData) -> list[dict[str, Any]]:
     manager = runtime.scheduler_manager
     if (
@@ -168,10 +176,16 @@ def _schedule_snapshot(runtime: RuntimeData) -> list[dict[str, Any]]:
         return []
     schedules = _scheduler_snapshot(manager)
     cache = getattr(runtime, "scheduler_target_soc", {})
+    by_index = {item.sch_index: item for item in manager.normalized_schedules}
     for schedule in schedules:
         parameters = cache.get(schedule["service_no"])
         if schedule["service_type"] == 107 and parameters is not None:
             schedule["target_soc_percent"] = parameters["reference"]
+        index = schedule["sch_index"]
+        normalized = by_index.get(index) if isinstance(index, int) else None
+        owner = None if normalized is None else own_schedule_owner(runtime, normalized)
+        if owner is not None:
+            schedule["owner_label"] = OWNER_LABELS_SV.get(owner, owner)
     return schedules
 
 
