@@ -1,0 +1,178 @@
+query_running_service:
+  name: Query running service
+  description: Query the configured Pixii Gateway's current service without changing state.
+  fields:
+    config_entry_id:
+      name: Config entry ID
+      description: Required when multiple Pixii Gateway config entries are loaded.
+      required: false
+      selector:
+        text:
+
+
+refresh_scheduler_list:
+  name: Refresh scheduler list
+  description: Read the Pixii Gateway scheduler once for a bounded diagnostic time range without changing state.
+  fields:
+    config_entry_id:
+      name: Config entry ID
+      description: Required when multiple Pixii Gateway config entries are loaded.
+      required: false
+      selector:
+        text:
+    days_back:
+      name: Days back
+      description: Number of UTC days before now to include, from 0 through 31.
+      required: true
+      selector:
+        number:
+          mode: box
+          min: 0
+          max: 60
+          step: 1
+    days_forward:
+      name: Days forward
+      description: Number of UTC days after now to include, from 0 through 31.
+      required: true
+      selector:
+        number:
+          mode: box
+          min: 0
+          max: 60
+          step: 1
+
+refresh_scheduler_detail:
+  name: Refresh scheduler detail
+  description: Read one Pixii Gateway scheduler detail record without changing state.
+  fields:
+    config_entry_id:
+      name: Config entry ID
+      description: Required when multiple Pixii Gateway config entries are loaded.
+      required: false
+      selector:
+        text:
+    sch_index:
+      name: Scheduler index
+      description: Non-negative scheduler record index used for one read-only validation request.
+      required: true
+      selector:
+        number:
+          mode: box
+          min: 0
+          step: 1
+
+run_scheduler_validation_roundtrip:
+  name: Run scheduler validation roundtrip
+  description: Run one explicit, one-shot Target SoC scheduler CREATE/reconcile/DELETE validation roundtrip.
+  fields:
+    config_entry_id:
+      name: Config entry ID
+      description: Required when multiple Pixii Gateway config entries are loaded.
+      required: false
+      selector:
+        text:
+
+set_service_reference_delay:
+  name: Set service reference delay
+  description: Set the Pixii AMS service reference delay to the documented 10 seconds after verifying the exact current value and preserving the other installer-level settings.
+  fields:
+    config_entry_id:
+      name: Config entry ID
+      description: Required when multiple Pixii Gateway config entries are loaded.
+      required: false
+      selector:
+        text:
+    expected_delay:
+      name: Expected current delay
+      description: The current delay in seconds. The write is rejected if the Gateway value has changed.
+      required: true
+      selector:
+        number:
+          mode: box
+          min: 0
+          max: 60
+          step: 1
+
+run_meter_limitation_soft_limit_trial:
+  name: Run meter limitation soft-limit trial
+  description: >-
+    Run one 20-second, installer-only Service 120 soft-limit test. The action
+    limits the requested correction to 300 W, keeps every hard limit disabled,
+    requires the pristine disabled state and restores the complete original
+    record before returning.
+  fields:
+    config_entry_id:
+      name: Config entry ID
+      description: Required when multiple Pixii Gateway config entries are loaded.
+      required: false
+      selector:
+        text:
+    direction:
+      name: Direction field
+      description: Gateway field to test; exp and gen are verified separately.
+      required: true
+      selector:
+        select:
+          options:
+            - exp
+            - gen
+    max_correction_w:
+      name: Maximum correction
+      description: Maximum requested change from the measured grid-flow magnitude.
+      required: true
+      selector:
+        number:
+          min: 50
+          max: 300
+          step: 50
+          unit_of_measurement: W
+          mode: box
+recover_expired_price_validation:
+  name: Reserve an expired own price validation identity
+  description: >-
+    Administrator-only recovery using saved identified GET/DELETE evidence,
+    conservative expiry, fresh scheduler reads and two new healthy idle samples.
+    Keeps the old failed transaction and allocator identity. Sends no SET,
+    CREATE or DELETE and requires all seven switches off. Dry run is the default.
+  fields:
+    config_entry_id:
+      name: Config entry ID
+      selector:
+        text:
+    evidence:
+      name: Saved validation evidence
+      required: true
+      selector:
+        object:
+    dry_run:
+      name: Validate without saving journal state
+      default: true
+      selector:
+        boolean:
+run_price_guard_validation:
+  name: Validate price SOC guard on real battery
+  description: >-
+    Administrator-only physical test on an idle battery. Creates one zero-export
+    peak-shaving interval capped at 300 W and 40 seconds (or explicitly 120), then verifies its own
+    SOC-stop path using a temporary bound for that test identity only.
+    Then observes a second 300 W/25 second interval yielding to a 0 W/15 second
+    Demand Response activation. This is not an FCR/FFR support-service test.
+    Does not change saved settings or foreign schedules.
+  fields:
+    duration_seconds:
+      name: Maximum test interval
+      description: Explicitly select 120 seconds to allow native regulation to settle.
+      default: 40
+      selector:
+        select:
+          options:
+            - label: "40 seconds"
+              value: "40"
+            - label: "120 seconds"
+              value: "120"
+          mode: dropdown
+    config_entry_id:
+      name: Config entry ID
+      required: false
+      selector:
+        text:

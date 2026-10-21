@@ -1,0 +1,23 @@
+{
+  "domain": "pixiihome_controller",
+  "name": "Pixiihome Controller",
+  "after_dependencies": [
+    "recorder"
+  ],
+  "codeowners": [
+    "@lemehavit"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "frontend",
+    "http",
+    "mqtt",
+    "websocket_api"
+  ],
+  "documentation": "https://github.com/lemehavit/pixiihome-controller-hacs",
+  "integration_type": "device",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/lemehavit/pixiihome-controller-hacs/issues",
+  "requirements": [],
+  "version": "0.3.7"
+}

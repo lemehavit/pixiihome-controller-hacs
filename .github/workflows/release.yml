@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/release-checks.yml
+  package:
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - run: python scripts/build_release.py --version "$RELEASE_TAG"
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+      - name: Create a draft release for maintainer review
+        run: gh release create "$RELEASE_TAG" dist/pixiihome_controller.zip --draft --title "Pixiihome Controller $RELEASE_TAG (beta)" --notes-file CHANGELOG.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}

@@ -1,0 +1,9 @@
+{
+  "method": "set",
+  "service": "targetsoc",
+  "m_id": 240000001,
+  "values": {
+    "socref": 80
+  },
+  "duration": 7200
+}

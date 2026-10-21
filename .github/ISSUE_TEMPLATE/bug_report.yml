@@ -1,0 +1,36 @@
+name: Bug report
+description: Report an integration problem with an anonymized reproduction.
+body:
+  - type: markdown
+    attributes:
+      value: "Keep credentials, serials, hostnames, raw journals and MQTT/HAR captures private. For vulnerabilities, use Security → Report a vulnerability."
+  - type: input
+    id: version
+    attributes:
+      label: Integration version
+    validations:
+      required: true
+  - type: input
+    id: homeassistant
+    attributes:
+      label: Home Assistant version
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Gateway firmware (or simulator)
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction, expected behavior and actual behavior
+      description: Include whether control authority/controllers were enabled. Do not run physical tests for this report.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Reviewed, anonymized diagnostics or error text
+      render: text

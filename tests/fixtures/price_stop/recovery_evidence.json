@@ -1,0 +1,61 @@
+{
+  "config_entry_id": "test-config-entry",
+  "gateway_serial": "TEST_GATEWAY_001",
+  "m_id": 1000000000006,
+  "create_transaction_id": "scheduler-test-create",
+  "delete_transaction_id": "scheduler-test-delete",
+  "get_before": {
+    "at": "2026-10-18T19:10:03.716393+00:00",
+    "topic": "pixii/ack/TEST_GATEWAY_001",
+    "payload": {
+      "m_id": 1000000000006,
+      "method": "get",
+      "response": 65535,
+      "service": "peakshaving",
+      "values": {
+        "charge_max": 0,
+        "discharge_max": 300,
+        "duration": 120,
+        "exportlim": 0,
+        "importlim": 0,
+        "keep_active": true,
+        "service_duration_left": 7311,
+        "service_status": 5,
+        "starttime": "2026-10-18T19:09:54Z"
+      }
+    }
+  },
+  "delete_ack": {
+    "at": "2026-10-18T19:10:03.823317+00:00",
+    "topic": "pixii/ack/TEST_GATEWAY_001",
+    "payload": {
+      "m_id": 1000000000006,
+      "method": "delete",
+      "response": 65535,
+      "response_msg": "",
+      "service": "peakshaving"
+    }
+  },
+  "early_idle_samples": [
+    {
+      "at": "2026-10-18T19:10:08.206509+00:00",
+      "topic": "pixii/status/TEST_GATEWAY_001/core",
+      "payload": {
+        "srv_type": 0,
+        "ac_w": 0,
+        "sys_status": 1,
+        "grid_status": 1
+      }
+    },
+    {
+      "at": "2026-10-18T19:10:13.202409+00:00",
+      "topic": "pixii/status/TEST_GATEWAY_001/core",
+      "payload": {
+        "srv_type": 0,
+        "ac_w": 0,
+        "sys_status": 1,
+        "grid_status": 1
+      }
+    }
+  ]
+}

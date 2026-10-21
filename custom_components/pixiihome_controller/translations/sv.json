@@ -1,0 +1,339 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Lägg till Pixiihome Controller",
+        "description": "Välj en produktions-Gateway eller en isolerad lokal simulator. Produktion kräver Home Assistant MQTT och ett Gateway-serienummer; simulatorn kontaktar aldrig MQTT.",
+        "data": {
+          "runtime_mode": "Körläge",
+          "serial": "Gateway-serienummer (endast produktion)"
+        },
+        "data_description": {
+          "runtime_mode": "Produktion observerar en fysisk Gateway med skrivning blockerad. Simulatorn ger säkra lokala förhandsgranskningar och demonstrationer.",
+          "serial": "Krävs endast för en produktions-Gateway."
+        }
+      }
+    },
+    "error": {
+      "invalid_serial": "Ange ett giltigt Gateway-serienummer.",
+      "invalid_scheduler_url": "Ange en HTTPS-adress utan autentiseringsuppgifter, sökväg, fråga eller fragment.",
+      "scheduler_credentials_required": "Ange både användarnamn och lösenord när schemaläsning aktiveras.",
+      "invalid_ca_filename": "Ange endast ett CA-certifikatfilnamn från /config/ssl/.",
+      "ca_filename_required": "Ange ett CA-certifikatfilnamn när Pixii Gateways privata CA-kompatibilitet är aktiverad.",
+      "bootstrap_id_required": "Ange det 32 tecken långa bootstrap-ID:t från Pixii Gateways betrodda ägarkonfiguration.",
+      "mqtt_unavailable": "Home Assistant MQTT är inte ansluten."
+    },
+    "abort": {
+      "already_configured": "Denna Gateway är redan konfigurerad."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Pixii-inställningar",
+        "menu_options": {
+          "load_balancing": "Lastbalansering",
+          "scheduler": "Scheman och styrpolicy",
+          "price_optimization": "Prisoptimering"
+        }
+      },
+      "scheduler": {
+        "title": "Konfigurera schemaläsning",
+        "description": "Valfri uttrycklig, skrivskyddad schemaläsning. Avmarkera schemaläsning för att ta bort sparade schemainställningar. När alternativen sparas laddas integrationen om utan HTTP-anrop. Pixii Gateway privat CA-kompatibilitet behåller certifikat- och värdnamnsverifiering och inaktiverar endast strikt X.509-konformitetskontroll för gateways vars CA saknar keyUsage.",
+        "data": {
+          "scheduler_enabled": "Aktivera schemaläsning",
+          "scheduler_url": "HTTPS-adress för schemaläsning",
+          "scheduler_username": "Användarnamn för schemaläsning",
+          "scheduler_password": "Lösenord för schemaläsning",
+          "scheduler_bootstrap_id": "Betrott bootstrap-ID med 32 tecken",
+          "scheduler_timeout": "Tidsgräns för schemaläsning (sekunder)",
+          "scheduler_ca_compatibility": "Använd Pixii Gateway privat CA-kompatibilitet",
+          "scheduler_ca_filename": "Pixii Gateway CA-certifikatfilnamn i /config/ssl/"
+        }
+      },
+      "load_balancing": {
+        "title": "Lastbalansering",
+        "description": "Konfigurera husets mätare, säkring per fas och reserv för användbar SOC. Det separata reglaget Lastbalansering aktiverar Pixii Service 120 med mjukgränser i båda riktningarna. Hårdgränser förblir avstängda. När inget batteriläge är aktivt används en egen 15-sekunders Service 129-körning endast för den aktuella korrigeringen och den släpps direkt när överlasten upphör. Avslutade scheman startas aldrig om eller förlängs. Produktionsbehörighet och Gateway-anslutningen krävs.",
+        "data": {
+          "enabled": "Aktivera mätning för lastbalansering",
+          "source": "Mätkälla",
+          "phases": "Antal faser",
+          "fuse_l1": "Huvudsäkring L1",
+          "fuse_l2": "Huvudsäkring L2",
+          "fuse_l3": "Huvudsäkring L3",
+          "margin_a": "Marginal under säkringen",
+          "min_soc": "Lägsta användbara SOC för urladdning",
+          "max_charge_kw": "Beräkningsgräns för total laddning",
+          "max_discharge_kw": "Beräkningsgräns för total urladdning",
+          "poll_seconds": "Intervall för mätavläsning",
+          "stale_seconds": "Högsta tillåtna ålder för externa mätvärden",
+          "recovery_step_w": "Ökning per mätintervall i återgångsförhandsvisning"
+        }
+      },
+      "load_balancing_meter": {
+        "title": "Välj husets fasmätvärden",
+        "description": "Välj ström (A), spänning (V) och om möjligt signerad aktiv effekt (W eller kW) för samma fas vid nätanslutningen. Positiv effekt måste betyda import, negativ export. Utan effekt per fas visas strömmarna men ingen säker effektriktning kan beräknas. Välj inte batteriets egna fasströmmar. För gamla eller osynkroniserade värden ger spärrad beräkning.",
+        "data": {
+          "current_l1": "Ström L1",
+          "current_l2": "Ström L2",
+          "current_l3": "Ström L3",
+          "voltage_l1": "Spänning L1",
+          "voltage_l2": "Spänning L2",
+          "voltage_l3": "Spänning L3",
+          "power_l1": "Signerad aktiv effekt (valfri) L1",
+          "power_l2": "Signerad aktiv effekt (valfri) L2",
+          "power_l3": "Signerad aktiv effekt (valfri) L3"
+        }
+      },
+      "price_optimization": {
+        "title": "Prisoptimering",
+        "description": "Välj elprissensor och planeringsintervall. Ett valfritt hanterat käll-ID sätter en uttrycklig gräns för aggregatorns scheman; scheman från andra källor förblir skyddade. Effekt, användbar SOC, prisdifferens och exportgränser finns som enhetsinställningar. Planen är endast en förhandsvisning tills Tillåt prisoptimeraren att ändra scheman aktiveras.",
+        "data": {
+          "price_entity_id": "Elprissensor",
+          "managed_source_id": "Hanterat käll-ID för aggregator (valfritt)",
+          "planning_horizon_hours": "Planeringshorisont",
+          "minimum_lead_minutes": "Minsta framförhållning för schema",
+          "refresh_minutes": "Intervall för automatisk omplanering"
+        }
+      }
+    },
+    "error": {
+      "invalid_load_balancing": "Kontrollera intervall, säkringar och effektgränser.",
+      "margin_exceeds_fuse": "Marginalen måste vara lägre än säkringen på varje använd fas.",
+      "stale_interval_too_short": "Högsta mätålder måste vara minst två mätintervall.",
+      "invalid_meter_entities": "Välj olika ström- och spänningssensorer för varje fas. Samma sensor får bara användas en gång.",
+      "invalid_price_optimization": "Kontrollera prissensor, käll-ID och planeringsintervall."
+    }
+  },
+  "services": {
+    "query_running_service": {
+      "name": "Fråga efter aktiv tjänst",
+      "description": "Fråga den konfigurerade Pixii Gateway-enhetens aktiva tjänst utan att ändra tillstånd.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Konfigurationspostens ID",
+          "description": "Obligatoriskt när flera Pixii Gateway-konfigurationsposter är inlästa."
+        }
+      }
+    },
+    "refresh_scheduler_list": {
+      "name": "Uppdatera schemalista",
+      "description": "Läs Pixii Gateway-schemat för ett begränsat tidsintervall utan att ändra tillstånd.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Konfigurationspostens ID",
+          "description": "Obligatoriskt när flera Pixii Gateway-konfigurationsposter är inlästa."
+        },
+        "days_back": {
+          "name": "Dagar bakåt",
+          "description": "Antal UTC-dagar före nu som ska inkluderas, från 0 till 31."
+        },
+        "days_forward": {
+          "name": "Dagar framåt",
+          "description": "Antal UTC-dagar efter nu som ska inkluderas, från 0 till 31."
+        }
+      }
+    },
+    "refresh_scheduler_detail": {
+      "name": "Uppdatera schemadetalj",
+      "description": "Läs en Pixii Gateway-schemapost utan att ändra tillstånd.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Konfigurationspostens ID",
+          "description": "Obligatoriskt när flera Pixii Gateway-konfigurationsposter är inlästa."
+        },
+        "sch_index": {
+          "name": "Schemaindex",
+          "description": "Icke-negativt schemaindex för en läsning utan skrivning."
+        }
+      }
+    },
+    "run_scheduler_validation_roundtrip": {
+      "name": "Kör valideringsrunda för schema",
+      "description": "Kör den separat auktoriserade engångsvalideringen av ett Target SoC-schema.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Konfigurationspostens ID",
+          "description": "Obligatoriskt när flera Pixii Gateway-konfigurationsposter är inlästa."
+        }
+      }
+    }
+  },
+  "entity": {
+    "calendar": {
+      "schedules": {
+        "name": "Scheman"
+      },
+      "price_optimization_calendar": {
+        "name": "Prisoptimeringens scheman"
+      }
+    },
+    "sensor": {
+      "scheduler_inventory": {
+        "name": "Schemainventering"
+      },
+      "load_balancing_usable_soc": {
+        "name": "Lastbalansering användbar SOC"
+      },
+      "load_balancing_min_usable_soc": {
+        "name": "Lastbalansering lägsta användbara SOC"
+      },
+      "load_balancing_observation": {
+        "name": "Lastbalanseringsstatus",
+        "state": {
+          "disabled": "Avstängd",
+          "waiting": "Väntar på mätning",
+          "observing": "Mäter",
+          "overload": "Fas över beräknad gräns",
+          "insufficient_capacity": "Beräknad kapacitet räcker inte",
+          "invalid_config": "Ogiltiga inställningar – konfigurera igen",
+          "read_failed": "Läsning misslyckades – kontrollera Gateway",
+          "native_meter_unavailable": "Gateway-anslutning saknas",
+          "phase_data_missing": "Fasmätvärden saknas",
+          "phase_data_invalid": "Ogiltiga fasmätvärden eller enheter",
+          "phase_direction_missing": "Faseffekt saknas – visar endast ström",
+          "meter_stale": "För gamla mätvärden",
+          "meter_timestamps_inconsistent": "Fasmätvärden är inte synkroniserade",
+          "phase_measurements_inconsistent": "Ström och effekt stämmer inte överens",
+          "reactive_current_exceeds_limit": "Reaktiv ström överskrider gränsen"
+        }
+      },
+      "charge_headroom": {
+        "name": "Beräknat laddutrymme (jämnt fördelat)"
+      },
+      "required_discharge": {
+        "name": "Beräknat urladdningsbehov (jämnt fördelat)"
+      },
+      "phase_current_l1": {
+        "name": "Husets fasström L1"
+      },
+      "phase_current_l2": {
+        "name": "Husets fasström L2"
+      },
+      "phase_current_l3": {
+        "name": "Husets fasström L3"
+      },
+      "solar_charging_status": {
+        "name": "Status för automatisk solladdning",
+        "state": {
+          "disabled": "Avstängd",
+          "ready": "Redo",
+          "waiting_telemetry": "Väntar på mätvärden",
+          "waiting_surplus": "Väntar på solöverskott",
+          "waiting_for_idle": "Väntar på scheman och tjänster",
+          "starting": "Startar solladdning",
+          "active": "Laddar solöverskott",
+          "lease_expiring": "Avslutar solladdning",
+          "soc_limit": "Högsta användbara SOC uppnådd",
+          "blocked": "Spärrad"
+        }
+      },
+      "adaptive_peak_shaving_status": {
+        "name": "Status för adaptiv effekttoppskapning",
+        "state": {
+          "disabled": "Avstängd",
+          "ready": "Redo",
+          "waiting_telemetry": "Väntar på mätvärden",
+          "waiting_for_priority": "Väntar på scheman och tjänster",
+          "starting": "Startar adaptiv effekttoppskapning",
+          "active": "Adaptiv effekttoppskapning aktiv",
+          "lease_expiring": "Avslutar adaptiv effekttoppskapning",
+          "blocked": "Spärrad"
+        }
+      },
+      "price_optimization_status": {
+        "name": "Status för prisoptimering",
+        "state": {
+          "disabled": "Avstängd",
+          "ready": "Redo",
+          "waiting_prices": "Väntar på fullständiga priser",
+          "waiting_telemetry": "Väntar på säkra batterivärden",
+          "waiting_for_priority": "Väntar på tjänst med högre prioritet",
+          "planning": "Stämmer av prisscheman",
+          "preview": "Förhandsvisning av prisplan",
+          "active": "Prisplan schemalagd",
+          "blocked": "Spärrad"
+        }
+      },
+      "price_next_charge": {
+        "name": "Nästa prisoptimerade laddning"
+      },
+      "price_next_discharge": {
+        "name": "Nästa prisoptimerade urladdning"
+      },
+      "price_scheduled_count": {
+        "name": "Skapade prisscheman"
+      }
+    },
+    "number": {
+      "aps_import_limit_kw": {
+        "name": "APS urladdning över nätets effekt"
+      },
+      "aps_export_limit_kw": {
+        "name": "APS laddning under nätets effekt"
+      },
+      "aps_max_charge_kw": {
+        "name": "APS högsta laddning"
+      },
+      "aps_max_discharge_kw": {
+        "name": "APS högsta urladdning"
+      },
+      "aps_max_limit_change_kw": {
+        "name": "APS största gränsändring"
+      },
+      "aps_min_soc_percent": {
+        "name": "APS lägsta användbara SOC"
+      },
+      "aps_max_soc_percent": {
+        "name": "APS högsta användbara SOC"
+      },
+      "aps_lease_seconds": {
+        "name": "APS styrlease"
+      },
+      "aps_update_interval_seconds": {
+        "name": "APS uppdateringsintervall"
+      },
+      "price_min_difference_sek_per_kwh": {
+        "name": "Minsta nettovinst för egenförbrukning"
+      },
+      "price_export_min_difference_sek_per_kwh": {
+        "name": "Minsta nettovinst för export"
+      },
+      "price_grid_import_cost_sek_per_kwh": {
+        "name": "Elnätskostnad per importerad kWh"
+      },
+      "price_max_charge_kw": {
+        "name": "Prisoptimering högsta laddning"
+      },
+      "price_max_discharge_kw": {
+        "name": "Prisoptimering högsta urladdning"
+      },
+      "price_min_soc_percent": {
+        "name": "Prisoptimering lägsta användbara SOC"
+      },
+      "price_max_soc_percent": {
+        "name": "Prisoptimering högsta användbara SOC"
+      },
+      "price_usable_capacity_kwh": {
+        "name": "Användbar batterikapacitet för prisplanering"
+      },
+      "price_round_trip_efficiency_percent": {
+        "name": "Batteriets verkningsgrad tur och retur"
+      },
+      "price_cycle_cost_sek_per_kwh": {
+        "name": "Batteriets cykelkostnad per levererad kWh"
+      }
+    },
+    "switch": {
+      "adaptive_peak_shaving": {
+        "name": "Adaptive peak shaving"
+      },
+      "price_export_allowed": {
+        "name": "Tillåt prisoptimerad export till elnätet"
+      },
+      "price_schedule_writes_enabled": {
+        "name": "Tillåt prisoptimeraren att ändra scheman"
+      }
+    }
+  }
+}

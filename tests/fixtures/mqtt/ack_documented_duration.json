@@ -1,0 +1,12 @@
+{
+  "method": "get",
+  "m_id": 12345,
+  "response": 65535,
+  "response_text": "success",
+  "service": "demandresponse",
+  "values": {
+    "duration": 3600,
+    "service_duration_left": 905,
+    "service_status": 5
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "test_message_id": 1000000000006,
+  "delete_ack": {
+    "at": "2026-10-18T19:10:03.823317+00:00",
+    "topic": "pixii/ack/TEST_GATEWAY_001",
+    "payload": {
+      "m_id": 1000000000006,
+      "method": "delete",
+      "response": 65535,
+      "response_msg": "",
+      "service": "peakshaving"
+    }
+  },
+  "status": "failed",
+  "core_samples": [
+    {
+      "at": "2026-10-18T19:10:08.206509+00:00",
+      "payload": {
+        "ac_w": 0,
+        "srv_type": 0,
+        "sys_status": 1,
+        "grid_status": 1
+      }
+    },
+    {
+      "at": "2026-10-18T19:10:13.202409+00:00",
+      "payload": {
+        "ac_w": 0,
+        "srv_type": 0,
+        "sys_status": 1,
+        "grid_status": 1
+      }
+    }
+  ]
+}

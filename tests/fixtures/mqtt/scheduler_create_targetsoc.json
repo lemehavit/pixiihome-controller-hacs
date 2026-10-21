@@ -1,0 +1,10 @@
+{
+  "method": "set",
+  "service": "targetsoc",
+  "m_id": 240000001,
+  "values": {
+    "socref": 90
+  },
+  "starttime": "2030-03-31T01:30:00Z",
+  "duration": 3600
+}

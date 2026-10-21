@@ -1,0 +1,331 @@
+{
+  "observations": [
+    {
+      "at": "2026-10-18T19:09:49.995758+00:00",
+      "topic": "pixii/ack/TEST_GATEWAY_001",
+      "payload": {
+        "m_id": 1000000000006,
+        "method": "get",
+        "response": 65535,
+        "service": "peakshaving",
+        "values": {
+          "charge_max": 0,
+          "discharge_max": 300,
+          "duration": 120,
+          "exportlim": 0,
+          "importlim": 0,
+          "keep_active": true,
+          "service_status": 2,
+          "starttime": "2026-10-18T19:09:54Z"
+        }
+      }
+    },
+    {
+      "at": "2026-10-18T19:09:51.018753+00:00",
+      "topic": "pixii/ack/TEST_GATEWAY_001",
+      "payload": {
+        "m_id": 1000000000006,
+        "method": "get",
+        "response": 65535,
+        "service": "peakshaving",
+        "values": {
+          "charge_max": 0,
+          "discharge_max": 300,
+          "duration": 120,
+          "exportlim": 0,
+          "importlim": 0,
+          "keep_active": true,
+          "service_status": 2,
+          "starttime": "2026-10-18T19:09:54Z"
+        }
+      }
+    },
+    {
+      "at": "2026-10-18T19:09:52.028665+00:00",
+      "topic": "pixii/ack/TEST_GATEWAY_001",
+      "payload": {
+        "m_id": 1000000000006,
+        "method": "get",
+        "response": 65535,
+        "service": "peakshaving",
+        "values": {
+          "charge_max": 0,
+          "discharge_max": 300,
+          "duration": 120,
+          "exportlim": 0,
+          "importlim": 0,
+          "keep_active": true,
+          "service_status": 2,
+          "starttime": "2026-10-18T19:09:54Z"
+        }
+      }
+    },
+    {
+      "at": "2026-10-18T19:09:53.038625+00:00",
+      "topic": "pixii/ack/TEST_GATEWAY_001",
+      "payload": {
+        "m_id": 1000000000006,
+        "method": "get",
+        "response": 65535,
+        "service": "peakshaving",
+        "values": {
+          "charge_max": 0,
+          "discharge_max": 300,
+          "duration": 120,
+          "exportlim": 0,
+          "importlim": 0,
+          "keep_active": true,
+          "service_status": 2,
+          "starttime": "2026-10-18T19:09:54Z"
+        }
+      }
+    },
+    {
+      "at": "2026-10-18T19:09:54.051550+00:00",
+      "topic": "pixii/ack/TEST_GATEWAY_001",
+      "payload": {
+        "m_id": 1000000000006,
+        "method": "get",
+        "response": 65535,
+        "service": "peakshaving",
+        "values": {
+          "charge_max": 0,
+          "discharge_max": 300,
+          "duration": 120,
+          "exportlim": 0,
+          "importlim": 0,
+          "keep_active": true,
+          "service_status": 2,
+          "starttime": "2026-10-18T19:09:54Z"
+        }
+      }
+    },
+    {
+      "at": "2026-10-18T19:09:55.062527+00:00",
+      "topic": "pixii/ack/TEST_GATEWAY_001",
+      "payload": {
+        "m_id": 1000000000006,
+        "method": "get",
+        "response": 65535,
+        "service": "peakshaving",
+        "values": {
+          "charge_max": 0,
+          "discharge_max": 300,
+          "duration": 120,
+          "exportlim": 0,
+          "importlim": 0,
+          "keep_active": true,
+          "service_duration_left": 7319,
+          "service_status": 5,
+          "starttime": "2026-10-18T19:09:54Z"
+        }
+      }
+    },
+    {
+      "at": "2026-10-18T19:09:56.076207+00:00",
+      "topic": "pixii/ack/TEST_GATEWAY_001",
+      "payload": {
+        "m_id": 1000000000006,
+        "method": "get",
+        "response": 65535,
+        "service": "peakshaving",
+        "values": {
+          "charge_max": 0,
+          "discharge_max": 300,
+          "duration": 120,
+          "exportlim": 0,
+          "importlim": 0,
+          "keep_active": true,
+          "service_duration_left": 7318,
+          "service_status": 5,
+          "starttime": "2026-10-18T19:09:54Z"
+        }
+      }
+    },
+    {
+      "at": "2026-10-18T19:09:57.088045+00:00",
+      "topic": "pixii/ack/TEST_GATEWAY_001",
+      "payload": {
+        "m_id": 1000000000006,
+        "method": "get",
+        "response": 65535,
+        "service": "peakshaving",
+        "values": {
+          "charge_max": 0,
+          "discharge_max": 300,
+          "duration": 120,
+          "exportlim": 0,
+          "importlim": 0,
+          "keep_active": true,
+          "service_duration_left": 7317,
+          "service_status": 5,
+          "starttime": "2026-10-18T19:09:54Z"
+        }
+      }
+    },
+    {
+      "at": "2026-10-18T19:09:58.100683+00:00",
+      "topic": "pixii/ack/TEST_GATEWAY_001",
+      "payload": {
+        "m_id": 1000000000006,
+        "method": "get",
+        "response": 65535,
+        "service": "peakshaving",
+        "values": {
+          "charge_max": 0,
+          "discharge_max": 300,
+          "duration": 120,
+          "exportlim": 0,
+          "importlim": 0,
+          "keep_active": true,
+          "service_duration_left": 7316,
+          "service_status": 5,
+          "starttime": "2026-10-18T19:09:54Z"
+        }
+      }
+    },
+    {
+      "at": "2026-10-18T19:09:58.288202+00:00",
+      "topic": "pixii/ack/TEST_GATEWAY_001",
+      "payload": {
+        "charge_max": 0,
+        "discharge_max": 300,
+        "exportlim": 0,
+        "importlim": 0,
+        "keep_active": true,
+        "m_id": 1000000000006,
+        "method": "get",
+        "response": 65535,
+        "service": "peakshaving",
+        "service_status": 5,
+        "source_id": 7
+      }
+    },
+    {
+      "at": "2026-10-18T19:09:59.112302+00:00",
+      "topic": "pixii/ack/TEST_GATEWAY_001",
+      "payload": {
+        "m_id": 1000000000006,
+        "method": "get",
+        "response": 65535,
+        "service": "peakshaving",
+        "values": {
+          "charge_max": 0,
+          "discharge_max": 300,
+          "duration": 120,
+          "exportlim": 0,
+          "importlim": 0,
+          "keep_active": true,
+          "service_duration_left": 7315,
+          "service_status": 5,
+          "starttime": "2026-10-18T19:09:54Z"
+        }
+      }
+    },
+    {
+      "at": "2026-10-18T19:10:00.609335+00:00",
+      "topic": "pixii/ack/TEST_GATEWAY_001",
+      "payload": {
+        "m_id": 1000000000006,
+        "method": "get",
+        "response": 65535,
+        "service": "peakshaving",
+        "values": {
+          "charge_max": 0,
+          "discharge_max": 300,
+          "duration": 120,
+          "exportlim": 0,
+          "importlim": 0,
+          "keep_active": true,
+          "service_duration_left": 7314,
+          "service_status": 5,
+          "starttime": "2026-10-18T19:09:54Z"
+        }
+      }
+    },
+    {
+      "at": "2026-10-18T19:10:01.621595+00:00",
+      "topic": "pixii/ack/TEST_GATEWAY_001",
+      "payload": {
+        "m_id": 1000000000006,
+        "method": "get",
+        "response": 65535,
+        "service": "peakshaving",
+        "values": {
+          "charge_max": 0,
+          "discharge_max": 300,
+          "duration": 120,
+          "exportlim": 0,
+          "importlim": 0,
+          "keep_active": true,
+          "service_duration_left": 7313,
+          "service_status": 5,
+          "starttime": "2026-10-18T19:09:54Z"
+        }
+      }
+    },
+    {
+      "at": "2026-10-18T19:10:02.634478+00:00",
+      "topic": "pixii/ack/TEST_GATEWAY_001",
+      "payload": {
+        "m_id": 1000000000006,
+        "method": "get",
+        "response": 65535,
+        "service": "peakshaving",
+        "values": {
+          "charge_max": 0,
+          "discharge_max": 300,
+          "duration": 120,
+          "exportlim": 0,
+          "importlim": 0,
+          "keep_active": true,
+          "service_duration_left": 7312,
+          "service_status": 5,
+          "starttime": "2026-10-18T19:09:54Z"
+        }
+      }
+    },
+    {
+      "at": "2026-10-18T19:10:03.657634+00:00",
+      "topic": "pixii/ack/TEST_GATEWAY_001",
+      "payload": {
+        "m_id": 1000000000006,
+        "method": "get",
+        "response": 65535,
+        "service": "peakshaving",
+        "values": {
+          "charge_max": 0,
+          "discharge_max": 300,
+          "duration": 120,
+          "exportlim": 0,
+          "importlim": 0,
+          "keep_active": true,
+          "service_duration_left": 7311,
+          "service_status": 5,
+          "starttime": "2026-10-18T19:09:54Z"
+        }
+      }
+    },
+    {
+      "at": "2026-10-18T19:10:03.716393+00:00",
+      "topic": "pixii/ack/TEST_GATEWAY_001",
+      "payload": {
+        "m_id": 1000000000006,
+        "method": "get",
+        "response": 65535,
+        "service": "peakshaving",
+        "values": {
+          "charge_max": 0,
+          "discharge_max": 300,
+          "duration": 120,
+          "exportlim": 0,
+          "importlim": 0,
+          "keep_active": true,
+          "service_duration_left": 7311,
+          "service_status": 5,
+          "starttime": "2026-10-18T19:09:54Z"
+        }
+      }
+    }
+  ]
+}

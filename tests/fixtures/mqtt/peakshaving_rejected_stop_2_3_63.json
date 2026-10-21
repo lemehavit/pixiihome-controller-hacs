@@ -1,0 +1,28 @@
+{
+  "before": {
+    "m_id": 1000000000005,
+    "method": "get",
+    "response": 65535,
+    "service": "peakshaving",
+    "values": {
+      "charge_max": 0, "discharge_max": 300, "duration": 120,
+      "exportlim": 0, "importlim": 0, "keep_active": true,
+      "service_status": 5, "starttime": "2026-10-18T17:48:26Z"
+    }
+  },
+  "stop_ack": {
+    "m_id": 1000000000005, "method": "set", "response": 0,
+    "response_msg": "PS failed creating schedule", "service": "peakshaving"
+  },
+  "after": {
+    "m_id": 1000000000005,
+    "method": "get",
+    "response": 65535,
+    "service": "peakshaving",
+    "values": {
+      "charge_max": 0, "discharge_max": 300, "duration": 120,
+      "exportlim": 0, "importlim": 0, "keep_active": true,
+      "service_status": 2, "starttime": "2026-10-18T17:48:26Z"
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "method": "set",
+  "service": "voltagesupport",
+  "m_id": 240000002,
+  "starttime": "2030-03-31T01:30:00Z",
+  "duration": 3600
+}

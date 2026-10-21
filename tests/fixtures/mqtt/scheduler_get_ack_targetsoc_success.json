@@ -1,0 +1,15 @@
+{
+  "method": "get",
+  "m_id": 240000001,
+  "service": "targetsoc",
+  "response": 65535,
+  "response_text": "success",
+  "values": {
+    "socref": 90,
+    "starttime": "2030-03-31T01:30:00Z",
+    "duration": 3600,
+    "service_status": 5,
+    "service_duration_left": 3590,
+    "future_unknown": "bounded-test-field"
+  }
+}

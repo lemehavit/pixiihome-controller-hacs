@@ -1,0 +1,14 @@
+{
+  "duration": 3600,
+  "m_id": 1789479111712,
+  "method": "get",
+  "recurrence": {
+    "type": "once"
+  },
+  "response": 65535,
+  "service": "targetgsoc",
+  "service_status": 5,
+  "service_time_left": 1759,
+  "socref": 90,
+  "source_id": 7
+}

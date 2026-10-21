@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pixiihome-controller"
+version = "0.3.7"
+description = "Local-first Home Assistant integration for Pixii PowerShaper systems"
+requires-python = ">=3.14.2"
+dependencies = []
+
+[project.optional-dependencies]
+test = [
+    "homeassistant==2026.9.3",
+    "paho-mqtt==2.1.0",
+    "pyright>=1.1.414",
+    "pytest>=8.4",
+    "pytest-asyncio>=1.2",
+    "ruff>=0.16.8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["custom_components.pixiihome_controller*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+"custom_components.pixiihome_controller" = [
+    "brand/*.png",
+    "frontend/*.js",
+    "manifest.json",
+    "services.yaml",
+    "strings.json",
+    "translations/*.json",
+]

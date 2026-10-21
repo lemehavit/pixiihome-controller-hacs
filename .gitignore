@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Home Assistant runtime
+.storage/
+secrets.yaml
+
+# Sensitive evidence and exports
+*.har
+pixii_scheduler.har
+*session*
+*cookie*
+*credentials*
+*.pem
+*.key
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+.codebase-memory/
+.omp/
+acceptance_evidence/
+acceptance_evidenceamendment*/
+TASK_CHANGE_MANIFEST*.json
+
+# Private field reports never belong in this public repository
+docs/evidence/
+private/

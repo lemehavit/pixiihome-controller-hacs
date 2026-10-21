@@ -1,0 +1,7 @@
+{
+  "method": "set",
+  "m_id": 240000001,
+  "response": 65535,
+  "response_text": "success",
+  "service": "targetsoc"
+}

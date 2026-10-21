@@ -1,0 +1,88 @@
+{
+  "config_entry_id": "test-config-entry",
+  "gateway_serial": "TEST_GATEWAY_001",
+  "revision": 143,
+  "command_state": {
+    "next_m_id": 1000000000007,
+    "owned_m_ids": [
+      1000000000006
+    ]
+  },
+  "ownership_state": {
+    "config_entry_id": "test-config-entry",
+    "gateway_serial": "TEST_GATEWAY_001",
+    "records": [
+      {
+        "config_entry_id": "test-config-entry",
+        "gateway_serial": "TEST_GATEWAY_001",
+        "m_id": 1000000000006,
+        "service": "peakshaving",
+        "intended_state": {
+          "m_id": 1000000000006,
+          "service": "peakshaving",
+          "values": {
+            "exportlim": 0,
+            "importlim": 0,
+            "charge_max": 0,
+            "discharge_max": 300,
+            "keep_active": true
+          },
+          "starttime": "2026-10-18T19:09:54Z",
+          "duration": 120
+        },
+        "lifecycle": "conflicted",
+        "owner": "automatic_price_optimization"
+      }
+    ]
+  },
+  "controller_state": {},
+  "planner_state": {},
+  "replacement_state": {},
+  "audit_history": [],
+  "transactions": [
+    {
+      "transaction_id": "scheduler-test-create",
+      "operation": "create",
+      "target_identity": {
+        "m_id": 1000000000006,
+        "sch_index": null,
+        "service_no": null,
+        "source_id": null,
+        "asset_id": null
+      },
+      "phase": "reconciled",
+      "reason": "transaction_success",
+      "intent": {
+        "m_id": 1000000000006,
+        "service": "peakshaving",
+        "values": {
+          "exportlim": 0,
+          "importlim": 0,
+          "charge_max": 0,
+          "discharge_max": 300,
+          "keep_active": true
+        },
+        "starttime": "2026-10-18T19:09:54Z",
+        "duration": 120
+      }
+    },
+    {
+      "transaction_id": "scheduler-test-delete",
+      "operation": "delete",
+      "target_identity": {
+        "m_id": 1000000000006,
+        "sch_index": null,
+        "service_no": null,
+        "source_id": null,
+        "asset_id": null
+      },
+      "phase": "failed",
+      "reason": "price_stop_unconfirmed",
+      "intent": {
+        "m_id": 1000000000006,
+        "service": "peakshaving",
+        "absent": true
+      }
+    }
+  ]
+}

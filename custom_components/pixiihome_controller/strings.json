@@ -1,0 +1,463 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add Pixiihome Controller",
+        "description": "Choose a production Gateway or an isolated local simulator. Production requires Home Assistant MQTT and a Gateway serial; the simulator never contacts MQTT.",
+        "data": {
+          "runtime_mode": "Runtime mode",
+          "serial": "Gateway serial (production only)"
+        },
+        "data_description": {
+          "runtime_mode": "Production observes a physical Gateway with mutation blocked. Simulator provides safe local preview and apply demonstrations.",
+          "serial": "Required only for a production Gateway."
+        }
+      }
+    },
+    "error": {
+      "invalid_serial": "Enter a valid Gateway serial.",
+      "invalid_scheduler_url": "Enter an HTTPS origin without credentials, path, query, or fragment.",
+      "scheduler_credentials_required": "Enter both scheduler username and password when scheduler access is configured.",
+      "invalid_ca_filename": "Enter only a CA certificate filename from /config/ssl/.",
+      "ca_filename_required": "Enter a CA certificate filename when Pixii Gateway CA compatibility is enabled.",
+      "bootstrap_id_required": "Enter the 32-character bootstrap ID from the trusted Pixii Gateway owner configuration.",
+      "mqtt_unavailable": "Home Assistant MQTT is not connected."
+    },
+    "abort": {
+      "already_configured": "This Gateway is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Pixii settings",
+        "menu_options": {
+          "load_balancing": "Load balancing",
+          "scheduler": "Scheduler and control policy",
+          "price_optimization": "Price optimization"
+        }
+      },
+      "scheduler": {
+        "title": "Configure scheduler access",
+        "description": "Optional scheduler access plus versioned AutomationPolicy. Saving options reloads the integration without making control requests.",
+        "data": {
+          "automation_policy": "AutomationPolicy JSON",
+          "scheduler_enabled": "Enable scheduler access",
+          "scheduler_url": "Scheduler HTTPS origin",
+          "scheduler_username": "Scheduler username",
+          "scheduler_password": "Scheduler password",
+          "scheduler_bootstrap_id": "Trusted 32-character bootstrap ID",
+          "scheduler_timeout": "Scheduler request timeout (seconds)",
+          "scheduler_ca_compatibility": "Use Pixii Gateway private CA compatibility",
+          "scheduler_ca_filename": "Pixii Gateway CA certificate filename in /config/ssl/"
+        }
+      },
+      "load_balancing": {
+        "title": "Load balancing",
+        "description": "Configure the building meter, fuse rating per phase and usable-SoC reserve. The separate Load balancing switch enables Pixii Service 120 soft limits in both directions. Hard limits stay disabled. With no native battery mode, an expiring 15-second Service 129 lease supplies only the live correction and is released as soon as the overload ends. Ending schedules are never restarted or extended. Production control authority and the scheduler Gateway connection are required.",
+        "data": {
+          "enabled": "Enable measurements for load balancing",
+          "source": "Meter source",
+          "phases": "Number of phases",
+          "fuse_l1": "Main fuse L1",
+          "fuse_l2": "Main fuse L2",
+          "fuse_l3": "Main fuse L3",
+          "margin_a": "Margin below fuse rating",
+          "min_soc": "Minimum usable SoC for discharge",
+          "max_charge_kw": "Total charge calculation limit",
+          "max_discharge_kw": "Total discharge calculation limit",
+          "poll_seconds": "Measurement polling interval",
+          "stale_seconds": "Maximum external measurement age",
+          "recovery_step_w": "Increase per polling interval in recovery preview"
+        }
+      },
+      "load_balancing_meter": {
+        "title": "Select building phase measurements",
+        "description": "Select current (A), voltage (V) and, if available, signed active power (W or kW) for the same phase at the grid connection. Positive power must mean import, negative export. Without per-phase power, currents are shown but power direction cannot be calculated. Do not select inverter currents. Stale or unsynchronized measurements block the calculation.",
+        "data": {
+          "current_l1": "Current L1",
+          "current_l2": "Current L2",
+          "current_l3": "Current L3",
+          "voltage_l1": "Voltage L1",
+          "voltage_l2": "Voltage L2",
+          "voltage_l3": "Voltage L3",
+          "power_l1": "Signed active power (optional) L1",
+          "power_l2": "Signed active power (optional) L2",
+          "power_l3": "Signed active power (optional) L3"
+        }
+      },
+      "price_optimization": {
+        "title": "Price optimization",
+        "description": "Select the electricity-price sensor and planning interval. The optional managed source ID is an explicit boundary for aggregator schedules; schedules from other sources remain protected. Power, usable-SoC, price-difference and export limits are available as device entities. The plan remains a preview until Allow price optimizer to change schedules is enabled.",
+        "data": {
+          "price_entity_id": "Electricity-price sensor",
+          "managed_source_id": "Managed aggregator source ID (optional)",
+          "planning_horizon_hours": "Planning horizon",
+          "minimum_lead_minutes": "Minimum scheduler lead time",
+          "refresh_minutes": "Automatic plan refresh interval"
+        }
+      }
+    },
+    "error": {
+      "invalid_load_balancing": "Check intervals, fuse ratings and power limits.",
+      "margin_exceeds_fuse": "Margin must be below the fuse rating on every used phase.",
+      "stale_interval_too_short": "Maximum measurement age must be at least twice the polling interval.",
+      "invalid_meter_entities": "Select distinct current and voltage sensors for every phase. Each sensor can be selected only once.",
+      "invalid_price_optimization": "Check the price sensor, source ID and planning intervals."
+    }
+  },
+  "services": {
+    "query_running_service": {
+      "name": "Query running service",
+      "description": "Query the configured Pixii Gateway's current service without changing state.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry ID",
+          "description": "Required when multiple Pixii Gateway config entries are loaded."
+        }
+      }
+    },
+    "refresh_scheduler_list": {
+      "name": "Refresh scheduler list",
+      "description": "Read the Pixii Gateway scheduler once for a bounded diagnostic time range without changing state.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry ID",
+          "description": "Required when multiple Pixii Gateway config entries are loaded."
+        },
+        "days_back": {
+          "name": "Days back",
+          "description": "Number of UTC days before now to include, from 0 through 31."
+        },
+        "days_forward": {
+          "name": "Days forward",
+          "description": "Number of UTC days after now to include, from 0 through 31."
+        }
+      }
+    },
+    "refresh_scheduler_detail": {
+      "name": "Refresh scheduler detail",
+      "description": "Read one Pixii Gateway scheduler detail record without changing state.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry ID",
+          "description": "Required when multiple Pixii Gateway config entries are loaded."
+        },
+        "sch_index": {
+          "name": "Scheduler index",
+          "description": "Non-negative scheduler record index used for one read-only validation request."
+        }
+      }
+    },
+    "run_scheduler_validation_roundtrip": {
+      "name": "Run scheduler validation roundtrip",
+      "description": "Run the separately authorized, one-shot Target SoC scheduler validation transaction.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry ID",
+          "description": "Required when multiple Pixii Gateway config entries are loaded."
+        }
+      }
+    },
+    "generate_dashboard_config": {
+      "name": "Generate dashboard config",
+      "description": "Return a native-entity Lovelace dashboard template without applying user dashboard state.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry ID",
+          "description": "Optional entry used to bind the generated entity references."
+        }
+      }
+    }
+  },
+  "entity": {
+    "calendar": {
+      "schedules": {
+        "name": "Schedules"
+      },
+      "price_optimization_calendar": {
+        "name": "Price optimization schedules"
+      }
+    },
+    "sensor": {
+      "scheduler_inventory": {
+        "name": "Scheduler Inventory"
+      },
+      "load_balancing_usable_soc": {
+        "name": "Load balancing usable SoC"
+      },
+      "load_balancing_min_usable_soc": {
+        "name": "Load balancing minimum usable SoC"
+      },
+      "load_balancing_observation": {
+        "name": "Load balancing status",
+        "state": {
+          "disabled": "Disabled",
+          "waiting": "Waiting for measurement",
+          "observing": "Measuring",
+          "overload": "Phase above calculated limit",
+          "insufficient_capacity": "Insufficient estimated capacity",
+          "invalid_config": "Invalid settings – reconfigure",
+          "read_failed": "Read failed – check Gateway",
+          "native_meter_unavailable": "Gateway connection unavailable",
+          "phase_data_missing": "Phase measurements missing",
+          "phase_data_invalid": "Invalid phase measurements or units",
+          "phase_direction_missing": "Phase power missing – currents only",
+          "meter_stale": "Stale measurements",
+          "meter_timestamps_inconsistent": "Phase measurements not synchronized",
+          "phase_measurements_inconsistent": "Current and power inconsistent",
+          "reactive_current_exceeds_limit": "Reactive current exceeds limit"
+        }
+      },
+      "charge_headroom": {
+        "name": "Estimated charge headroom (symmetric)"
+      },
+      "required_discharge": {
+        "name": "Estimated discharge required (symmetric)"
+      },
+      "phase_current_l1": {
+        "name": "Building phase current L1"
+      },
+      "phase_current_l2": {
+        "name": "Building phase current L2"
+      },
+      "phase_current_l3": {
+        "name": "Building phase current L3"
+      },
+      "solar_charging_status": {
+        "name": "Solar charging status",
+        "state": {
+          "disabled": "Disabled",
+          "ready": "Ready",
+          "waiting_telemetry": "Waiting for telemetry",
+          "waiting_surplus": "Waiting for solar surplus",
+          "waiting_for_idle": "Waiting for schedules and services",
+          "starting": "Starting solar charging",
+          "active": "Charging solar surplus",
+          "lease_expiring": "Stopping solar charging",
+          "soc_limit": "Maximum usable SoC reached",
+          "blocked": "Blocked"
+        }
+      },
+      "adaptive_peak_shaving_status": {
+        "name": "Adaptive peak shaving status",
+        "state": {
+          "disabled": "Disabled",
+          "ready": "Ready",
+          "waiting_telemetry": "Waiting for telemetry",
+          "waiting_for_priority": "Waiting for schedules and services",
+          "starting": "Starting adaptive peak shaving",
+          "active": "Adaptive peak shaving active",
+          "lease_expiring": "Stopping adaptive peak shaving",
+          "blocked": "Blocked"
+        }
+      },
+      "price_optimization_status": {
+        "name": "Price optimization status",
+        "state": {
+          "disabled": "Disabled",
+          "ready": "Ready",
+          "waiting_prices": "Waiting for complete prices",
+          "waiting_telemetry": "Waiting for safe battery telemetry",
+          "waiting_for_priority": "Waiting for higher-priority service",
+          "planning": "Reconciling price schedules",
+          "preview": "Price plan preview",
+          "active": "Price plan scheduled",
+          "blocked": "Blocked"
+        }
+      },
+      "price_next_charge": {
+        "name": "Next price-optimized charge"
+      },
+      "price_next_discharge": {
+        "name": "Next price-optimized discharge"
+      },
+      "price_scheduled_count": {
+        "name": "Created price schedules"
+      }
+    },
+    "number": {
+      "manual_power_kw": {
+        "name": "Manual power"
+      },
+      "manual_power_duration_seconds": {
+        "name": "Manual/APS duration"
+      },
+      "target_soc_percent": {
+        "name": "Target SoC"
+      },
+      "target_soc_duration_seconds": {
+        "name": "Target SoC duration"
+      },
+      "aps_import_limit_kw": {
+        "name": "APS discharge above grid power"
+      },
+      "aps_export_limit_kw": {
+        "name": "APS charge below grid power"
+      },
+      "aps_max_charge_kw": {
+        "name": "APS maximum charge"
+      },
+      "aps_max_discharge_kw": {
+        "name": "APS maximum discharge"
+      },
+      "aps_max_limit_change_kw": {
+        "name": "APS maximum limit change"
+      },
+      "aps_min_soc_percent": {
+        "name": "APS minimum usable SoC"
+      },
+      "aps_max_soc_percent": {
+        "name": "APS maximum usable SoC"
+      },
+      "aps_lease_seconds": {
+        "name": "APS control lease"
+      },
+      "aps_update_interval_seconds": {
+        "name": "APS control update interval"
+      },
+      "solar_export_start_threshold_kw": {
+        "name": "Solar start threshold"
+      },
+      "solar_export_stop_threshold_kw": {
+        "name": "Solar stop threshold"
+      },
+      "solar_max_charge_power_kw": {
+        "name": "Solar maximum charge"
+      },
+      "solar_export_buffer_kw": {
+        "name": "Solar export buffer"
+      },
+      "solar_max_limit_change_kw": {
+        "name": "Solar maximum limit change"
+      },
+      "solar_lease_seconds": {
+        "name": "Solar control lease"
+      },
+      "solar_update_interval_seconds": {
+        "name": "Solar control update interval"
+      },
+      "solar_min_soc_percent": {
+        "name": "Solar minimum SoC"
+      },
+      "solar_max_soc_percent": {
+        "name": "Solar maximum SoC"
+      },
+      "solar_start_debounce_seconds": {
+        "name": "Solar start debounce"
+      },
+      "solar_stop_debounce_seconds": {
+        "name": "Solar stop debounce"
+      },
+      "load_balancing_max_phase_current_a": {
+        "name": "Load balancing phase limit"
+      },
+      "load_balancing_safety_margin_a": {
+        "name": "Load balancing safety margin"
+      },
+      "load_balancing_max_charge_kw": {
+        "name": "Load balancing maximum charge"
+      },
+      "load_balancing_max_discharge_kw": {
+        "name": "Load balancing maximum discharge"
+      },
+      "load_balancing_adjustment_step_kw": {
+        "name": "Load balancing adjustment step"
+      },
+      "load_balancing_update_interval_seconds": {
+        "name": "Load balancing update interval"
+      },
+      "load_balancing_debounce_seconds": {
+        "name": "Load balancing debounce"
+      },
+      "planner_reserve_soc_percent": {
+        "name": "Planner reserve SoC"
+      },
+      "planner_min_soc_percent": {
+        "name": "Planner minimum SoC"
+      },
+      "planner_max_soc_percent": {
+        "name": "Planner maximum SoC"
+      },
+      "price_min_difference_sek_per_kwh": {
+        "name": "Minimum net profit for self-consumption"
+      },
+      "price_export_min_difference_sek_per_kwh": {
+        "name": "Minimum net profit for export"
+      },
+      "price_grid_import_cost_sek_per_kwh": {
+        "name": "Grid cost per imported kWh"
+      },
+      "price_max_charge_kw": {
+        "name": "Price optimization maximum charge"
+      },
+      "price_max_discharge_kw": {
+        "name": "Price optimization maximum discharge"
+      },
+      "price_min_soc_percent": {
+        "name": "Price optimization minimum usable SoC"
+      },
+      "price_max_soc_percent": {
+        "name": "Price optimization maximum usable SoC"
+      },
+      "price_usable_capacity_kwh": {
+        "name": "Usable battery capacity for price planning"
+      },
+      "price_round_trip_efficiency_percent": {
+        "name": "Battery round-trip efficiency"
+      },
+      "price_cycle_cost_sek_per_kwh": {
+        "name": "Battery cycle cost per delivered kWh"
+      }
+    },
+    "button": {
+      "start_charging": {
+        "name": "Start charging"
+      },
+      "start_discharging": {
+        "name": "Start discharging"
+      },
+      "stop_manual_power": {
+        "name": "Stop manual power"
+      },
+      "start_target_soc": {
+        "name": "Start target SoC"
+      },
+      "stop_target_soc": {
+        "name": "Stop target SoC"
+      },
+      "start_adaptive_peak_shaving": {
+        "name": "Start adaptive peak shaving"
+      },
+      "stop_adaptive_peak_shaving": {
+        "name": "Stop adaptive peak shaving"
+      },
+      "start_battery_calibration": {
+        "name": "Start battery calibration"
+      }
+    },
+    "switch": {
+      "production_control": {
+        "name": "Production-control authority"
+      },
+      "automatic_solar_charging": {
+        "name": "Automatic solar charging"
+      },
+      "load_balancing": {
+        "name": "Load balancing"
+      },
+      "automatic_price_optimization": {
+        "name": "Automatic price optimization"
+      },
+      "adaptive_peak_shaving": {
+        "name": "Adaptive peak shaving"
+      },
+      "price_export_allowed": {
+        "name": "Allow price-optimized grid export"
+      },
+      "price_schedule_writes_enabled": {
+        "name": "Allow price optimizer to change schedules"
+      }
+    }
+  }
+}

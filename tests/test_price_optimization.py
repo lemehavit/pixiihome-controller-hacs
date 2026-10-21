@@ -1,0 +1,303 @@
+"""Price-source and export-aware planning tests."""
+
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from custom_components.pixiihome_controller.control.price_optimization import (
+    PriceDirection,
+    PriceDischargeMode,
+    PriceOptimizationConfig,
+    build_price_plan,
+    normalize_price_series,
+)
+
+
+def greenely(*prices: float):
+    return normalize_price_series(
+        {
+            "current_day": [
+                {"date": "Oct 16 2026", "time": f"{hour:02}:00", "price": price}
+                for hour, price in enumerate(prices)
+            ]
+        },
+        "SEK/kWh",
+    )
+
+
+def plan(
+    series, *, export_allowed=False, export_delta=1.0, grid_import_cost=0.0,
+    initial_soc=50, charge_kw=2, discharge_kw=2,
+    minimum_profit=0.5, cycle_cost=0.0, end_before=None,
+):
+    return build_price_plan(
+        series,
+        now=datetime(2026, 10, 15, 21, tzinfo=UTC),
+        horizon_hours=36,
+        minimum_lead_minutes=5,
+        usable_soc_percent=initial_soc,
+        usable_capacity_kwh=10,
+        minimum_soc_percent=10,
+        maximum_soc_percent=90,
+        maximum_charge_kw=charge_kw,
+        maximum_discharge_kw=discharge_kw,
+        minimum_difference_sek_per_kwh=minimum_profit,
+        export_allowed=export_allowed,
+        export_minimum_difference_sek_per_kwh=export_delta,
+        round_trip_efficiency_percent=90,
+        cycle_cost_sek_per_kwh=cycle_cost,
+        grid_import_cost_sek_per_kwh=grid_import_cost,
+        end_before=end_before,
+    )
+
+
+def test_greenely_source_is_normalized_from_stockholm_to_utc() -> None:
+    series = greenely(1.0, 2.0)
+
+    assert series.unit == "SEK/kWh"
+    assert series.source_format == "greenely_day_arrays"
+    assert series.intervals[0].start == datetime(2026, 10, 15, 22, tzinfo=UTC)
+    assert series.intervals[1].start == datetime(2026, 10, 15, 23, tzinfo=UTC)
+
+
+def test_ore_unit_is_converted_without_magnitude_guessing() -> None:
+    series = normalize_price_series(
+        {
+            "raw_today": [
+                {
+                    "start": "2026-10-16T00:00:00+02:00",
+                    "end": "2026-10-16T01:00:00+02:00",
+                    "value": 125,
+                }
+            ]
+        },
+        "öre/kWh",
+    )
+
+    assert series.intervals[0].price_sek_per_kwh == 1.25
+    with pytest.raises(ValueError, match="price_unit_unsupported"):
+        normalize_price_series({}, "EUR/MWh")
+
+
+def test_duplicate_fallback_hour_requires_both_occurrences() -> None:
+    with pytest.raises(ValueError, match="price_wall_time_ambiguous"):
+        normalize_price_series(
+            {"current_day": [{"date": "Oct 25 2026", "time": "02:00", "price": 1.0}]},
+            "SEK/kWh",
+        )
+
+    series = normalize_price_series(
+        {
+            "current_day": [
+                {"date": "Oct 25 2026", "time": "02:00", "price": 1.0},
+                {"date": "Oct 25 2026", "time": "02:00", "price": 1.1},
+            ]
+        },
+        "SEK/kWh",
+    )
+    assert series.intervals[1].start > series.intervals[0].start
+
+
+def test_native_nordpool_datetime_attributes_match_serialized_prices_across_dst() -> None:
+    local = ZoneInfo("Europe/Stockholm")
+    starts = [datetime(2026, 10, 25, 2, tzinfo=local, fold=fold) for fold in (0, 1)]
+    items = [
+        {"start": start, "end": start.astimezone(UTC) + timedelta(hours=1), "value": 1 + i}
+        for i, start in enumerate(starts)
+    ]
+    native = normalize_price_series({"raw_today": items}, "SEK/kWh")
+    serialized = normalize_price_series({
+        "raw_today": [{**item, "start": item["start"].isoformat(),
+                       "end": item["end"].isoformat()} for item in items]
+    }, "SEK/kWh")
+    assert native.fingerprint == serialized.fingerprint
+    assert native.intervals[1].start - native.intervals[0].start == timedelta(hours=1)
+    with pytest.raises(ValueError, match="price_timestamp_timezone_required"):
+        normalize_price_series({"raw_today": [{
+            "start": datetime(2026, 10, 25, 2), "value": 1
+        }]}, "SEK/kWh")
+
+
+def test_export_disabled_uses_zero_export_peak_shaving() -> None:
+    result = plan(greenely(1.0, 1.1, 3.0), export_allowed=False)
+
+    discharge = next(
+        action for action in result.actions if action.direction is PriceDirection.DISCHARGE
+    )
+    assert discharge.discharge_mode is PriceDischargeMode.SELF_CONSUMPTION
+    assert discharge.service == "peakshaving"
+    assert discharge.values["exportlim"] == 0
+    assert discharge.values["charge_max"] == 0
+
+
+def test_export_requires_its_own_spread_and_uses_signed_demand_response() -> None:
+    below = plan(greenely(1.0, 1.1, 2.0), export_allowed=True, export_delta=1.5)
+    above = plan(greenely(1.0, 1.1, 3.0), export_allowed=True, export_delta=1.5)
+
+    below_discharge = next(
+        action for action in below.actions if action.direction is PriceDirection.DISCHARGE
+    )
+    above_discharge = next(
+        action for action in above.actions if action.direction is PriceDirection.DISCHARGE
+    )
+    assert below_discharge.discharge_mode is PriceDischargeMode.SELF_CONSUMPTION
+    assert above_discharge.discharge_mode is PriceDischargeMode.EXPORT
+    assert above_discharge.service == "demandresponse"
+    assert above_discharge.values["pacref"] < 0
+
+
+def test_grid_import_cost_is_avoided_for_self_consumption_but_not_export() -> None:
+    self_consumption = plan(
+        greenely(1.0, 1.1, 2.0),
+        export_allowed=False,
+        grid_import_cost=1.2,
+    )
+    export = plan(
+        greenely(1.0, 1.1, 2.0),
+        export_allowed=True,
+        export_delta=0.5,
+        grid_import_cost=1.2,
+    )
+
+    discharge = next(
+        action
+        for action in self_consumption.actions
+        if action.direction is PriceDirection.DISCHARGE
+    )
+    assert discharge.discharge_mode is PriceDischargeMode.SELF_CONSUMPTION
+    assert export.actions
+    assert all(action.discharge_mode is not PriceDischargeMode.EXPORT for action in export.actions)
+
+
+@pytest.mark.parametrize("high,qualifies", [(1.92, False), (1.93, True)])
+def test_minimum_self_profit_is_after_grid_loss_and_cycle_cost(high, qualifies):
+    result = plan(greenely(.5, high), initial_soc=10,
+                  grid_import_cost=.65, cycle_cost=.3, minimum_profit=1)
+    discharges = [a for a in result.actions if a.direction is PriceDirection.DISCHARGE]
+    assert bool(discharges) is qualifies
+    if qualifies:
+        action = discharges[0]
+        expected_net = high + .65 - (.5 + .65) / .9 - .3
+        assert action.net_profit_sek_per_kwh == pytest.approx(expected_net)
+        assert action.expected_margin_sek == pytest.approx(
+            action.power_kw * action.duration_seconds / 3600 * expected_net
+        )
+        assert result.expected_margin_sek == pytest.approx(action.expected_margin_sek)
+
+
+@pytest.mark.parametrize("high,qualifies", [(3.57, False), (3.58, True)])
+def test_export_has_independent_net_profit_floor(high, qualifies):
+    result = plan(greenely(.5, high), initial_soc=10, export_allowed=True,
+                  export_delta=2, minimum_profit=10, grid_import_cost=.65, cycle_cost=.3)
+    discharges = [a for a in result.actions if a.direction is PriceDirection.DISCHARGE]
+    assert bool(discharges) is qualifies
+    if qualifies:
+        assert discharges[0].discharge_mode is PriceDischargeMode.EXPORT
+        assert discharges[0].net_profit_sek_per_kwh == pytest.approx(
+            high - (.5 + .65) / .9 - .3
+        )
+
+
+def test_export_permission_cannot_suppress_qualifying_self_consumption():
+    result = plan(greenely(.5, 2), initial_soc=10, export_allowed=True,
+                  export_delta=2, minimum_profit=1, grid_import_cost=.65, cycle_cost=.3)
+    discharge = next(a for a in result.actions if a.direction is PriceDirection.DISCHARGE)
+    assert discharge.discharge_mode is PriceDischargeMode.SELF_CONSUMPTION
+    assert discharge.net_profit_sek_per_kwh >= 1
+
+
+def test_battery_cannot_charge_for_price_arbitrage_with_discharge_disabled():
+    assert plan(greenely(.5, 4), initial_soc=10, discharge_kw=0).actions == ()
+
+
+def test_plan_does_not_charge_for_a_peak_beyond_external_energy_boundary():
+    series = greenely(.5, 1, 4)
+    result = plan(series, initial_soc=10, minimum_profit=1,
+                  end_before=series.intervals[-1].start)
+    assert result.ready
+    assert result.actions == ()
+
+
+def test_discharge_uses_actual_simulated_purchase_price_not_a_missed_low():
+    series = greenely(.1, .5, 1)
+    # Only the final expensive interval is in the future. Do not value the
+    # initial energy using the much cheaper historical minimum .1.
+    result = build_price_plan(
+        series, now=series.intervals[1].start + timedelta(minutes=5),
+        horizon_hours=12, minimum_lead_minutes=5, usable_soc_percent=90,
+        usable_capacity_kwh=10, minimum_soc_percent=10, maximum_soc_percent=90,
+        maximum_charge_kw=2, maximum_discharge_kw=2,
+        minimum_difference_sek_per_kwh=.6, export_allowed=False,
+        export_minimum_difference_sek_per_kwh=2, round_trip_efficiency_percent=90,
+        cycle_cost_sek_per_kwh=0, grid_import_cost_sek_per_kwh=0,
+    )
+    assert result.actions == ()
+
+
+def test_subminimum_charge_does_not_create_phantom_discharge_energy():
+    result = plan(greenely(.5, 4), initial_soc=10, charge_kw=.049)
+    assert result.actions == ()
+
+
+def test_plan_respects_usable_soc_and_power_limits() -> None:
+    result = plan(greenely(0.5, 0.6, 4.0, 4.0), export_allowed=True, export_delta=1.0)
+
+    assert result.ready
+    assert result.minimum_projected_soc >= 10
+    assert result.maximum_projected_soc <= 90
+    assert all(action.power_kw <= 2 for action in result.actions)
+
+
+def test_plan_waits_for_the_cheapest_future_charge_interval() -> None:
+    result = plan(greenely(1.0, 0.5, 3.0), export_allowed=True, export_delta=1.0)
+
+    charge = next(action for action in result.actions if action.direction is PriceDirection.CHARGE)
+    assert charge.price_sek_per_kwh == 0.5
+
+
+@pytest.mark.parametrize("initial_soc", [0, 5, 10, 90, 95, 100])
+def test_feature_limits_constrain_each_direction_without_blocking_other_initial_soc(initial_soc):
+    result = plan(greenely(0.5, 4), initial_soc=initial_soc, charge_kw=100, discharge_kw=100)
+    assert result.ready
+    assert result.actions
+    for item in result.actions:
+        if item.direction is PriceDirection.CHARGE:
+            assert item.projected_usable_soc_percent <= 90 + 1e-6
+        else:
+            assert item.projected_usable_soc_percent >= 10 - 1e-6
+    if initial_soc >= 90:
+        assert all(item.direction is PriceDirection.DISCHARGE for item in result.actions)
+        # Preserve all real usable energy; do not silently clamp 100% to the
+        # feature's 90% ceiling before calculating available discharge.
+        delivered_kwh = sum(item.power_kw * item.duration_seconds / 3600
+                            for item in result.actions)
+        assert delivered_kwh == pytest.approx(10 * (initial_soc - 10) / 100 * (0.9 ** 0.5))
+    if initial_soc <= 10:
+        assert result.actions[0].direction is PriceDirection.CHARGE
+
+
+@pytest.mark.parametrize("initial_soc,charge_kw,discharge_kw", [(5, 0, 100), (95, 100, 0)])
+def test_no_forced_recovery_or_wrong_direction_when_price_or_power_prevents_it(
+    initial_soc, charge_kw, discharge_kw,
+):
+    result = plan(greenely(0.5, 4), initial_soc=initial_soc,
+                  charge_kw=charge_kw, discharge_kw=discharge_kw)
+    assert result.ready
+    assert result.actions == ()
+
+
+@pytest.mark.parametrize("initial_soc", [-1, 101])
+def test_soc_outside_the_physical_usable_range_is_still_invalid(initial_soc):
+    with pytest.raises(ValueError, match="price_usable_soc_invalid"):
+        plan(greenely(0.5, 4), initial_soc=initial_soc)
+
+
+def test_config_requires_sensor_entity_and_explicit_optional_source() -> None:
+    config = PriceOptimizationConfig.from_mapping(
+        {"price_entity_id": "sensor.greenely_prices", "managed_source_id": 7}
+    )
+    assert config.price_entity_id == "sensor.greenely_prices"
+    assert config.managed_source_id == 7
+    with pytest.raises(ValueError, match="price_entity_invalid"):
+        PriceOptimizationConfig.from_mapping({"price_entity_id": "switch.wrong"})

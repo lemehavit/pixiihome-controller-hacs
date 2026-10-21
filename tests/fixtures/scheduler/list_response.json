@@ -1,0 +1,29 @@
+{
+  "Omnibus": {
+    "msg": [1, 1, 7, 3, 255, 2, 101, 52, 0, 33, 0, 0],
+    "data": {
+      "entries": [
+        {
+          "entry": 0,
+          "sch_duration": 3600,
+          "sch_enabled": 1,
+          "sch_index": 4100,
+          "sch_recurrence": false,
+          "sch_start": 1789250400,
+          "srv_no": 2005,
+          "srv_type": 107
+        },
+        {
+          "entry": 1,
+          "sch_duration": 3600,
+          "sch_enabled": 1,
+          "sch_index": 4101,
+          "sch_recurrence": false,
+          "sch_start": 1789257600,
+          "srv_no": 2006,
+          "srv_type": 107
+        }
+      ]
+    }
+  }
+}
