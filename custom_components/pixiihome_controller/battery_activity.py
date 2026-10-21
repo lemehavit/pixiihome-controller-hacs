@@ -316,6 +316,8 @@ class BatteryActivityTracker:
                 continue
             if schedule.ownership.ownership.value == "integration_owned":
                 continue
+            if own_schedule_owner(self.runtime, schedule) is not None:
+                continue
             return Cause(
                 _source_name(schedule),
                 f"Gateway schedule #{schedule.sch_index}",
@@ -342,6 +344,8 @@ class BatteryActivityTracker:
         for schedule in snapshot.schedules:
             if schedule.ownership.ownership.value == "integration_owned":
                 continue
+            if own_schedule_owner(self.runtime, schedule) is not None:
+                continue
             if schedule.end_epoch <= epoch or not schedule.enabled:
                 continue
             key = (schedule.sch_index, schedule.start_epoch, schedule.service_type)
@@ -360,6 +364,33 @@ class BatteryActivityTracker:
         for key, (text, end) in previous.items():
             if key not in current and end > epoch:
                 self._log(now, f"External schedule removed from the Gateway: {text}")
+
+
+def own_schedule_owner(runtime: Any, schedule: Any) -> str | None:
+    """Feature name when a Gateway schedule has the exact shape of one of our records.
+
+    Display only: the Gateway list does not carry our identity, so the start,
+    duration and service of an owned or provisional record are compared.
+    Control code never uses this to decide ownership.
+    """
+    ownership = getattr(runtime, "scheduler_ownership", None)
+    records = getattr(ownership, "records", None)
+    if not isinstance(records, Mapping):
+        return None
+    from .price_controller import _record_start
+
+    for record in records.values():
+        if getattr(record.lifecycle, "value", None) not in {"owned", "provisional"}:
+            continue
+        start = _record_start(record)
+        if (
+            start is not None
+            and int(start.timestamp()) == schedule.start_epoch
+            and record.intended_state.get("duration") == schedule.duration_seconds
+            and SERVICE_NUMBERS.get(record.service) == schedule.service_type
+        ):
+            return OWNER_NAMES.get(record.owner or "", "this integration")
+    return None
 
 
 def _owns(controller: Any) -> bool:
@@ -388,4 +419,4 @@ def _number(value: object) -> float | None:
     return number if isfinite(number) else None
 
 
-__all__ = ["BatteryActivityTracker", "Cause", "direction_of"]
+__all__ = ["BatteryActivityTracker", "Cause", "direction_of", "own_schedule_owner"]

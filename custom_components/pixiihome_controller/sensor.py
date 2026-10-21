@@ -701,6 +701,7 @@ class PixiiEnergyForecastSensor(SensorEntity):
                     None if service.savings.yesterday_sek is None
                     else round(service.savings.yesterday_sek, 2)
                 ),
+                "this_week_sek": round(service.savings.week_sek(now), 2),
                 "this_month_sek": round(service.savings.month_sek(now), 2),
                 "last_30_days_sek": round(
                     sum(value for _, value in service.savings.history[-30:]), 2

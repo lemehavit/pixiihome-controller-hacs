@@ -177,3 +177,13 @@ def test_savings_compare_with_the_same_hour_without_battery() -> None:
     assert tracker.yesterday_sek == pytest.approx(1.25)
     restored = SavingsTracker.from_dict(tracker.as_dict())
     assert restored.history == tracker.history
+
+
+def test_week_savings_start_on_monday() -> None:
+    tracker = SavingsTracker()
+    sunday = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+    tracker.add(sunday, 0.0, -2000.0, 1.0, 0.0, 0.25)
+    monday = sunday + timedelta(days=1)
+    tracker.add(monday, 0.0, -1000.0, 1.0, 0.0, 0.25)
+    assert tracker.week_sek(monday) == pytest.approx(0.25)
+    assert tracker.month_sek(monday) == pytest.approx(0.75)
