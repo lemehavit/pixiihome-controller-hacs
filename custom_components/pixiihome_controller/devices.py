@@ -21,6 +21,7 @@ class PixiiFeature(StrEnum):
     SOLAR_CHARGING = "solar_charging"
     ADAPTIVE_PEAK_SHAVING = "adaptive_peak_shaving"
     PRICE_OPTIMIZATION = "price_optimization"
+    ENERGY_FORECAST = "energy_forecast"
 
 
 FEATURE_NAMES: dict[PixiiFeature, str] = {
@@ -30,6 +31,7 @@ FEATURE_NAMES: dict[PixiiFeature, str] = {
     PixiiFeature.SOLAR_CHARGING: "Automatic solar charging",
     PixiiFeature.ADAPTIVE_PEAK_SHAVING: "Adaptive peak shaving",
     PixiiFeature.PRICE_OPTIMIZATION: "Price optimization",
+    PixiiFeature.ENERGY_FORECAST: "Energy forecast",
 }
 
 

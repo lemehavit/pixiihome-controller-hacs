@@ -96,4 +96,21 @@ data. Never attach raw HAR files, keys, cookies, complete journals or MQTT captu
 The maintainer may ask for a minimal anonymized protocol example. Keep raw
 installation reports locally. See [SECURITY.md](../SECURITY.md) for private reporting.
 
+
+## Activity log
+
+Open **Logbook** and filter on the **Battery activity** sensor (or a feature's
+status sensor) to see what happened and why:
+
+| Entry | Means |
+| --- | --- |
+| *Battery runs Demand Response (102): external schedule (…) 17:00–18:00* | A service started; the cause names the integration feature, an external Gateway schedule or *not started by this integration*. Battery power, SOC and grid power are added. |
+| *Battery started charging / discharging / stopped …* | The direction changed and held for 3 minutes, with the running service and its cause. |
+| *New external schedule in the Gateway* / *removed* | Someone else (for example the aggregator) added or removed a schedule. |
+| *New plan (standard planner): …* | Price optimization's plan changed: each interval with power and price, and the expected profit. |
+| *Nothing planned: the best charge-then-use price pair gives about X kr/kWh* | Why no price schedule was made: compare X with your minimum net profit. |
+| *Scheduled / Removed price …* | Schedules actually created or removed, with the reason. |
+| *Stopping solar charging / adaptive peak shaving: …* | Why the feature stopped. |
+| *Smart solar charging is exporting now …* | Smart solar waits, with prices and the reachable SOC. |
+
 [← Worked examples](examples.md) · [Back to guide contents](README.md)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -151,6 +151,13 @@ async def async_setup_entry(
         entities.extend(
             PixiiPriceScheduleSensor(runtime, key, parent_device_id)
             for key in ("price_next_charge", "price_next_discharge", "price_scheduled_count")
+        )
+    if getattr(runtime, "battery_activity", None) is not None:
+        entities.append(PixiiBatteryActivitySensor(runtime))
+    if getattr(runtime, "energy_forecast", None) is not None:
+        entities.extend(
+            PixiiEnergyForecastSensor(runtime, key, parent_device_id)
+            for key in FORECAST_SENSOR_KEYS
         )
     async_add_entities(entities)
 
@@ -577,3 +584,129 @@ class PixiiSchedulerInventorySensor(SensorEntity):
         if snapshot is None:
             return {"data_status": "stale", "authenticated": None, "schedules": []}
         return inventory_attributes(snapshot)
+
+
+FORECAST_SENSOR_KEYS = (
+    "household_load_power",
+    "household_load_forecast",
+    "solar_forecast_remaining_today",
+    "battery_savings_today",
+)
+
+
+class PixiiBatteryActivitySensor(SensorEntity):
+    """What the battery does now and why; each change is a logbook entry."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "battery_activity"
+
+    def __init__(self, runtime: RuntimeData) -> None:
+        tracker = runtime.battery_activity
+        if tracker is None:
+            raise RuntimeError("battery activity sensor requires the tracker")
+        self.runtime = runtime
+        self.tracker = tracker
+        self._attr_unique_id = f"{runtime.serial}_battery_activity"
+        self._attr_device_info = {"identifiers": {(DOMAIN, runtime.serial)}}
+        self._remove_listener = None
+
+    async def async_added_to_hass(self) -> None:
+        self._remove_listener = self.tracker.add_listener(self._state_changed)
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._remove_listener is not None:
+            self._remove_listener()
+            self._remove_listener = None
+
+    def _state_changed(self) -> None:
+        self.schedule_update_ha_state()
+
+    @property
+    def native_value(self) -> StateType:
+        return self.tracker.state()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self.tracker.attributes()
+
+
+class PixiiEnergyForecastSensor(SensorEntity):
+    """Household load and solar forecasts, and measured battery savings."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, runtime: RuntimeData, key: str, parent_device_id: str | None = None):
+        service = runtime.energy_forecast
+        if service is None:
+            raise RuntimeError("energy forecast sensor requires the forecast service")
+        self.runtime = runtime
+        self.service = service
+        self.key = key
+        self._attr_translation_key = key
+        self._attr_unique_id = f"{runtime.serial}_{key}"
+        self._attr_device_info = feature_device_info(
+            runtime.serial, PixiiFeature.ENERGY_FORECAST, parent_device_id,
+        )
+        if key == "household_load_power":
+            self._attr_native_unit_of_measurement = UnitOfPower.WATT
+            self._attr_device_class = SensorDeviceClass.POWER
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+        elif key == "battery_savings_today":
+            self._attr_native_unit_of_measurement = "SEK"
+            self._attr_device_class = SensorDeviceClass.MONETARY
+            self._attr_suggested_display_precision = 2
+        else:
+            self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+            self._attr_device_class = SensorDeviceClass.ENERGY
+            self._attr_suggested_display_precision = 1
+        self._remove_listener = None
+
+    async def async_added_to_hass(self) -> None:
+        self._remove_listener = self.service.add_listener(self._state_changed)
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._remove_listener is not None:
+            self._remove_listener()
+            self._remove_listener = None
+
+    def _state_changed(self) -> None:
+        self.schedule_update_ha_state()
+
+    @property
+    def native_value(self) -> StateType:
+        service = self.service
+        if self.key == "household_load_power":
+            return None if service.load_w is None else round(service.load_w)
+        if self.key == "household_load_forecast":
+            now = datetime.now(UTC)
+            return round(service.load_energy_kwh(now, now + timedelta(hours=24)), 2)
+        if self.key == "solar_forecast_remaining_today":
+            value = service.remaining_solar_today_kwh()
+            return None if value is None else round(value, 2)
+        if self.key == "battery_savings_today":
+            return round(service.savings.today_sek, 2) if service.savings.day else None
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        service = self.service
+        if self.key == "household_load_forecast":
+            return service.load_forecast_attributes()
+        if self.key == "solar_forecast_remaining_today":
+            return service.solar_forecast_attributes()
+        if self.key == "battery_savings_today":
+            now = datetime.now(UTC)
+            return {
+                "yesterday_sek": (
+                    None if service.savings.yesterday_sek is None
+                    else round(service.savings.yesterday_sek, 2)
+                ),
+                "this_month_sek": round(service.savings.month_sek(now), 2),
+                "last_30_days_sek": round(
+                    sum(value for _, value in service.savings.history[-30:]), 2
+                ),
+                "daily": [[day, round(value, 2)] for day, value in service.savings.history[-14:]],
+                "method": "grid cost without battery minus measured grid cost, "
+                          "at the price entity plus variable import cost",
+            }
+        return {"status": service.status, "reason": service.reason}

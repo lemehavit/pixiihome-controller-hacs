@@ -1,0 +1,179 @@
+"""Whole-day dynamic-programming planner and the standard plan's load cap."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from custom_components.pixiihome_controller.control.price_optimization import (
+    ExternalWindow,
+    PriceDirection,
+    PriceDischargeMode,
+    PriceInterval,
+    PriceSeries,
+    build_price_plan,
+    merge_adjacent_actions,
+)
+from custom_components.pixiihome_controller.control.whole_day_planner import (
+    build_whole_day_plan,
+)
+
+NOW = datetime(2026, 11, 2, 0, 0, tzinfo=UTC)
+
+
+def _series(prices: list[float], minutes: int = 60) -> PriceSeries:
+    intervals = tuple(
+        PriceInterval(
+            NOW + timedelta(minutes=minutes * (i + 1)),
+            NOW + timedelta(minutes=minutes * (i + 2)),
+            price,
+        )
+        for i, price in enumerate(prices)
+    )
+    return PriceSeries(intervals, "SEK/kWh", "prices", "fingerprint")
+
+
+def _plan(series: PriceSeries, forecast, **overrides):
+    arguments = dict(
+        now=NOW,
+        horizon_hours=48,
+        minimum_lead_minutes=5,
+        usable_soc_percent=10.0,
+        usable_capacity_kwh=10.0,
+        minimum_soc_percent=10.0,
+        maximum_soc_percent=90.0,
+        maximum_charge_kw=5.0,
+        maximum_discharge_kw=5.0,
+        minimum_difference_sek_per_kwh=0.5,
+        export_allowed=False,
+        export_minimum_difference_sek_per_kwh=1.0,
+        round_trip_efficiency_percent=90.0,
+        cycle_cost_sek_per_kwh=0.0,
+        grid_import_cost_sek_per_kwh=0.5,
+        forecast=forecast,
+    )
+    arguments.update(overrides)
+    return build_whole_day_plan(series, **arguments)
+
+
+def test_charges_cheap_and_covers_only_the_house_in_expensive_hours() -> None:
+    series = _series([0.2, 0.2, 3.0, 3.0, 3.0, 3.0])
+    result = _plan(series, lambda start, end: (1.5, 0.0))
+    kinds = [slot.kind for slot in result.slots]
+    assert kinds[:2] == ["grid_charge", "grid_charge"]
+    assert kinds[2:] == ["self_consumption"] * 4
+    # Without export the battery never discharges beyond the house load.
+    assert all(slot.battery_kw >= -1.5 - 1e-6 for slot in result.slots)
+    assert result.plan.ready
+    assert result.planned_cost_sek < result.baseline_cost_sek
+    discharge = [a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE]
+    assert all(a.service == "peakshaving" for a in discharge)
+    assert all(a.discharge_mode is PriceDischargeMode.SELF_CONSUMPTION for a in discharge)
+
+
+def test_small_spreads_do_not_cycle_the_battery() -> None:
+    series = _series([1.0, 1.0, 1.3, 1.3])
+    result = _plan(series, lambda start, end: (1.0, 0.0))
+    assert all(slot.kind == "idle" for slot in result.slots)
+    assert result.plan.actions == ()
+
+
+def test_export_needs_permission_and_its_own_minimum_profit() -> None:
+    series = _series([0.1, 0.1, 4.0, 4.0])
+    no_export = _plan(series, lambda start, end: (0.5, 0.0))
+    assert "export" not in {slot.kind for slot in no_export.slots}
+    export = _plan(series, lambda start, end: (0.5, 0.0), export_allowed=True)
+    assert "export" in {slot.kind for slot in export.slots}
+    exporting = [a for a in export.plan.actions if a.discharge_mode is PriceDischargeMode.EXPORT]
+    assert exporting and all(a.service == "demandresponse" for a in exporting)
+    assert all(float(a.values["pacref"]) < 0 for a in exporting)
+
+
+def test_solar_surplus_fills_the_battery_in_the_cheapest_sunny_hours() -> None:
+    # Six sunny hours with 4 kW surplus; the battery (8 kWh room) only needs two.
+    prices = [1.5, 1.4, 0.3, 0.2, 1.3, 1.2, 2.5, 2.5]
+
+    def forecast(start: datetime, end: datetime) -> tuple[float, float]:
+        hour = int((start - NOW).total_seconds() // 3600) - 1
+        return (1.0, 5.0 if hour < 6 else 0.0)
+
+    result = _plan(_series(prices), forecast, maximum_charge_kw=4.0)
+    kinds = [slot.kind for slot in result.slots]
+    assert kinds[0] == "idle" and kinds[1] == "idle"  # export the expensive sun
+    assert kinds[2] == "solar" and kinds[3] == "solar"
+    assert kinds[6] == "self_consumption"
+    # Solar-only charging needs no Gateway schedule.
+    assert all(a.direction is not PriceDirection.CHARGE for a in result.plan.actions)
+
+
+def test_known_target_soc_window_resets_energy_and_blocks_actions() -> None:
+    series = _series([0.2, 3.0, 3.0, 3.0, 0.2, 3.0])
+    window = ExternalWindow(
+        series.intervals[2].start, series.intervals[3].end, 80.0
+    )
+    result = _plan(series, lambda start, end: (1.0, 0.0), external_windows=[window])
+    assert result.slots[2].kind == "external" and result.slots[3].kind == "external"
+    assert result.slots[3].usable_soc_percent == pytest.approx(80.0, abs=1)
+    unknown = ExternalWindow(series.intervals[2].start, series.intervals[3].end, None)
+    truncated = _plan(series, lambda start, end: (1.0, 0.0), external_windows=[unknown])
+    assert len(truncated.slots) == 2
+
+
+def test_missing_forecast_blocks_the_whole_day_plan() -> None:
+    result = _plan(_series([1.0, 2.0]), lambda start, end: None)
+    assert result.plan.blockers == ("energy_forecast_unavailable",)
+
+
+def test_standard_plan_caps_self_consumption_energy_by_forecast_load() -> None:
+    series = _series([0.2, 3.0, 3.0, 3.0])
+    arguments = dict(
+        now=NOW,
+        horizon_hours=48,
+        minimum_lead_minutes=5,
+        usable_soc_percent=90.0,
+        usable_capacity_kwh=10.0,
+        minimum_soc_percent=10.0,
+        maximum_soc_percent=90.0,
+        maximum_charge_kw=5.0,
+        maximum_discharge_kw=5.0,
+        minimum_difference_sek_per_kwh=0.5,
+        export_allowed=False,
+        export_minimum_difference_sek_per_kwh=1.0,
+        round_trip_efficiency_percent=90.0,
+        cycle_cost_sek_per_kwh=0.0,
+        grid_import_cost_sek_per_kwh=0.5,
+    )
+    uncapped = build_price_plan(series, **arguments)
+    capped = build_price_plan(series, **arguments, net_load_kw=lambda start, end: 1.0)
+    first_uncapped = next(a for a in uncapped.actions if a.direction is PriceDirection.DISCHARGE)
+    first_capped = next(a for a in capped.actions if a.direction is PriceDirection.DISCHARGE)
+    # The schedule still allows full power; only the simulated energy is capped.
+    assert first_capped.power_kw == first_uncapped.power_kw
+    assert first_capped.projected_usable_soc_percent > first_uncapped.projected_usable_soc_percent
+    assert capped.expected_margin_sek <= uncapped.expected_margin_sek
+    none = build_price_plan(series, **arguments, net_load_kw=lambda start, end: 0.0)
+    assert all(a.direction is not PriceDirection.DISCHARGE for a in none.actions)
+
+
+def test_adjacent_identical_actions_merge_within_the_policy_duration() -> None:
+    series = _series([0.2, 0.2, 0.2, 3.0], minutes=15)
+    result = _plan(series, lambda start, end: (8.0, 0.0), usable_soc_percent=10.0)
+    charges = [a for a in result.plan.actions if a.direction is PriceDirection.CHARGE]
+    merged = merge_adjacent_actions(result.plan.actions)
+    assert len(merged) < len(result.plan.actions)
+    merged_charge = next(a for a in merged if a.direction is PriceDirection.CHARGE)
+    assert merged_charge.start == charges[0].start
+    limited = merge_adjacent_actions(result.plan.actions, max_duration_seconds=900)
+    assert len(limited) == len(result.plan.actions)
+
+
+def test_best_net_profit_explains_an_empty_plan() -> None:
+    from custom_components.pixiihome_controller.price_controller import best_net_profit
+
+    series = _series([1.0, 0.5, 1.2, 0.9])
+    # Charge at 0.5, use at 1.2: (1.2 + 0.5) - (0.5 + 0.5) / 0.9 - 0.1.
+    assert best_net_profit(series, NOW, 0.9, 0.5, 0.1) == pytest.approx(
+        1.7 - 1.0 / 0.9 - 0.1
+    )
+    assert best_net_profit(_series([1.0]), NOW, 0.9, 0.5, 0.0) is None

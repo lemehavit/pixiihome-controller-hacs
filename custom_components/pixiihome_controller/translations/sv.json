@@ -34,7 +34,8 @@
         "menu_options": {
           "load_balancing": "Lastbalansering",
           "scheduler": "Scheman och styrpolicy",
-          "price_optimization": "Prisoptimering"
+          "price_optimization": "Prisoptimering",
+          "energy_forecast": "Energiprognos"
         }
       },
       "scheduler": {
@@ -95,6 +96,15 @@
           "minimum_lead_minutes": "Minsta framförhållning för schema",
           "refresh_minutes": "Intervall för automatisk omplanering"
         }
+      },
+      "energy_forecast": {
+        "title": "Energiprognos",
+        "description": "Valfria entiteter för förbruknings- och solprognos. Solprognos: en eller flera Solcast-sensorer (prognos idag, imorgon) eller Open-Meteo Solar Forecast-sensorer med attributet watts. Solproduktion: växelriktarens aktuella effekt, behövs för att skilja sol från förbrukning. Temperatur: utetemperaturgivare eller väderentitet. Inget här skickar några kommandon.",
+        "data": {
+          "solar_forecast_entity_ids": "Solprognossensorer",
+          "solar_power_entity_id": "Sensor för solproduktion (effekt)",
+          "temperature_entity_id": "Utetemperatur (sensor eller väder)"
+        }
       }
     },
     "error": {
@@ -102,7 +112,8 @@
       "margin_exceeds_fuse": "Marginalen måste vara lägre än säkringen på varje använd fas.",
       "stale_interval_too_short": "Högsta mätålder måste vara minst två mätintervall.",
       "invalid_meter_entities": "Välj olika ström- och spänningssensorer för varje fas. Samma sensor får bara användas en gång.",
-      "invalid_price_optimization": "Kontrollera prissensor, käll-ID och planeringsintervall."
+      "invalid_price_optimization": "Kontrollera prissensor, käll-ID och planeringsintervall.",
+      "invalid_energy_forecast": "Välj sensorer (och endast väderentitet för temperatur)."
     }
   },
   "services": {
@@ -225,7 +236,8 @@
           "active": "Laddar solöverskott",
           "lease_expiring": "Avslutar solladdning",
           "soc_limit": "Högsta användbara SOC uppnådd",
-          "blocked": "Spärrad"
+          "blocked": "Spärrad",
+          "deferring": "Väntar: säljer nu, laddar senare"
         }
       },
       "adaptive_peak_shaving_status": {
@@ -263,6 +275,21 @@
       },
       "price_scheduled_count": {
         "name": "Skapade prisscheman"
+      },
+      "household_load_power": {
+        "name": "Husets förbrukning"
+      },
+      "household_load_forecast": {
+        "name": "Förbrukningsprognos nästa 24 h"
+      },
+      "solar_forecast_remaining_today": {
+        "name": "Solprognos resten av dagen"
+      },
+      "battery_savings_today": {
+        "name": "Batteriets besparing idag"
+      },
+      "battery_activity": {
+        "name": "Batteriaktivitet"
       }
     },
     "number": {
@@ -322,6 +349,15 @@
       },
       "price_cycle_cost_sek_per_kwh": {
         "name": "Batteriets cykelkostnad per levererad kWh"
+      },
+      "solar_smart_min_advantage_sek_per_kwh": {
+        "name": "Smart solladdning minsta prisfördel"
+      },
+      "solar_smart_safety_margin_percent": {
+        "name": "Smart solladdning säkerhetsmarginal"
+      },
+      "price_blocked_notify_hours": {
+        "name": "Avisera när prisoptimeringen stått still i"
       }
     },
     "switch": {
@@ -336,6 +372,15 @@
       },
       "price_adjust_external_target_soc": {
         "name": "Tillåt ändring av aggregatorns scheman"
+      },
+      "price_whole_day_planner": {
+        "name": "Använd helhetsplanerare"
+      },
+      "price_plan_high_consumption": {
+        "name": "Planera för hög förbrukning"
+      },
+      "solar_smart_enabled": {
+        "name": "Smart solladdning"
       }
     }
   }

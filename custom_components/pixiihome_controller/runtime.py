@@ -18,6 +18,7 @@ from homeassistant.helpers.storage import Store
 from .allocator import MessageIdAllocator
 from .aps_controller import AdaptivePeakShavingController, build_aps_lease_request
 from .battery import BatteryModel, BatteryReading
+from .battery_activity import BatteryActivityTracker
 from .capabilities import CapabilityRegistry
 from .command import (
     CommandManager,
@@ -68,6 +69,7 @@ from .control.production import (
     ProductionControlAuthority,
 )
 from .control.settings import ControllerState, OperationalSettings
+from .energy_forecast_service import CONF_ENERGY_FORECAST, EnergyForecastService
 from .exceptions import SchedulerClientError, SchedulerConfigurationError
 from .load_balancing_observer import LoadBalancingObserver
 from .meter_limit_controller import MeterLimitLoadBalancer
@@ -194,6 +196,8 @@ class RuntimeData:
     price_optimization_controller: PriceOptimizationController | None = field(
         init=False, default=None
     )
+    energy_forecast: EnergyForecastService | None = field(init=False, default=None)
+    battery_activity: BatteryActivityTracker | None = field(init=False, default=None)
     operational_settings_error: str | None = field(init=False, default=None)
     _production_previews: dict[str, dict[str, Any]] = field(
         init=False, default_factory=dict, repr=False
@@ -245,6 +249,7 @@ class RuntimeData:
                 CONF_AUTOMATION_POLICY,
                 CONF_LOAD_BALANCING,
                 CONF_PRICE_OPTIMIZATION,
+                CONF_ENERGY_FORECAST,
             )
         )
         if settings.get(CONF_SCHEDULER_CA_COMPATIBILITY) is True:
@@ -916,7 +921,10 @@ class RuntimeData:
                 raise HomeAssistantError("Operational setting is invalid") from err
             await self._persist_product_controller_state_locked(operational_settings=updated)
             self.operational_settings = updated
-        if key.startswith("price_") and self.price_optimization_controller is not None:
+        if (
+            key.startswith(("price_", "solar_smart_"))
+            and self.price_optimization_controller is not None
+        ):
             self.price_optimization_controller.request_refresh()
 
     async def async_set_controller_enabled(
@@ -1629,6 +1637,10 @@ class RuntimeData:
         await self.command_manager.start()
 
     async def stop(self) -> None:
+        if self.battery_activity is not None:
+            await self.battery_activity.stop()
+        if self.energy_forecast is not None:
+            await self.energy_forecast.stop()
         if self.price_optimization_controller is not None:
             await self.price_optimization_controller.soc_guard.stop()
             await self.price_optimization_controller.stop()

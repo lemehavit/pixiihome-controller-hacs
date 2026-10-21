@@ -15,6 +15,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 
 from .aps_controller import AdaptivePeakShavingController
+from .battery_activity import BatteryActivityTracker
 from .const import (
     CONF_AUTOMATION_POLICY,
     CONF_ENTRY_ID,
@@ -49,6 +50,7 @@ from .control.load_balancing import CONF_LOAD_BALANCING
 from .control.models import RuntimeMode
 from .control.price_optimization import CONF_PRICE_OPTIMIZATION
 from .dashboard import generate_dashboard_config, resolve_dashboard_entity_ids
+from .energy_forecast_service import CONF_ENERGY_FORECAST, EnergyForecastService
 from .entity_cleanup import remove_retired_entities
 from .exceptions import (
     SchedulerAuthenticationError,
@@ -155,6 +157,7 @@ def _scheduler_options_signature(entry: ConfigEntry) -> tuple[object, ...]:
             CONF_AUTOMATION_POLICY,
             CONF_LOAD_BALANCING,
             CONF_PRICE_OPTIMIZATION,
+            CONF_ENERGY_FORECAST,
         )
     )
 
@@ -522,6 +525,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     runtime.adaptive_peak_shaving_controller = AdaptivePeakShavingController(runtime)
     runtime.price_optimization_controller = PriceOptimizationController(runtime)
     runtime.price_optimization_controller.soc_guard.start()
+    runtime.energy_forecast = EnergyForecastService(runtime)
+    runtime.battery_activity = BatteryActivityTracker(runtime)
     remove_retired_entities(hass, entry, runtime.serial)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     await hass.config_entries.async_forward_entry_setups(
@@ -561,6 +566,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             runtime.price_optimization_controller.reason = str(error)
             runtime.price_optimization_controller.start()
     runtime.load_balancing_observer.start()
+    try:
+        await runtime.energy_forecast.start()
+    except Exception as error:  # noqa: BLE001 - forecasts are optional; never block setup
+        runtime.energy_forecast.status = "error"
+        runtime.energy_forecast.reason = str(error) or "forecast_start_failed"
+    try:
+        runtime.battery_activity.start()
+    except Exception:  # noqa: BLE001 - the activity log is optional; never block setup
+        pass
     return True
 
 

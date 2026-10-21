@@ -11,7 +11,10 @@ from custom_components.pixiihome_controller.devices import (
 
 
 def test_every_operational_setting_has_a_function_group() -> None:
-    assert {setting_feature(key) for key in SETTING_SPECS} == set(PixiiFeature)
+    # The energy forecast device holds sensors only; it has no settings.
+    assert {setting_feature(key) for key in SETTING_SPECS} == set(PixiiFeature) - {
+        PixiiFeature.ENERGY_FORECAST
+    }
 
 
 def test_feature_device_is_a_stable_child_of_the_gateway() -> None:

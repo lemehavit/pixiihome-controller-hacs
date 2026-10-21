@@ -168,6 +168,14 @@ Leave `managed_source_id` empty and external authority disabled to preserve
 aggregator scheduling. Relocation requires additional exact source, direction,
 future one-shot and readback proof; a source ID alone does not grant blanket control.
 
+## Use the consumption and solar forecast
+
+With **Configure → Energy forecast** set up, the plan limits self-consumption
+discharge to the forecast household load, and **Plan for high consumption**
+keeps more energy for hours with usually high load. **Use whole-day planner**
+plans the whole price horizon together with solar. See
+[Energy forecast](energy-forecast.md).
+
 ## Read the result and disable
 
 The next-charge/discharge sensors can describe a current or future interval.
@@ -186,4 +194,4 @@ preserved and new plans can wait for reconciliation. Do not clear the journal.
 Hardware validation remains bounded: natural SOC boundary crossing and physical
 priority handoff have not been verified. See the [release limitations](../README.md#control-status-and-limitations).
 
-[← Load balancing](load-balancing.md) · [Next: schedules and dashboards →](schedules-and-dashboard.md)
+[← Load balancing](load-balancing.md) · [Next: energy forecast →](energy-forecast.md)

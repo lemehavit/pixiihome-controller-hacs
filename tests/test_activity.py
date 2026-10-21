@@ -43,6 +43,9 @@ async def test_price_schedule_creation_is_logged_with_time_power_and_profit() ->
     await controller.tick()
 
     messages = [data["message"] for _, data in bus.events]
+    plans = [message for message in messages if message.startswith("New plan")]
+    assert len(plans) == 1 and "expected profit" in plans[0].lower()
+    messages = [message for message in messages if message not in plans]
     assert len(messages) == len(mutations.created)
     assert all(message.startswith("Scheduled ") and " kW" in message and "kr/kWh" in message
                for message in messages)

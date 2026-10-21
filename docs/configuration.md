@@ -80,6 +80,7 @@ entry. A blank password/bootstrap field preserves an existing saved value.
 | --- | --- | --- |
 | Load balancing | [Meter, phase and fuse settings](load-balancing.md#options-reference) | Enabling the observer or configuring physical phase protection support. |
 | Price optimization | [Price source and scheduling settings](price-optimization.md#source-and-timing-options) | Selecting a price sensor, horizon or optional aggregator source. |
+| Energy forecast | [Forecast entities](energy-forecast.md#configure-the-forecast) | Adding a solar forecast, inverter production or outdoor temperature. |
 
 There is no integration YAML configuration to copy into `configuration.yaml`.
 Examples in this guide describe UI settings, dashboard cards or read actions.

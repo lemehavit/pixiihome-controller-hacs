@@ -23,10 +23,13 @@ from .control.price_optimization import (
     PricePlanAction,
     PriceSeries,
     build_price_plan,
+    merge_adjacent_actions,
     normalize_price_series,
 )
+from .control.whole_day_planner import WholeDayResult, build_whole_day_plan
 from .price_guard import PriceSocGuard
 from .protocol.scheduler_readback import parse_scheduler_starttime
+from .reasons import reason_text
 from .scheduler.models import Ownership, ScheduleCompleteness, ScheduleConsistency
 from .scheduler.mutations import (
     SchedulerCreateRequest,
@@ -89,6 +92,12 @@ class PriceOptimizationController:
         self._lock = asyncio.Lock()
         self._listeners: list[Callable[[], None]] = []
         self._unsubscribers: list[Callable[[], None]] = []
+        self.whole_day: WholeDayResult | None = None
+        self.standard_plan_margin_sek: float | None = None
+        self.planner_engine = "standard"
+        self._logged_plan: tuple[object, ...] | None = None
+        self.problem_since: datetime | None = None
+        self.problem_notified = False
 
     @property
     def config(self) -> PriceOptimizationConfig:
@@ -107,8 +116,69 @@ class PriceOptimizationController:
 
     def _publish(self, status: str, reason: str | None = None) -> None:
         self.status, self.reason = status, reason
+        self._track_problem(status, reason)
         for listener in tuple(self._listeners):
             listener()
+
+    def _track_problem(self, status: str, reason: str | None) -> None:
+        """Notify once when planning has been blocked longer than the set limit."""
+        now = datetime.now(UTC)
+        if status not in {"blocked", "waiting_telemetry"}:
+            if self.problem_notified:
+                _dismiss_notification(self.runtime)
+                log_activity(self.runtime, PRICE_STATUS, "Price optimization is running again")
+            self.problem_since, self.problem_notified = None, False
+            return
+        if self.problem_since is None:
+            self.problem_since = now
+        hours = int(self.runtime.operational_settings.get("price_blocked_notify_hours"))
+        if hours <= 0 or self.problem_notified or now - self.problem_since < timedelta(hours=hours):
+            return
+        self.problem_notified = True
+        text = reason_text(reason)
+        log_activity(self.runtime, PRICE_STATUS,
+                     f"Price optimization has been stopped for over {hours} h: {text}")
+        _create_notification(
+            self.runtime,
+            f"Prisoptimeringen har stått still i över {hours} h.\n\nOrsak: {text}\n\n"
+            "Se sensorn Status för prisoptimering för detaljer.",
+        )
+
+    def _log_plan(self, plan: PricePlan, series: PriceSeries) -> None:
+        """Log the plan when its intervals change, or why nothing is planned."""
+        key = tuple(_action_key(action) for action in plan.actions)
+        if not plan.actions:
+            key = ("empty", self.planner_engine, datetime.now(UTC).date())
+        if key == self._logged_plan:
+            return
+        self._logged_plan = key
+        engine = "whole-day" if self.planner_engine == "whole_day" else "standard"
+        if plan.actions:
+            parts = [_action_text(action) for action in plan.actions[:6]]
+            if len(plan.actions) > 6:
+                parts.append(f"and {len(plan.actions) - 6} more")
+            log_activity(self.runtime, PRICE_STATUS,
+                         f"New plan ({engine} planner): " + "; ".join(parts)
+                         + f". Expected profit {plan.expected_margin_sek:.2f} kr")
+            return
+        settings = self.runtime.operational_settings
+        best = best_net_profit(
+            series, datetime.now(UTC),
+            float(settings.get("price_round_trip_efficiency_percent")) / 100,
+            float(settings.get("price_grid_import_cost_sek_per_kwh")),
+            float(settings.get("price_cycle_cost_sek_per_kwh")),
+        )
+        minimum = float(settings.get("price_min_difference_sek_per_kwh"))
+        if best is None:
+            log_activity(self.runtime, PRICE_STATUS,
+                         f"Nothing planned ({engine} planner): no future prices to compare")
+            return
+        log_activity(
+            self.runtime, PRICE_STATUS,
+            f"Nothing planned ({engine} planner): the best charge-then-use price pair "
+            f"gives about {best:.2f} kr/kWh net profit after losses, your minimum is "
+            f"{minimum:.2f} kr/kWh (or the battery is already at its SOC limits)",
+        )
 
     def attributes(self) -> dict[str, Any]:
         from .price_timeline import price_timeline
@@ -116,9 +186,28 @@ class PriceOptimizationController:
         config = self.config
         settings = self.runtime.operational_settings
         plan = self.plan
+        whole_day = self.whole_day
         return {
             **self.soc_guard.attributes(),
             "reason": self.reason,
+            "reason_text": reason_text(self.reason) if self.reason else None,
+            "blocked_since": self.problem_since.isoformat() if self.problem_since else None,
+            "planner_engine": self.planner_engine,
+            "uses_energy_forecast": getattr(self.runtime, "energy_forecast", None) is not None,
+            "plans_for_high_consumption": bool(settings.get("price_plan_high_consumption")),
+            "standard_plan_expected_margin_sek": (
+                None if self.standard_plan_margin_sek is None
+                else round(self.standard_plan_margin_sek, 2)
+            ),
+            "whole_day_plan": None if whole_day is None else {
+                "ready": whole_day.plan.ready,
+                "blockers": list(whole_day.plan.blockers),
+                "expected_margin_sek": round(whole_day.plan.expected_margin_sek, 2),
+                "cost_without_battery_sek": round(whole_day.baseline_cost_sek, 2),
+                "planned_cost_sek": round(whole_day.planned_cost_sek, 2),
+                "action_count": len(merge_adjacent_actions(whole_day.plan.actions)),
+                "segments": _segments(whole_day),
+            },
             "price_entity_id": config.price_entity_id,
             "managed_external_source_id": config.managed_source_id,
             "planning_horizon_hours": config.planning_horizon_hours,
@@ -500,6 +589,7 @@ class PriceOptimizationController:
         ):
             await self._load_external_windows(plan.actions)
             self.plan = self._build_plan(series, limits, windows=self._external_windows)
+            self._log_plan(self.plan, series)
             self._publish("preview", "price_schedule_writes_disabled")
             return
         move_count_before = self.external_move_count
@@ -518,6 +608,7 @@ class PriceOptimizationController:
         if not self.plan.ready:
             self._publish("waiting_for_priority", "price_external_schedule_energy_unknown")
             return
+        self._log_plan(self.plan, series)
         actions = self.plan.actions
         failed_from = await self._apply_external_targets(windows, self.plan, limits)
         if failed_from is not None:
@@ -619,8 +710,10 @@ class PriceOptimizationController:
             if policy.bounded_duration(interval.start, duration) < duration:
                 end_before = min(end_before, interval.start) if end_before else interval.start
                 break
-        return build_price_plan(
-            series,
+        settings = self.runtime.operational_settings
+        forecast = getattr(self.runtime, "energy_forecast", None)
+        high = bool(settings.get("price_plan_high_consumption"))
+        arguments: dict[str, Any] = dict(
             now=datetime.now(UTC),
             horizon_hours=config.planning_horizon_hours,
             minimum_lead_minutes=config.minimum_lead_minutes,
@@ -647,7 +740,49 @@ class PriceOptimizationController:
             cycle_cost_sek_per_kwh=limits["cycle_cost"],
             grid_import_cost_sek_per_kwh=limits["grid_import_cost"],
             end_before=end_before,
+        )
+        standard = build_price_plan(
+            series,
+            **arguments,
             external_windows=windows,
+            net_load_kw=(
+                None if forecast is None
+                else lambda start, end: forecast.net_load_kw(start, end, high=high)
+            ),
+        )
+        self.standard_plan_margin_sek = standard.expected_margin_sek
+        plan = standard
+        self.whole_day = None
+        if forecast is not None:
+            try:
+                self.whole_day = build_whole_day_plan(
+                    series,
+                    **arguments,
+                    external_windows=tuple(replace(w, adjustable=False) for w in windows),
+                    forecast=lambda start, end: forecast.net_forecast(start, end, high=high),
+                )
+            except ValueError:
+                self.whole_day = None
+        if (
+            bool(settings.get("price_whole_day_planner"))
+            and self.whole_day is not None
+            and self.whole_day.plan.ready
+        ):
+            plan = self.whole_day.plan
+            self.planner_engine = "whole_day"
+        else:
+            self.planner_engine = (
+                "standard_whole_day_unavailable"
+                if bool(settings.get("price_whole_day_planner")) else "standard"
+            )
+        return replace(
+            plan, actions=merge_adjacent_actions(plan.actions, policy.max_duration_seconds)
+        )
+
+    def _whole_day_active(self) -> bool:
+        return (
+            bool(self.runtime.operational_settings.get("price_whole_day_planner"))
+            and getattr(self.runtime, "energy_forecast", None) is not None
         )
 
     def _validated_limits(self) -> dict[str, float]:
@@ -930,6 +1065,9 @@ class PriceOptimizationController:
         the next planned charge (or the last discharge) stay adjustable; the
         rest keep refilling the battery as the aggregator intends.
         """
+        if self._whole_day_active():
+            # The whole-day planner never changes aggregator schedules.
+            return self._external_windows
         lead = datetime.now(UTC) + timedelta(minutes=self.config.minimum_lead_minutes)
         eligible = [
             meta is not None and meta[1] is not None and window.start > lead
@@ -1108,6 +1246,32 @@ class PriceOptimizationController:
         return True
 
 
+def _action_text(action: PricePlanAction) -> str:
+    mode = ""
+    if action.discharge_mode is not None:
+        mode = " " + action.discharge_mode.value.replace("_", " ")
+    return (
+        f"{action.direction.value}{mode} {time_span(action.start, action.end)} "
+        f"{action.power_kw:.1f} kW at {action.price_sek_per_kwh:.2f} kr/kWh"
+    )
+
+
+def best_net_profit(
+    series: PriceSeries, now: datetime, efficiency: float, import_cost: float, cycle_cost: float,
+) -> float | None:
+    """Highest self-consumption net profit per kWh: charge first, use later."""
+    prices = [interval.price_sek_per_kwh for interval in series.intervals if interval.end > now]
+    if len(prices) < 2 or efficiency <= 0:
+        return None
+    best: float | None = None
+    cheapest = prices[0]
+    for price in prices[1:]:
+        profit = (price + import_cost) - (cheapest + import_cost) / efficiency - cycle_cost
+        best = profit if best is None else max(best, profit)
+        cheapest = min(cheapest, price)
+    return best
+
+
 def _action_key(action: PricePlanAction) -> tuple[object, ...]:
     return (
         action.service,
@@ -1193,6 +1357,63 @@ def _price_at_epoch(series: PriceSeries, epoch: int) -> float | None:
         if interval.start <= instant < interval.end:
             return interval.price_sek_per_kwh
     return None
+
+
+def _segments(result: WholeDayResult) -> list[dict[str, object]]:
+    """Compact the whole-day slots into runs of the same kind (for attributes)."""
+    segments: list[dict[str, object]] = []
+    for slot in result.slots:
+        kind = slot.kind
+        if segments and segments[-1]["kind"] == kind and segments[-1]["end"] == slot.start:
+            last = segments[-1]
+            last["end"] = slot.end
+            last["energy_kwh"] = float(last["energy_kwh"]) + slot.battery_kw * (  # type: ignore[arg-type]
+                (slot.end - slot.start).total_seconds() / 3600
+            )
+            last["end_soc"] = round(slot.usable_soc_percent, 1)
+            continue
+        segments.append({
+            "start": slot.start,
+            "end": slot.end,
+            "kind": kind,
+            "energy_kwh": slot.battery_kw * (slot.end - slot.start).total_seconds() / 3600,
+            "end_soc": round(slot.usable_soc_percent, 1),
+        })
+    return [
+        {
+            **segment,
+            "start": segment["start"].isoformat(),  # type: ignore[union-attr]
+            "end": segment["end"].isoformat(),  # type: ignore[union-attr]
+            "energy_kwh": round(float(segment["energy_kwh"]), 2),  # type: ignore[arg-type]
+        }
+        for segment in segments
+        if segment["kind"] != "idle"
+    ][:40]
+
+
+def _notification_id(runtime: Any) -> str:
+    return f"pixiihome_controller_{runtime.serial}_price_blocked"
+
+
+def _create_notification(runtime: Any, message: str) -> None:
+    try:
+        from homeassistant.components import persistent_notification
+
+        persistent_notification.async_create(
+            runtime.hass, message, title="Pixii: prisoptimeringen står still",
+            notification_id=_notification_id(runtime),
+        )
+    except Exception:  # noqa: BLE001 - a notification must never affect control
+        return
+
+
+def _dismiss_notification(runtime: Any) -> None:
+    try:
+        from homeassistant.components import persistent_notification
+
+        persistent_notification.async_dismiss(runtime.hass, _notification_id(runtime))
+    except Exception:  # noqa: BLE001 - a notification must never affect control
+        return
 
 
 def _daily_future_prices_available(

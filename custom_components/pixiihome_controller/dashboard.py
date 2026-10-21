@@ -32,6 +32,9 @@ _ENTITY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "switch.automatic_solar_charging",
             "sensor.solar_charging_status",
+            "switch.solar_smart_enabled",
+            "number.solar_smart_min_advantage_sek_per_kwh",
+            "number.solar_smart_safety_margin_percent",
             "number.solar_export_start_threshold_kw",
             "number.solar_export_stop_threshold_kw",
             "number.solar_export_buffer_kw",
@@ -87,6 +90,9 @@ _ENTITY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "switch.price_schedule_writes_enabled",
             "switch.price_adjust_external_target_soc",
             "switch.price_export_allowed",
+            "switch.price_whole_day_planner",
+            "switch.price_plan_high_consumption",
+            "number.price_blocked_notify_hours",
             "number.price_grid_import_cost_sek_per_kwh",
             "number.price_min_difference_sek_per_kwh",
             "number.price_export_min_difference_sek_per_kwh",
@@ -97,6 +103,15 @@ _ENTITY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "number.price_usable_capacity_kwh",
             "number.price_round_trip_efficiency_percent",
             "number.price_cycle_cost_sek_per_kwh",
+        ),
+    ),
+    (
+        "Energy forecast",
+        (
+            "sensor.household_load_power",
+            "sensor.household_load_forecast",
+            "sensor.solar_forecast_remaining_today",
+            "sensor.battery_savings_today",
         ),
     ),
     (
