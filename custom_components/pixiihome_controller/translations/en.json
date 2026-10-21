@@ -453,13 +453,13 @@
         "name": "Adaptive peak shaving"
       },
       "price_export_allowed": {
-        "name": "Allow price-optimized grid export"
+        "name": "Allow grid export"
       },
       "price_schedule_writes_enabled": {
-        "name": "Allow price optimizer to change schedules"
+        "name": "Allow creating schedules"
       },
       "price_adjust_external_target_soc": {
-        "name": "Allow price optimizer to adjust aggregator Target SOC"
+        "name": "Allow changing aggregator schedules"
       }
     }
   }

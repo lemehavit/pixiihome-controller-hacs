@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1 — 2026-10-21
+
+- Shorter switch names so they fit: **Allow creating schedules**, **Allow grid
+  export** and **Allow changing aggregator schedules** (entity IDs unchanged).
+
 ## 0.4.0 — 2026-10-21
 
 - New opt-in switch **Allow price optimizer to adjust aggregator Target SOC**

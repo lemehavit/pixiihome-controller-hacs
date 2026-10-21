@@ -94,8 +94,8 @@ are administrator-controlled; an on switch is not proof of active battery power.
 | `adaptive_peak_shaving` — Adaptive peak shaving | Enable the renewable APS controller. Its unique-ID suffix remains `aps_keep_active` for compatibility; this switch is not the native keep-active parameter. |
 | `load_balancing` — Load balancing | Enable native control after configuring/enabling the observer separately. Entity meter source is not supported for current service-120 production writes. |
 | `automatic_price_optimization` — Automatic price optimization | Run the price controller; authority/policy are required even for its no-schedule-write preview mode. |
-| `price_schedule_writes_enabled` — Allow price optimizer to change schedules | Permit live price reconciliation. Off permits proposals after prerequisites, but does not prove old schedules were removed. |
-| `price_export_allowed` — Allow price-optimized grid export | Allow export when the separate net-profit floor passes. Does not enable the controller or bypass any other gate. |
+| `price_schedule_writes_enabled` — Allow creating schedules | Permit live price reconciliation. Off permits proposals after prerequisites, but does not prove old schedules were removed. |
+| `price_export_allowed` — Allow grid export | Allow export when the separate net-profit floor passes. Does not enable the controller or bypass any other gate. |
 
 ## Buttons
 

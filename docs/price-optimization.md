@@ -73,8 +73,8 @@ prices:
    accounting for the usable window.
 3. Configure charge/discharge power, usable-SOC bounds, efficiency, cycle cost and
    variable import costs on the **Price optimization** device.
-4. Keep **Allow price optimizer to change schedules** and **Allow price-optimized
-   grid export** off. Set an appropriate policy authorizing `automatic`,
+4. Keep **Allow creating schedules** and **Allow grid export**
+   off. Set an appropriate policy authorizing `automatic`,
    `demandresponse` and `peakshaving`.
 5. Enable production authority and **Automatic price optimization**. Current code
    requires authority/policy even for this controller's preview mode; it is not a
@@ -114,8 +114,7 @@ export floor of `1.00` fails. Enabling export does not suppress eligible self-us
 
 ## Allow live schedules
 
-After reviewing proposals, turning on **Allow price optimizer to change
-schedules** permits its guarded reconciliation. It is not an immediate manual
+After reviewing proposals, turning on **Allow creating schedules** permits its guarded reconciliation. It is not an immediate manual
 "run this proposal" button: source, settings, policy, inventory, ownership and
 active service are checked again before each mutation.
 
@@ -137,8 +136,8 @@ end may still be written. An external service without such a schedule blocks wri
 
 ## Adjust aggregator Target SOC (optional)
 
-**Allow price optimizer to adjust aggregator Target SOC** is off by default and
-only acts when **Allow price optimizer to change schedules** is also on. It lets
+**Allow changing aggregator schedules** is off by default and
+only acts when **Allow creating schedules** is also on. It lets
 the controller plan a whole day across an aggregator's one-shot Target SOC
 schedules instead of being refilled by each of them:
 
@@ -163,7 +162,7 @@ support services while targets are lowered. Whether changing an aggregator's
 schedules is allowed under your agreement is your decision. The controller
 does not infer ownership from a matching time, service number or `m_id` value.
 
-Enable **Allow price-optimized grid export** only if intended and compatible with
+Enable **Allow grid export** only if intended and compatible with
 the installation/agreement, then set its separate minimum net-profit threshold.
 Leave `managed_source_id` empty and external authority disabled to preserve
 aggregator scheduling. Relocation requires additional exact source, direction,

@@ -329,13 +329,13 @@
         "name": "Adaptive peak shaving"
       },
       "price_export_allowed": {
-        "name": "Tillåt prisoptimerad export till elnätet"
+        "name": "Tillåt export till elnätet"
       },
       "price_schedule_writes_enabled": {
-        "name": "Tillåt prisoptimeraren att ändra scheman"
+        "name": "Tillåt att skapa scheman"
       },
       "price_adjust_external_target_soc": {
-        "name": "Tillåt prisoptimeraren att justera aggregatorns Target SOC"
+        "name": "Tillåt ändring av aggregatorns scheman"
       }
     }
   }
