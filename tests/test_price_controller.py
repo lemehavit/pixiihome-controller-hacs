@@ -512,3 +512,111 @@ async def test_running_service_without_a_matching_schedule_still_blocks_writes()
 
     assert controller.status == "waiting_for_priority"
     assert mutations.created == []
+
+
+def _aggregator_day(instance, *, adjust: bool):
+    from dataclasses import replace
+
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+    prices = [(-1, 0.5), (0, 3.0), (1, 1.0), (2, 1.0), (3, 0.2), (4, 3.0)]
+    instance.hass.states.state.attributes = {
+        "unit_of_measurement": "SEK/kWh",
+        "prices": [
+            {"start": (start + timedelta(hours=h)).isoformat(),
+             "end": (start + timedelta(hours=h + 1)).isoformat(), "price": p}
+            for h, p in prices
+        ],
+    }
+    window = external_schedule(start + timedelta(hours=1))
+    instance.scheduler_manager.normalized_schedules = [window]
+    instance.battery = replace(instance.battery, usable_soc=60,
+                               effective_min_soc=0, effective_max_soc=100)
+    instance.operational_settings = instance.operational_settings.set(
+        "price_adjust_external_target_soc", adjust
+    )
+    calls = []
+
+    async def read_target(service_no):
+        return {"reference": 90}
+
+    async def set_target(**kwargs):
+        calls.append(kwargs)
+        return {"status": "adjusted"}
+
+    instance.gateway_scheduler = SimpleNamespace(
+        client=SimpleNamespace(read_target_soc=read_target),
+        set_external_target_soc=set_target,
+    )
+    return window, calls
+
+
+@pytest.mark.asyncio
+async def test_aggregator_target_between_discharge_and_recharge_is_lowered():
+    instance, mutations = runtime()
+    window, calls = _aggregator_day(instance, adjust=True)
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["sch_index"] == window.sch_index
+    assert call["expected_reference"] == 90
+    assert 10 <= call["new_reference"] < 90  # never below the price minimum SOC
+    assert call["allow_delete"] is True
+    assert controller.external_target_adjust_count == 1
+    assert mutations.created
+
+
+@pytest.mark.asyncio
+async def test_aggregator_targets_are_untouched_when_the_switch_is_off():
+    instance, _ = runtime()
+    _, calls = _aggregator_day(instance, adjust=False)
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_unheld_aggregator_target_stops_the_plan_at_that_window():
+    instance, mutations = runtime()
+    window, calls = _aggregator_day(instance, adjust=True)
+
+    async def refused(**kwargs):
+        calls.append(kwargs)
+        return {"status": "unchanged"}
+
+    instance.gateway_scheduler.set_external_target_soc = refused
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert calls
+    start = datetime.fromtimestamp(window.start_epoch, UTC)
+    assert all(request.starttime + timedelta(seconds=request.duration_seconds) <= start
+               for request in mutations.created)
+
+
+@pytest.mark.asyncio
+async def test_lowered_target_is_restored_when_no_longer_held():
+    instance, _ = runtime()
+    window, calls = _aggregator_day(instance, adjust=True)
+    instance.battery = instance.battery.__class__(
+        **{**{f: getattr(instance.battery, f) for f in instance.battery.__dataclass_fields__},
+           "usable_soc": 10}
+    )
+
+    async def read_target(service_no):
+        return {"reference": 40}
+
+    instance.gateway_scheduler.client.read_target_soc = read_target
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    key = (window.sch_index, window.service_no, window.start_epoch, window.duration_seconds)
+    controller._lowered[key] = 90.0
+
+    await controller.tick()
+
+    assert calls and calls[-1]["new_reference"] == 90.0
+    assert calls[-1]["allow_delete"] is False

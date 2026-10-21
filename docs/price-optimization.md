@@ -133,7 +133,34 @@ unknown resulting energy and ends the plan at that schedule's start.
 
 While a known external schedule is running (its service matches exactly one
 enabled one-shot schedule in the inventory), owned schedules that start after its
-end may still be written. An external service without such a schedule blocks writes. The controller
+end may still be written. An external service without such a schedule blocks writes.
+
+## Adjust aggregator Target SOC (optional)
+
+**Allow price optimizer to adjust aggregator Target SOC** is off by default and
+only acts when **Allow price optimizer to change schedules** is also on. It lets
+the controller plan a whole day across an aggregator's one-shot Target SOC
+schedules instead of being refilled by each of them:
+
+- Only future, one-shot Target SOC schedules whose parameter record is not
+  shared with another schedule are touched.
+- Only windows between the first planned discharge and the next planned charge
+  (or the last planned discharge) are changed. Their target is lowered to the
+  planned state of charge at that time, never below the price optimizer's
+  minimum usable SOC (or the automation policy's minimum).
+- Each change is journaled, sent once and verified by readback. If the Gateway
+  acknowledges a write but keeps the old target, that schedule is deleted
+  instead (also verified). Uncertain results require recovery and are never
+  retried.
+- A lowered target is restored to its original value when the plan no longer
+  needs it. Originals are kept in memory, so a Home Assistant restart forgets
+  them; check the scheduler view after a restart.
+- At most one aggregator schedule is changed per planning pass. If a window
+  cannot be held, nothing after it is written.
+
+Raise the price optimizer's minimum SOC if you want more energy left for
+support services while targets are lowered. Whether changing an aggregator's
+schedules is allowed under your agreement is your decision. The controller
 does not infer ownership from a matching time, service number or `m_id` value.
 
 Enable **Allow price-optimized grid export** only if intended and compatible with

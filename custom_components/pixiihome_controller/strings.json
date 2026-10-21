@@ -457,6 +457,9 @@
       },
       "price_schedule_writes_enabled": {
         "name": "Allow price optimizer to change schedules"
+      },
+      "price_adjust_external_target_soc": {
+        "name": "Allow price optimizer to adjust aggregator Target SOC"
       }
     }
   }

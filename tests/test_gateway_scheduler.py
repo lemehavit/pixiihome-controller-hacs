@@ -791,3 +791,82 @@ async def test_invalid_soc_cannot_even_read(soc):
     with pytest.raises(HomeAssistantError):
         await control.preview(4435, "update", {"socref": soc}, "admin")
     assert not client.calls
+
+
+async def _set_target(control, *, reference=80, new=40, allow_delete=True):
+    return await control.set_external_target_soc(
+        sch_index=4435,
+        expected_service_no=RECORD["service_no"],
+        expected_start_epoch=RECORD["start_time"],
+        expected_duration_seconds=RECORD["duration"],
+        expected_reference=reference,
+        new_reference=new,
+        allow_delete=allow_delete,
+    )
+
+
+@pytest.mark.asyncio
+async def test_external_target_soc_is_lowered_with_journal_and_readback() -> None:
+    runtime, client, control = controller()
+
+    result = await _set_target(control)
+
+    assert result["status"] == "adjusted"
+    assert client.soc["reference"] == 40
+    assert client.present
+    assert runtime.started is not None
+    assert runtime.started["operation"] == "automatic_price_external_target_soc_adjust"
+    assert runtime.phases[-1] is JournalPhase.RECONCILED
+
+
+@pytest.mark.asyncio
+async def test_ineffective_target_write_falls_back_to_verified_delete() -> None:
+    runtime, client, control = controller()
+    client.mismatch = True  # the Gateway acknowledges but keeps the reference
+
+    result = await _set_target(control)
+
+    assert result["status"] == "deleted"
+    assert not client.present
+    assert runtime.started is not None
+    assert runtime.started["operation"] == "automatic_price_external_target_soc_delete"
+    assert JournalPhase.FAILED in runtime.phases
+    assert runtime.phases[-1] is JournalPhase.RECONCILED
+
+
+@pytest.mark.asyncio
+async def test_ineffective_target_write_is_not_deleted_without_permission() -> None:
+    _, client, control = controller()
+    client.mismatch = True
+
+    result = await _set_target(control, allow_delete=False)
+
+    assert result["status"] == "unchanged"
+    assert client.present
+
+
+@pytest.mark.asyncio
+async def test_external_target_change_since_planning_is_refused_before_writing() -> None:
+    _, client, control = controller()
+
+    with pytest.raises(HomeAssistantError, match="scheduler_external_target_changed"):
+        await _set_target(control, reference=90)
+
+    assert all(call["Omnibus"]["msg"][2] == 5 for call in client.calls)
+
+
+@pytest.mark.asyncio
+async def test_shared_target_parameter_record_is_never_written() -> None:
+    runtime, client, control = controller()
+    original = runtime.refresh_list
+
+    async def shared(start: int, end: int):
+        entries = await original(start, end)
+        return (*entries, SimpleNamespace(**{**vars(entries[0]), "sch_index": 4436}))
+
+    runtime.refresh_list = shared  # type: ignore[method-assign]
+
+    with pytest.raises(HomeAssistantError, match="scheduler_external_target_shared"):
+        await _set_target(control)
+
+    assert client.soc["reference"] == 80

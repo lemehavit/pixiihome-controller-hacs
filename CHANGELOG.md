@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 — 2026-10-21
+
+- New opt-in switch **Allow price optimizer to adjust aggregator Target SOC**
+  (off by default). When on, future one-shot aggregator Target SOC schedules
+  between the optimizer's planned discharge and its next planned charge are
+  lowered to the planned state of charge (never below the price minimum SOC),
+  or deleted if the Gateway keeps the old target. Changes are journaled,
+  verified by readback, limited to one per planning pass and restored when no
+  longer needed.
+
 ## 0.3.9 — 2026-10-21
 
 - Price optimization plans past one-shot external Target SOC schedules: it reads

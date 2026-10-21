@@ -85,6 +85,7 @@ _ENTITY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "sensor.price_scheduled_count",
             "calendar.price_optimization_calendar",
             "switch.price_schedule_writes_enabled",
+            "switch.price_adjust_external_target_soc",
             "switch.price_export_allowed",
             "number.price_grid_import_cost_sek_per_kwh",
             "number.price_min_difference_sek_per_kwh",

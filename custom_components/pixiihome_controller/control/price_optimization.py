@@ -110,6 +110,9 @@ class ExternalWindow:
     start: datetime
     end: datetime
     target_usable_soc_percent: float | None = None
+    # An adjustable window's target will be lowered to the planned level, so
+    # it holds the battery instead of refilling it: energy passes through.
+    adjustable: bool = False
 
     def __post_init__(self) -> None:
         if self.start.tzinfo is None or self.end.tzinfo is None or self.end <= self.start:
@@ -190,6 +193,8 @@ class PricePlan:
     minimum_projected_soc: float
     maximum_projected_soc: float
     expected_margin_sek: float
+    # Planned usable SOC at the start of each adjustable external window.
+    window_socs: tuple[tuple[datetime, float], ...] = ()
 
     @property
     def ready(self) -> bool:
@@ -323,10 +328,15 @@ def build_price_plan(
         key=lambda window: window.start,
     )
     for window in windows:
-        if not window.known:
+        if not window.known and not window.adjustable:
             end_limit = min(end_limit, max(window.start, current))
             break
-    windows = [window for window in windows if window.known and window.start < end_limit]
+    windows = [
+        window for window in windows
+        if (window.known or window.adjustable) and window.start < end_limit
+    ]
+    resets = [window for window in windows if not window.adjustable]
+    held = [window for window in windows if window.adjustable]
     candidates = tuple(
         item for item in series.intervals if item.start >= start_limit and item.end <= end_limit
     )
@@ -356,8 +366,9 @@ def build_price_plan(
         any(window.start < item.end and item.start < window.end for window in windows)
         for item in candidates
     ]
-    segment = [sum(1 for window in windows if window.end <= item.start) for item in candidates]
-    refill_price = [_mean_price(series, window.start, window.end) for window in windows]
+    segment = [sum(1 for window in resets if window.end <= item.start) for item in candidates]
+    refill_price = [_mean_price(series, window.start, window.end) for window in resets]
+    window_socs: dict[datetime, float] = {}
     active_segment: int | None = None
     closing: float | None = None
     stored_price = acquisition_price
@@ -367,7 +378,7 @@ def build_price_plan(
         if segment[index] != active_segment:
             active_segment = segment[index]
             if active_segment > 0:
-                reset = windows[active_segment - 1]
+                reset = resets[active_segment - 1]
                 assert reset.target_usable_soc_percent is not None
                 energy = usable_capacity_kwh * reset.target_usable_soc_percent / 100
                 bought_at = refill_price[active_segment - 1]
@@ -377,10 +388,13 @@ def build_price_plan(
             # its closing Target SOC window is bought back at that window's
             # price. Energy charged inside the segment keeps its own price and
             # is sold first, so a short charge/discharge cycle stays possible.
-            closing = refill_price[active_segment] if active_segment < len(windows) else None
+            closing = refill_price[active_segment] if active_segment < len(resets) else None
             if closing is not None:
                 stored_price = max(acquisition_price, closing)
                 charged_energy = charged_price = 0.0
+        for window in held:
+            if window.start not in window_socs and window.start <= item.start:
+                window_socs[window.start] = energy / usable_capacity_kwh * 100
         if blocked[index]:
             continue
         price = item.price_sek_per_kwh
@@ -525,14 +539,20 @@ def build_price_plan(
             "maximum_soc": maximum_soc_percent,
         },
         "external_windows": [
-            [window.start.isoformat(), window.end.isoformat(), window.target_usable_soc_percent]
+            [window.start.isoformat(), window.end.isoformat(),
+             window.target_usable_soc_percent, window.adjustable]
             for window in windows
         ],
     }
     fingerprint = sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    return PricePlan(tuple(actions), (), fingerprint, min_soc, max_soc, expected_margin)
+    for window in held:
+        window_socs.setdefault(window.start, energy / usable_capacity_kwh * 100)
+    return PricePlan(
+        tuple(actions), (), fingerprint, min_soc, max_soc, expected_margin,
+        tuple(sorted(window_socs.items())),
+    )
 
 
 def _qualifying_discharge(

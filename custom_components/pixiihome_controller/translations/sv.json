@@ -333,6 +333,9 @@
       },
       "price_schedule_writes_enabled": {
         "name": "Tillåt prisoptimeraren att ändra scheman"
+      },
+      "price_adjust_external_target_soc": {
+        "name": "Tillåt prisoptimeraren att justera aggregatorns Target SOC"
       }
     }
   }

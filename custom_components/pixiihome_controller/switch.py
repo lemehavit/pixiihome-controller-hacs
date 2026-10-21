@@ -64,6 +64,11 @@ SWITCH_DESCRIPTIONS: tuple[PixiiSwitchDescription, ...] = (
         feature=PixiiFeature.PRICE_OPTIMIZATION,
     ),
     PixiiSwitchDescription(
+        "price_adjust_external_target_soc",
+        setting_key="price_adjust_external_target_soc",
+        feature=PixiiFeature.PRICE_OPTIMIZATION,
+    ),
+    PixiiSwitchDescription(
         "adaptive_peak_shaving",
         controller_key="adaptive_peak_shaving_enabled",
         # Reuse the old entity identity so existing dashboards keep working.

@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from math import isfinite
+from math import ceil, isfinite
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers.event import async_track_state_change_event
@@ -70,6 +71,12 @@ class PriceOptimizationController:
         self._source_fingerprint: str | None = None
         self._external_windows: tuple[ExternalWindow, ...] = ()
         self._target_cache: dict[tuple[int, int, int, int], float] = {}
+        # Foreign Target SOC schedules aligned with ``_external_windows``.
+        self._external_meta: tuple[tuple[Any, float | None], ...] = ()
+        # Original references of foreign targets this controller lowered.
+        self._lowered: dict[tuple[int, int, int, int], float] = {}
+        self.external_target_adjust_count = 0
+        self.external_target_delete_count = 0
         self.busy_until: datetime | None = None
         self._planned_settings: dict[str, Any] | None = None
         self._planned_policy: dict[str, Any] | None = None
@@ -157,6 +164,12 @@ class PriceOptimizationController:
             "deleted_schedule_count": self.delete_count,
             "managed_external_move_count": self.external_move_count,
             "current_service": self.current_service,
+            "adjusts_external_target_soc": bool(
+                settings.get("price_adjust_external_target_soc")
+            ),
+            "external_target_adjust_count": self.external_target_adjust_count,
+            "external_target_delete_count": self.external_target_delete_count,
+            "lowered_external_targets": len(self._lowered),
             "busy_until": self.busy_until.isoformat() if self.busy_until else None,
             "external_windows": [
                 {"start": w.start.isoformat(), "end": w.end.isoformat(),
@@ -487,11 +500,21 @@ class PriceOptimizationController:
         if self.external_move_count > move_count_before:
             await coordinator.async_refresh()
         await self._load_external_windows(plan.actions)
-        self.plan = self._build_plan(series, limits, windows=self._external_windows)
+        adjust = bool(
+            self.runtime.operational_settings.get("price_adjust_external_target_soc")
+        )
+        windows = (
+            self._with_adjustable_targets(series, limits) if adjust else self._external_windows
+        )
+        self.plan = self._build_plan(series, limits, windows=windows)
         if not self.plan.ready:
             self._publish("waiting_for_priority", "price_external_schedule_energy_unknown")
             return
         actions = self.plan.actions
+        failed_from = await self._apply_external_targets(windows, self.plan, limits)
+        if failed_from is not None:
+            # The plan relied on that window holding; nothing after it is safe.
+            actions = tuple(a for a in actions if a.end <= failed_from)
         if self.busy_until is not None:
             # Written while a known external interval runs: never anything
             # that could start before that interval has ended.
@@ -829,6 +852,7 @@ class PriceOptimizationController:
             else None
         )
         windows: list[ExternalWindow] = []
+        meta: list[tuple[Any, float | None] | None] = []
         keys: set[tuple[int, int, int, int]] = set()
         for schedule in sorted(schedules, key=lambda item: item.start_epoch):
             if (
@@ -838,6 +862,7 @@ class PriceOptimizationController:
             ):
                 continue
             target: float | None = None
+            reference: float | None = None
             if (
                 schedule.service_type == _SERVICE_TYPE["targetsoc"]
                 and gateway is not None
@@ -870,15 +895,143 @@ class PriceOptimizationController:
                 datetime.fromtimestamp(schedule.end_epoch, UTC),
                 target,
             ))
+            meta.append(
+                (schedule, reference)
+                if schedule.service_type == _SERVICE_TYPE["targetsoc"]
+                and schedule.recurrence.recurring is False
+                else None
+            )
         for stale in set(self._target_cache) - keys:
             del self._target_cache[stale]
         self._external_windows = tuple(windows)
+        self._external_meta = tuple(meta)  # type: ignore[assignment]
         unknown_from = min((window.start for window in windows if not window.known), default=None)
         self.external_conflict_count = sum(
             1 for action in actions
             if (unknown_from is not None and action.end > unknown_from)
             or any(window.start < action.end and action.start < window.end for window in windows)
         )
+
+    def _with_adjustable_targets(
+        self, series: PriceSeries, limits: dict[str, float]
+    ) -> tuple[ExternalWindow, ...]:
+        """Mark foreign Target SOC windows between own discharge and recharge.
+
+        A first plan treats every future, readable Target SOC window as one the
+        controller may hold. Only windows from the first planned discharge up to
+        the next planned charge (or the last discharge) stay adjustable; the
+        rest keep refilling the battery as the aggregator intends.
+        """
+        lead = datetime.now(UTC) + timedelta(minutes=self.config.minimum_lead_minutes)
+        eligible = [
+            meta is not None and meta[1] is not None and window.start > lead
+            for window, meta in zip(self._external_windows, self._external_meta, strict=True)
+        ]
+        trial = tuple(
+            replace(window, adjustable=flag)
+            for window, flag in zip(self._external_windows, eligible, strict=True)
+        )
+        if not any(eligible):
+            return self._external_windows
+        first = self._build_plan(series, limits, windows=trial)
+        discharges = [a for a in first.actions if a.direction is PriceDirection.DISCHARGE]
+        if not first.ready or not discharges:
+            return self._external_windows
+        recharge = next(
+            (a for a in first.actions
+             if a.direction is PriceDirection.CHARGE and a.start >= discharges[0].end),
+            None,
+        )
+        until = recharge.start if recharge is not None else max(a.end for a in discharges)
+        return tuple(
+            replace(window, adjustable=flag and discharges[0].start <= window.start < until)
+            for window, flag in zip(self._external_windows, eligible, strict=True)
+        )
+
+    async def _apply_external_targets(
+        self,
+        windows: tuple[ExternalWindow, ...],
+        plan: PricePlan,
+        limits: dict[str, float],
+    ) -> datetime | None:
+        """Lower held foreign targets to the plan; restore those no longer held.
+
+        Returns the start of the first window that could not be held, if any.
+        """
+        gateway = self.runtime.gateway_scheduler
+        battery = self.runtime.battery
+        setter: Any = getattr(gateway, "set_external_target_soc", None)
+        held = {window.start for window in windows if window.adjustable}
+        if (
+            not callable(setter)
+            or battery.effective_min_soc is None
+            or battery.effective_max_soc is None
+            or battery.effective_max_soc <= battery.effective_min_soc
+        ):
+            return min(held, default=None)
+        span = battery.effective_max_soc - battery.effective_min_soc
+        planned = dict(plan.window_socs)
+        policy = self.runtime._automation_policy()
+        floor = max(limits["min_soc"], policy.soc_min_percent)
+        writes = 0
+        failed_from: datetime | None = None
+        lead = datetime.now(UTC) + timedelta(minutes=self.config.minimum_lead_minutes)
+        for window, meta in zip(windows, self._external_meta, strict=True):
+            if meta is None or window.start <= lead:
+                continue
+            schedule, reference = meta[0], meta[1]
+            if reference is None:
+                continue
+            key = (schedule.sch_index, schedule.service_no,
+                   schedule.start_epoch, schedule.duration_seconds)
+            if window.adjustable:
+                usable = max(floor, planned.get(window.start, floor))
+                desired = float(min(100, ceil(battery.effective_min_soc + usable * span / 100)))
+                if desired >= reference - 0.5:
+                    continue
+                allow_delete = True
+            elif key in self._lowered:
+                desired, allow_delete = self._lowered[key], False
+                if desired <= reference + 0.5:
+                    self._lowered.pop(key, None)
+                    continue
+            else:
+                continue
+            # One foreign write per planning pass keeps every change reviewable.
+            if writes >= 1 or not await self._mutation_context_safe():
+                # Stop here; a held window that was not adjusted ends the plan.
+                return (failed_from or window.start) if window.adjustable else failed_from
+            writes += 1
+            try:
+                apply_target: Any = setter
+                result = await apply_target(
+                    sch_index=schedule.sch_index,
+                    expected_service_no=schedule.service_no,
+                    expected_start_epoch=schedule.start_epoch,
+                    expected_duration_seconds=schedule.duration_seconds,
+                    expected_reference=reference,
+                    new_reference=desired,
+                    allow_delete=allow_delete,
+                )
+            except Exception:  # noqa: BLE001 - refused before send; plan around it
+                result = {"status": "refused"}
+            status = result.get("status")
+            self._target_cache.pop(key, None)
+            if status == "adjusted":
+                if window.adjustable:
+                    self._lowered.setdefault(key, reference)
+                    self.external_target_adjust_count += 1
+                else:
+                    self._lowered.pop(key, None)
+            elif status == "deleted":
+                self._lowered.pop(key, None)
+                self.external_target_delete_count += 1
+            elif window.adjustable:
+                failed_from = window.start if failed_from is None else failed_from
+                if status == "recovery_required":
+                    self._publish("blocked", "price_external_target_recovery_required")
+                    return failed_from
+        return failed_from
 
     async def _reconcile(self, actions: tuple[PricePlanAction, ...]) -> bool:
         manager = self.runtime.scheduler_mutation_manager

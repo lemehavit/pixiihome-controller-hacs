@@ -808,6 +808,162 @@ class GatewaySchedulerController:
                 "start_epoch": new_start_epoch,
             }
 
+    async def set_external_target_soc(
+        self,
+        *,
+        sch_index: int,
+        expected_service_no: int,
+        expected_start_epoch: int,
+        expected_duration_seconds: int,
+        expected_reference: float,
+        new_reference: float,
+        allow_delete: bool,
+    ) -> dict[str, Any]:
+        """Change one future foreign one-shot Target SoC reference, or delete it.
+
+        The price optimizer uses this only when explicitly allowed. The exact
+        schedule, its unshared parameter record and the current reference are
+        re-read first. Each write is sent once and verified by readback; an
+        uncertain result is journaled for recovery and never retried. Deletion
+        is only attempted when a verified reference write had no effect.
+        """
+        values = (sch_index, expected_service_no, expected_start_epoch, expected_duration_seconds)
+        if any(type(value) is not int or value < 0 for value in values):
+            raise HomeAssistantError("scheduler_external_target_identity_invalid")
+        for reference in (expected_reference, new_reference):
+            if (
+                isinstance(reference, bool)
+                or not isinstance(reference, int | float)
+                or not isfinite(reference)
+                or not 0 <= reference <= 100
+            ):
+                raise HomeAssistantError("scheduler_external_target_reference_invalid")
+        if expected_duration_seconds <= 0 or expected_start_epoch <= int(time()):
+            raise HomeAssistantError("scheduler_external_target_not_future")
+        async with self._lock:
+            start = max(0, expected_start_epoch - 1)
+            end = expected_start_epoch + expected_duration_seconds + 1
+            before = await self._observe(sch_index, start, end)
+            recurrence = before.get("recurrence")
+            one_shot = (
+                isinstance(recurrence, Mapping) and recurrence.get("type") == "once"
+            ) or before.get("rec_type") == 0
+            if (
+                before.get("service_no") != expected_service_no
+                or before.get("start_time") != expected_start_epoch
+                or before.get("duration") != expected_duration_seconds
+                or before.get("service_type") != 107
+                or before.get("service_enabled") != 1
+                or not one_shot
+            ):
+                raise HomeAssistantError("scheduler_external_target_changed")
+            current = float((await self.client.read_target_soc(expected_service_no))["reference"])
+            if current != float(expected_reference):
+                raise HomeAssistantError("scheduler_external_target_changed")
+            if [item["sch_index"] for item in await self._soc_targets(expected_service_no)] != [
+                sch_index
+            ]:
+                # A shared parameter record would also change other schedules.
+                raise HomeAssistantError("scheduler_external_target_shared")
+            reasons = self._reasons(ControlOperation.UPDATE)
+            if reasons:
+                raise HomeAssistantError(", ".join(reasons))
+            identity = JournalTargetIdentity(
+                sch_index=sch_index,
+                service_no=expected_service_no,
+                source_id=before.get("source_id"),
+                asset_id=before.get("asset_id"),
+            )
+            result = await self._journaled_external_write(
+                "automatic_price_external_target_soc_adjust",
+                identity,
+                {"before": before, "reference_before": current, "reference_after": new_reference},
+                lambda: self.client.write_target_soc(expected_service_no, new_reference),
+            )
+            if result["status"] != "sent":
+                return result
+            readback = float(
+                (await self.client.read_target_soc(expected_service_no))["reference"]
+            )
+            if readback == float(new_reference):
+                await self.runtime.transition_control_transaction(
+                    result["transaction_id"], JournalPhase.RECONCILED, reason="readback_verified"
+                )
+                return {**result, "status": "adjusted", "reference": readback}
+            if readback != current or not allow_delete:
+                await self.runtime.transition_control_transaction(
+                    result["transaction_id"],
+                    JournalPhase.RECOVERY_REQUIRED if readback != current else JournalPhase.FAILED,
+                    reason="readback_mismatch" if readback != current else "reference_unchanged",
+                )
+                return {
+                    **result,
+                    "status": "recovery_required" if readback != current else "unchanged",
+                }
+            await self.runtime.transition_control_transaction(
+                result["transaction_id"], JournalPhase.FAILED, reason="reference_unchanged"
+            )
+            reasons = self._reasons(ControlOperation.DELETE)
+            if reasons:
+                raise HomeAssistantError(", ".join(reasons))
+            deleted = await self._journaled_external_write(
+                "automatic_price_external_target_soc_delete",
+                identity,
+                {"before": before, "reference_before": current},
+                lambda: self.client.write_record(sch_index, before, None),
+            )
+            if deleted["status"] != "sent":
+                return deleted
+            manager = self.runtime.scheduler_manager
+            assert manager is not None
+            entries = await manager.refresh_list(start, end)
+            gone = all(entry.sch_index != sch_index for entry in entries)
+            await self.runtime.transition_control_transaction(
+                deleted["transaction_id"],
+                JournalPhase.RECONCILED if gone else JournalPhase.RECOVERY_REQUIRED,
+                reason="readback_verified" if gone else "readback_mismatch",
+            )
+            return {**deleted, "status": "deleted" if gone else "recovery_required"}
+
+    async def _journaled_external_write(
+        self,
+        operation: str,
+        identity: JournalTargetIdentity,
+        intent: dict[str, Any],
+        send: Any,
+    ) -> dict[str, Any]:
+        """Journal, recheck authority, send once and record the acknowledgement."""
+        authority_revision = self.runtime.production_authority.revision
+        transaction_id = f"price-external-target-{secrets.token_hex(16)}"
+        await self.runtime.begin_control_transaction(
+            transaction_id=transaction_id,
+            operation=operation,
+            target_identity=identity,
+            intent=intent,
+        )
+        await self.runtime.transition_control_transaction(transaction_id, JournalPhase.COMMAND_SENT)
+        if (
+            authority_revision != self.runtime.production_authority.revision
+            or not self.runtime.production_control_enabled()
+        ):
+            await self.runtime.transition_control_transaction(
+                transaction_id, JournalPhase.FAILED, reason="authority_changed_before_send"
+            )
+            raise HomeAssistantError("production_control_disabled")
+        try:
+            await send()
+            await self.runtime.transition_control_transaction(
+                transaction_id, JournalPhase.ACKNOWLEDGED
+            )
+        except Exception:  # noqa: BLE001 - never retry uncertain delivery
+            await self.runtime.transition_control_transaction(
+                transaction_id,
+                JournalPhase.RECOVERY_REQUIRED,
+                reason="external_target_delivery_unknown",
+            )
+            return {"status": "recovery_required", "transaction_id": transaction_id}
+        return {"status": "sent", "transaction_id": transaction_id, "sch_index": identity.sch_index}
+
     async def run_meter_limitation_soft_limit_trial(
         self, direction: str, max_correction_w: int
     ) -> dict[str, Any]:

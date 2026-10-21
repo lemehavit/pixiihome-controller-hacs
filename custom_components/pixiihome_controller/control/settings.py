@@ -113,6 +113,9 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "planner_max_soc_percent": SettingSpec("planner_max_soc_percent", 90.0, 0.0, 100.0, 1.0, "%"),
     "price_export_allowed": SettingSpec("price_export_allowed", False),
     "price_schedule_writes_enabled": SettingSpec("price_schedule_writes_enabled", False),
+    "price_adjust_external_target_soc": SettingSpec(
+        "price_adjust_external_target_soc", False
+    ),
     "price_min_difference_sek_per_kwh": SettingSpec(
         "price_min_difference_sek_per_kwh", 0.5, 0.0, 20.0, 0.01, "SEK/kWh"
     ),

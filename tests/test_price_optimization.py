@@ -347,3 +347,16 @@ def test_stored_energy_is_only_sold_before_a_target_window_above_its_refill_pric
             assert action.reference_price_sek_per_kwh < 3.0
             assert any(a.direction is PriceDirection.CHARGE and a.end <= action.start
                        for a in constrained.actions)
+
+
+def test_held_window_keeps_energy_and_reports_its_planned_soc() -> None:
+    window = ExternalWindow(_hour(2), _hour(3), 90.0, adjustable=True)
+
+    result = plan(greenely(0.5, 3.0, 1.0, 1.0, 0.2, 3.0), initial_soc=60, windows=(window,))
+
+    assert not any(a.start < window.end and window.start < a.end for a in result.actions)
+    assert result.window_socs and result.window_socs[0][0] == window.start
+    held = result.window_socs[0][1]
+    assert held < 60  # discharged before the window and not refilled by it
+    after = [a for a in result.actions if a.start >= window.end]
+    assert any(a.direction is PriceDirection.CHARGE for a in after)
