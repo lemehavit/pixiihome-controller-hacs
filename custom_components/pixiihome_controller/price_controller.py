@@ -468,7 +468,8 @@ class PriceOptimizationController:
 
     async def _mutation_context_safe(self) -> bool:
         """Recheck source, mode and authority before every individual mutation."""
-        state = self.runtime.hass.states.get(self.config.price_entity_id)
+        entity_id = self.config.price_entity_id
+        state = self.runtime.hass.states.get(entity_id) if entity_id else None
         health = self.runtime.plant_health()
         if not (
             self.runtime.controller_state.automatic_price_optimization_enabled

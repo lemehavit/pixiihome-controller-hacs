@@ -11,6 +11,7 @@ First standalone public distribution of the community integration (beta).
 - Move regression tests to minimal anonymized protocol/journal fixtures.
 - Align the reported integration version, package version and Python baseline.
 - Include the setting-backed switch routing correction from private development.
+- Block remaining price-plan writes if its selected price entity is removed mid-operation.
 - Include exact owned price-interval DELETE handling, physical idle verification,
   conservative identity reservations and explicit archival recovery.
 

@@ -244,6 +244,31 @@ async def test_new_support_activation_mid_saga_stops_remaining_mutations():
 
 
 @pytest.mark.asyncio
+async def test_price_source_removed_mid_saga_blocks_remaining_mutations():
+    instance, mutations = runtime()
+    create = mutations.create
+    state_get = instance.hass.states.get
+
+    def get(entity_id):
+        assert isinstance(entity_id, str)
+        return state_get(entity_id)
+
+    async def create_then_remove_source(request):
+        result = await create(request)
+        instance.entry.options[CONF_PRICE_OPTIMIZATION] = {}
+        return result
+
+    instance.hass.states.get = get
+    mutations.create = create_then_remove_source
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    assert len(mutations.created) == 1
+    assert mutations.deleted == []
+    assert controller.status == "blocked"
+    assert controller.reason == "price_mutation_context_changed"
+
+
+@pytest.mark.asyncio
 async def test_partial_inventory_never_authorizes_price_mutations():
     instance, mutations = runtime()
     async def partial():
