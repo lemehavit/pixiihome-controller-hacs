@@ -173,7 +173,7 @@ async def test_controller_exposes_plan_without_writes_until_live_gate_is_enabled
 
 
 @pytest.mark.asyncio
-async def test_controller_can_enable_and_wait_for_tomorrow_prices() -> None:
+async def test_controller_waits_when_no_future_price_remains() -> None:
     instance, mutations = runtime(schedule_writes=False)
     start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     instance.hass.states.state.attributes = {
@@ -193,10 +193,53 @@ async def test_controller_can_enable_and_wait_for_tomorrow_prices() -> None:
     await controller.tick()
 
     assert controller.status == "waiting_prices"
-    assert controller.reason == "future_price_horizon_incomplete"
+    assert controller.reason == "future_price_horizon_empty"
     assert controller.price_source_format == "timestamped_day_arrays"
     assert controller.price_interval_count == 1
+    assert controller.next_day_prices_available is False
     assert mutations.created == []
+
+
+@pytest.mark.asyncio
+async def test_controller_plans_remaining_today_before_tomorrow_is_published() -> None:
+    instance, mutations = runtime()
+    instance.hass.states.state.attributes = {
+        "unit_of_measurement": "SEK/kWh",
+        "raw_today": instance.hass.states.state.attributes["prices"],
+        "raw_tomorrow": [],
+    }
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert controller.price_source_format == "timestamped_day_arrays"
+    assert controller.next_day_prices_available is False
+    assert controller.status == "active"
+    assert mutations.created
+    assert controller.attributes()["next_day_prices_available"] is False
+
+
+@pytest.mark.asyncio
+async def test_new_day_prices_replace_obsolete_future_owned_schedule() -> None:
+    from custom_components.pixiihome_controller.scheduler.ownership import (
+        OwnershipLifecycle,
+        SchedulerOwnershipRecord,
+    )
+
+    instance, mutations = runtime()
+    stale_start = datetime.now(UTC).replace(microsecond=0) + timedelta(hours=5)
+    instance.scheduler_ownership.records[1000000000099] = SchedulerOwnershipRecord(
+        "entry", "gateway", 1000000000099, "peakshaving",
+        {"starttime": stale_start.isoformat(), "duration": 1800,
+         "values": {"exportlim": 0.0, "importlim": 0.0, "charge_max": 0.0,
+                    "discharge_max": 5000.0, "keep_active": True}},
+        lifecycle=OwnershipLifecycle.OWNED, owner=PRICE_OWNER,
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert 1000000000099 in mutations.deleted
 
 
 @pytest.mark.asyncio
@@ -366,3 +409,64 @@ async def test_future_target_is_not_assumed_to_have_reached_its_soc_before_a_lat
     assert await controller._move_one_managed_external_charge(series, proposal.actions)
     assert reads == [300]
     assert controller.external_move_count == 0
+
+
+def _owned_price_record(m_id: int, start: datetime, duration: int = 1800):
+    from custom_components.pixiihome_controller.scheduler.ownership import (
+        OwnershipLifecycle,
+        SchedulerOwnershipRecord,
+    )
+    return SchedulerOwnershipRecord(
+        "entry", "gateway", m_id, "peakshaving",
+        {"starttime": start.replace(microsecond=0).isoformat(), "duration": duration,
+         "values": {"exportlim": 0.0, "importlim": 0.0, "charge_max": 0.0,
+                    "discharge_max": 3000.0, "keep_active": True}},
+        lifecycle=OwnershipLifecycle.OWNED, owner=PRICE_OWNER,
+    )
+
+
+@pytest.mark.asyncio
+async def test_authority_release_deletes_future_and_stops_running_price_schedules():
+    instance, mutations = runtime()
+    now = datetime.now(UTC)
+    records = instance.scheduler_ownership.records
+    records[1000000000101] = _owned_price_record(1000000000101, now + timedelta(hours=3))
+    records[1000000000102] = _owned_price_record(1000000000102, now - timedelta(minutes=5))
+    records[1000000000103] = _owned_price_record(1000000000103, now - timedelta(hours=3))
+    stopped = []
+
+    async def stop_owned_price(m_id):
+        stopped.append(m_id)
+        return SimpleNamespace(status=SchedulerTransactionStatus.OUTPUT_STOPPED, reason="")
+
+    mutations.stop_owned_price = stop_owned_price
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    problems = await controller.release_for_authority_off()
+
+    assert problems == []
+    assert mutations.deleted == [1000000000101]
+    assert stopped == [1000000000102]
+    assert controller.status == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_authority_release_reports_failures_without_retrying():
+    instance, mutations = runtime()
+    records = instance.scheduler_ownership.records
+    records[1000000000104] = _owned_price_record(
+        1000000000104, datetime.now(UTC) + timedelta(hours=3)
+    )
+
+    async def failing_delete(m_id):
+        mutations.deleted.append(m_id)
+        return SimpleNamespace(status=SchedulerTransactionStatus.TIMED_OUT, reason="ack_timeout")
+
+    mutations.delete = failing_delete
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    problems = await controller.release_for_authority_off()
+
+    assert problems == ["price_1000000000104_ack_timeout"]
+    assert mutations.deleted == [1000000000104]
+    assert controller.status == "blocked"

@@ -626,6 +626,12 @@ class RuntimeData:
         await self._require_admin(user_id)
         if type(enabled) is not bool:
             raise HomeAssistantError("Production authority state is invalid")
+        cleanup_problems: list[str] = []
+        if not enabled and self.production_control_enabled():
+            # Gateway writes are still authorized here. Remove what the
+            # integration created before closing the gate; afterwards even the
+            # SOC guard could no longer stop an already planned price interval.
+            cleanup_problems = await self._async_release_owned_control()
         if (
             not enabled
             and self.meter_limit_load_balancer is not None
@@ -666,6 +672,42 @@ class RuntimeData:
                 if enabled
                 else {"production_control_disabled", "state_changing_control_not_live_validated"}
             )
+        if cleanup_problems:
+            from homeassistant.components import persistent_notification
+
+            persistent_notification.async_create(
+                self.hass,
+                "Production control authority was turned off, but these "
+                "integration-owned Pixii effects could not be removed and may "
+                "still run: " + ", ".join(cleanup_problems),
+                title="Pixii: cleanup incomplete",
+                notification_id=f"pixiihome_controller_{self.serial}_authority_cleanup",
+            )
+
+    async def _async_release_owned_control(self) -> list[str]:
+        """Stop integration-owned leases and price schedules; report, never raise."""
+        problems: list[str] = []
+        async with self._controller_transition_lock:
+            for name in ("adaptive_peak_shaving_controller", "solar_charging_controller"):
+                controller = getattr(self, name, None)
+                if controller is None:
+                    continue
+                try:
+                    await controller.stop()
+                except Exception:  # noqa: BLE001 - authority off must still proceed
+                    problems.append(f"{name}_stop_failed")
+                    continue
+                if controller.owns_live_lease():
+                    # The bounded lease still expires by itself.
+                    problems.append(f"{name}_lease_still_active")
+            if self.price_optimization_controller is not None:
+                try:
+                    problems.extend(
+                        await self.price_optimization_controller.release_for_authority_off()
+                    )
+                except Exception:  # noqa: BLE001 - authority off must still proceed
+                    problems.append("price_release_failed")
+        return problems
 
     async def _persist_product_controller_state(
         self,

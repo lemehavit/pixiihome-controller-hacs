@@ -56,6 +56,7 @@ class PriceOptimizationController:
         self.last_applied_at: datetime | None = None
         self.price_source_format: str | None = None
         self.price_interval_count = 0
+        self.next_day_prices_available: bool | None = None
         self.current_price_sek_per_kwh: float | None = None
         self.best_planned_spread_sek_per_kwh: float | None = None
         self.price_last_updated: datetime | None = None
@@ -129,6 +130,7 @@ class PriceOptimizationController:
             ),
             "price_source_format": self.price_source_format,
             "price_interval_count": self.price_interval_count,
+            "next_day_prices_available": self.next_day_prices_available,
             "current_price_sek_per_kwh": self.current_price_sek_per_kwh,
             "best_planned_spread_sek_per_kwh": self.best_planned_spread_sek_per_kwh,
             "price_last_updated": (
@@ -252,6 +254,47 @@ class PriceOptimizationController:
                 self.delete_count += 1
             self._publish("disabled")
 
+    async def release_for_authority_off(self) -> list[str]:
+        """Remove every live price-owned effect while Gateway writes are still allowed.
+
+        Future identities are deleted; an interval already in progress uses the
+        verified exact price stop. Failures are reported, never retried here.
+        """
+        await self.stop()
+        problems: list[str] = []
+        async with self._lock:
+            manager = self.runtime.scheduler_mutation_manager
+            if manager is None:
+                problems.append("price_scheduler_mutation_unavailable")
+            else:
+                now = datetime.now(UTC)
+                for record in self._price_records():
+                    start = _record_start(record)
+                    duration = record.intended_state.get("duration")
+                    if start is None or type(duration) is not int or duration <= 0:
+                        problems.append(f"price_{record.m_id}_interval_unknown")
+                        continue
+                    if start + timedelta(seconds=duration) <= now:
+                        continue
+                    if start > now:
+                        result = await manager.delete(record.m_id)
+                        stopped = result.status is SchedulerTransactionStatus.SUCCESS
+                    else:
+                        result = await manager.stop_owned_price(record.m_id)
+                        stopped = result.status in {
+                            SchedulerTransactionStatus.SUCCESS,
+                            SchedulerTransactionStatus.OUTPUT_STOPPED,
+                        }
+                    if stopped:
+                        self.delete_count += 1
+                    else:
+                        problems.append(f"price_{record.m_id}_{result.reason}")
+            if problems:
+                self._publish("blocked", problems[0])
+            else:
+                self._publish("disabled", "production_control_disabled")
+        return problems
+
     def request_refresh(self) -> None:
         """Wake the planner after a setting or price-entity change."""
         self._wake.set()
@@ -330,9 +373,13 @@ class PriceOptimizationController:
             self.price_interval_count = len(series.intervals)
             self.price_last_updated = state.last_updated.astimezone(UTC)
             self._source_fingerprint = series.fingerprint
-            if not _daily_future_prices_available(series, state.attributes):
-                self._publish("waiting_prices", "future_price_horizon_incomplete")
-                return
+            # Plan with the remaining known prices instead of idling until the
+            # next day is published. Publication changes the source, which
+            # wakes this loop and replaces future owned schedules that no
+            # longer belong to the better plan.
+            self.next_day_prices_available = _daily_future_prices_available(
+                series, state.attributes
+            )
             limits = self._validated_limits()
             self._planned_settings = self.runtime.operational_settings.as_dict()
             self._planned_policy = self.runtime._automation_policy().as_dict()
