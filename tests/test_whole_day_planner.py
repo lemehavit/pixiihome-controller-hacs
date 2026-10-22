@@ -217,3 +217,27 @@ def test_best_net_profit_explains_an_empty_plan() -> None:
         1.7 - 1.0 / 0.9 - 0.1
     )
     assert best_net_profit(_series([1.0]), NOW, 0.9, 0.5, 0.0) is None
+
+
+def test_discharge_money_is_one_cycle_after_the_energy_cost() -> None:
+    from custom_components.pixiihome_controller.control.whole_day_planner import _action
+
+    peak = PriceInterval(NOW, NOW + timedelta(hours=1), 3.29)
+    action = _action(
+        peak, 2.0, 0.0, -2.0, 50.0,
+        maximum_discharge_kw=10.0, step_kw=0.8, reference=0.9,
+        round_trip=0.9, grid_import_cost=0.65, cycle_cost=0.3,
+    )
+    assert action is not None
+    # Saves 3.29 + 0.65 per kWh; the energy cost (0.9 + 0.65) / 0.9 + 0.3.
+    expected_net = 3.29 + 0.65 - ((0.9 + 0.65) / 0.9 + 0.3)
+    assert action.net_profit_sek_per_kwh == pytest.approx(expected_net)
+    assert action.net_profit_sek_per_kwh < peak.price_sek_per_kwh
+    assert action.expected_margin_sek == pytest.approx(2.0 * expected_net)
+    assert action.reference_price_sek_per_kwh == 0.9
+    charge = _action(
+        peak, 0.0, 0.0, 2.0, 50.0,
+        maximum_discharge_kw=10.0, step_kw=0.8, reference=0.9,
+        round_trip=0.9, grid_import_cost=0.65, cycle_cost=0.3,
+    )
+    assert charge is not None and charge.expected_margin_sek == 0.0

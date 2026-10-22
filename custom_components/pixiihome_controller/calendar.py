@@ -131,13 +131,13 @@ def _economics_text(item: dict) -> str:
             "Förväntad förtjänst: okänd (planen har räknats om sedan schemat skapades)"
         )
     price = _kr(item["price_sek_per_kwh"])
-    net = _kr(item["net_profit_sek_per_kwh"])
     if item["direction"] == "charge":
         return (
             f"Köper ca {_kr(item['energy_kwh'])} kWh à {price} kr/kWh "
             f"(ca {_kr(item['charge_cost_sek'])} kr). Förtjänsten räknas på "
-            f"urladdningen som använder energin; väntat netto {net} kr/kWh."
+            "urladdningen som använder energin."
         )
+    net = _kr(item["net_profit_sek_per_kwh"])
     return (
         f"Förväntad förtjänst: {_kr(item['expected_profit_sek'])} kr "
         f"(netto {net} kr/kWh efter verkningsgrad och kostnader; "

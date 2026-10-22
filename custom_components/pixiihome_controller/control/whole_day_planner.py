@@ -184,6 +184,10 @@ def build_whole_day_plan(
         resets[k] = (target, price)
 
     mean_price = sum(item.price_sek_per_kwh for item in candidates) / count
+    # What energy already in the battery cost is unknown; like the standard
+    # planner, estimate it at the latest known price.
+    known = [item for item in series.intervals if item.start <= current]
+    stored_price = known[-1].price_sek_per_kwh if known else candidates[0].price_sek_per_kwh
     terminal_value = max(0.0, (mean_price + gic) * eta - cycle_cost_sek_per_kwh)
 
     def slot_cost(index: int, delta: int, *, decision: bool) -> tuple[float, float]:
@@ -294,10 +298,13 @@ def build_whole_day_plan(
         margin = base_cost - cost
         margin_total += margin
         action = _action(
-            item, load, solar, battery, soc, margin,
+            item, load, solar, battery, soc,
             maximum_discharge_kw=maximum_discharge_kw,
             step_kw=step / (eta * item.duration_hours),
-            reference=(charged_cost / charged_energy) if charged_energy > 0 else None,
+            reference=(charged_cost / charged_energy) if charged_energy > 0 else stored_price,
+            round_trip=rt,
+            grid_import_cost=gic,
+            cycle_cost=cycle_cost_sek_per_kwh,
         )
         net = load - solar
         if battery > max(0.0, -net) + 0.05:
@@ -331,12 +338,22 @@ def _action(
     solar: float,
     battery: float,
     soc: float,
-    margin: float,
     *,
     maximum_discharge_kw: float,
     step_kw: float,
-    reference: float | None,
+    reference: float,
+    round_trip: float,
+    grid_import_cost: float,
+    cycle_cost: float,
 ) -> PricePlanAction | None:
+    """One interval as an action, with the money shown for it.
+
+    The plan's total (the per-slot savings summed) is the true saving against no
+    battery. Per interval, though, a charge only spends and a discharge only
+    saves, so both are shown as one cycle on the discharge: what it saves
+    minus what its energy cost (``reference``, after losses and cycle cost).
+    A charge shows no profit of its own.
+    """
     net = load - solar
     hours = item.duration_hours
     price = item.price_sek_per_kwh
@@ -346,12 +363,15 @@ def _action(
             return None
         return PricePlanAction(
             item.start, item.end, PriceDirection.CHARGE, power, "demandresponse",
-            {"pacref": round(power * 1000, 3)}, None, price, price, 0.0, soc, margin,
-            margin / (battery * hours),
+            {"pacref": round(power * 1000, 3)}, None, price, price, 0.0, soc, 0.0, 0.0,
         )
     if battery < -0.05:
         delivered = -battery * hours
-        basis = reference if reference is not None else price
+        basis = reference
+        house = min(-battery, max(0.0, net)) * hours
+        saved = house * (price + grid_import_cost) + (delivered - house) * price
+        energy_cost = delivered * ((basis + grid_import_cost) / round_trip + cycle_cost)
+        margin = saved - energy_cost
         # Less than one energy step beyond the house load is rounding in the
         # energy grid, not a planned export: follow the house load instead of
         # forcing a fixed export power.
