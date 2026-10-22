@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.9 — 2026-10-22
+
+- Fix: the manual-control buttons (Start charging, Start discharging, Start
+  target SoC, Start adaptive peak shaving) could stay "unavailable" after a
+  restart. Their availability was only checked once at start-up, often while
+  control authority was still held off. They now follow authority within
+  about 30 seconds.
+
 ## 0.5.8 — 2026-10-22
 
 - Fix: the post-check from 0.5.7 never ran after a restart. A restart with an

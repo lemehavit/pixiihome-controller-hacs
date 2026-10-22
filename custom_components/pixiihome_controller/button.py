@@ -82,6 +82,9 @@ class PixiiNativeButton(ButtonEntity):
 
     _attr_has_entity_name = True
     _attr_entity_category = EntityCategory.CONFIG
+    # Buttons never poll by default, so availability was fixed at startup
+    # (often while a restart held authority closed). Poll to follow it.
+    _attr_should_poll = True
 
     def __init__(
         self,
