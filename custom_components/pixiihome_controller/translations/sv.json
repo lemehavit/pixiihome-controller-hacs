@@ -237,7 +237,8 @@
           "lease_expiring": "Avslutar solladdning",
           "soc_limit": "Högsta användbara SOC uppnådd",
           "blocked": "Spärrad",
-          "deferring": "Väntar: säljer nu, laddar senare"
+          "deferring": "Väntar: säljer nu, laddar senare",
+          "waiting_for_priority": "Väntar på scheman och tjänster"
         }
       },
       "adaptive_peak_shaving_status": {
@@ -358,6 +359,12 @@
       },
       "price_blocked_notify_hours": {
         "name": "Avisera när prisoptimeringen stått still i"
+      },
+      "calibration_endpoint_soc_percent": {
+        "name": "Kalibrering slut-SOC"
+      },
+      "calibration_duration_seconds": {
+        "name": "Kalibreringens längd"
       }
     },
     "switch": {
@@ -381,6 +388,11 @@
       },
       "solar_smart_enabled": {
         "name": "Smart solladdning"
+      }
+    },
+    "button": {
+      "start_battery_calibration": {
+        "name": "Starta batterikalibrering"
       }
     }
   }

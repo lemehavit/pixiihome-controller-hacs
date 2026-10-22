@@ -87,7 +87,7 @@ def feature_device_info(
 
 def setting_feature(key: str) -> PixiiFeature:
     """Map every persisted operational setting to its functional device."""
-    if key.startswith(("manual_", "target_soc_")):
+    if key.startswith(("manual_", "target_soc_", "calibration_")):
         return PixiiFeature.MANUAL_CONTROL
     if key.startswith("planner_"):
         return PixiiFeature.SCHEDULE_PLANNER

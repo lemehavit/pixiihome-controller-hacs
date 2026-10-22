@@ -4,13 +4,14 @@ from __future__ import annotations
 
 DOMAIN = "pixiihome_controller"
 NAME = "Pixiihome Controller"
-VERSION = "0.5.8"
+VERSION = "0.5.9"
 CONF_SERIAL = "serial"
 CONF_RUNTIME_MODE = "runtime_mode"
 CONF_COMMAND_STATE = "command_state"
 CONF_CONTROL_JOURNAL_INITIALIZED = "control_journal_initialized"
 # Switches remembered while a restart holds control closed for recovery.
 RESUME_AFTER_RECOVERY = "resume_after_recovery"
+BATTERY_CALIBRATION_UNTIL = "battery_calibration_until"
 CONF_ENTRY_ID = "config_entry_id"
 CONF_SCHEDULER_OWNERSHIP_STATE = "scheduler_ownership_state"
 CONF_SCHEDULER_ENABLED = "scheduler_enabled"

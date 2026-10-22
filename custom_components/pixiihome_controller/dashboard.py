@@ -25,6 +25,9 @@ _ENTITY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "number.target_soc_percent",
             "number.target_soc_duration_seconds",
             "button.start_target_soc",
+            "number.calibration_endpoint_soc_percent",
+            "number.calibration_duration_seconds",
+            "button.start_battery_calibration",
         ),
     ),
     (

@@ -44,6 +44,12 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "target_soc_duration_seconds": SettingSpec(
         "target_soc_duration_seconds", 3600, 60, 604800, 60, "s"
     ),
+    "calibration_endpoint_soc_percent": SettingSpec(
+        "calibration_endpoint_soc_percent", 90.0, 10.0, 100.0, 1.0, "%"
+    ),
+    "calibration_duration_seconds": SettingSpec(
+        "calibration_duration_seconds", 7200, 1800, 86400, 60, "s"
+    ),
     "aps_import_limit_kw": SettingSpec("aps_import_limit_kw", 0.0, -100.0, 100.0, 0.1, "kW"),
     "aps_export_limit_kw": SettingSpec("aps_export_limit_kw", 0.0, -100.0, 100.0, 0.1, "kW"),
     "aps_max_charge_kw": SettingSpec("aps_max_charge_kw", 10.0, 0.0, 100.0, 0.1, "kW"),

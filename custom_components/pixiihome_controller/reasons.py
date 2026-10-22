@@ -18,6 +18,7 @@ REASON_TEXT: dict[str, str] = {
     "plant_telemetry_not_safe": "Batteriets mätvärden är inte färska eller säkra",
     "plant_or_meter_telemetry_not_safe": "Batteriets eller elmätarens mätvärden är inte färska",
     "non_idle_service_active": "En annan tjänst eller ett schema körs just nu",
+    "battery_calibration_running": "Batterikalibrering pågår; automatiken väntar",
     "running_service_unavailable": "Okänt vilken tjänst batteriet kör",
     "price_schedule_writes_disabled": "Förhandsvisning: skapande av scheman är avstängt",
     "price_scheduler_inventory_incomplete": "Schemalistan från Gateway är ofullständig",
