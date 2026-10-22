@@ -682,6 +682,40 @@ async def test_unheld_aggregator_target_stops_the_plan_at_that_window():
 
 
 @pytest.mark.asyncio
+async def test_refused_target_is_kept_and_planned_around_with_its_reason(caplog):
+    from homeassistant.exceptions import HomeAssistantError
+
+    instance, _ = runtime()
+    window, calls = _aggregator_day(instance, adjust=True)
+    logged: list[str] = []
+
+    async def refused(**kwargs):
+        calls.append(kwargs)
+        raise HomeAssistantError("scheduler_installer_access_required")
+
+    instance.gateway_scheduler.set_external_target_soc = refused
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    import custom_components.pixiihome_controller.price_controller as module
+
+    original = module.log_activity
+    module.log_activity = lambda _runtime, _key, message, *_args: logged.append(message)
+    try:
+        await controller.tick()
+        attempts = len(calls)
+        await controller.tick()
+    finally:
+        module.log_activity = original
+
+    key = (window.sch_index, window.service_no, window.start_epoch, window.duration_seconds)
+    assert controller._refused_targets[key] == "scheduler_installer_access_required"
+    # Planned as fixed from then on: never tried again, logged once with why.
+    assert attempts >= 1 and len(calls) == attempts
+    refusals = [m for m in logged if "cannot be changed" in m]
+    assert len(refusals) == 1 and "scheduler_installer_access_required" in refusals[0]
+    assert "could not be changed: scheduler_installer_access_required" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_lowered_target_is_restored_when_no_longer_held():
     instance, _ = runtime()
     window, calls = _aggregator_day(instance, adjust=True)

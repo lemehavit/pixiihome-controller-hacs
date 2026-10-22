@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
@@ -39,6 +40,8 @@ from .scheduler.ownership import OwnershipLifecycle, SchedulerOwnershipRecord
 
 if TYPE_CHECKING:
     from .runtime import RuntimeData
+
+_LOGGER = logging.getLogger(__name__)
 
 
 PRICE_OWNER = "automatic_price_optimization"
@@ -87,6 +90,9 @@ class PriceOptimizationController:
         self._external_meta: tuple[tuple[Any, float | None], ...] = ()
         # Original references of foreign targets this controller lowered.
         self._lowered: dict[tuple[int, int, int, int], float] = {}
+        # Foreign targets the Gateway side refused to change, with the reason.
+        # They are planned as fixed until they end, and logged once.
+        self._refused_targets: dict[tuple[int, int, int, int], str] = {}
         self.external_target_adjust_count = 0
         self.external_target_delete_count = 0
         self.busy_until: datetime | None = None
@@ -714,16 +720,24 @@ class PriceOptimizationController:
         adjust = bool(
             self.runtime.operational_settings.get("price_adjust_external_target_soc")
         )
-        windows = (
-            self._with_adjustable_targets(series, limits) if adjust else self._external_windows
-        )
-        self.plan = self._build_plan(series, limits, windows=windows)
-        if not self.plan.ready:
-            self._publish("waiting_for_priority", "price_external_schedule_energy_unknown")
-            return
+        self._prune_refused_targets()
+        # A refused target is planned as fixed from then on, so plan again
+        # around it instead of dropping everything after it.
+        for _ in range(3):
+            windows = (
+                self._with_adjustable_targets(series, limits) if adjust
+                else self._external_windows
+            )
+            self.plan = self._build_plan(series, limits, windows=windows)
+            if not self.plan.ready:
+                self._publish("waiting_for_priority", "price_external_schedule_energy_unknown")
+                return
+            refused_before = len(self._refused_targets)
+            failed_from = await self._apply_external_targets(windows, self.plan, limits)
+            if len(self._refused_targets) == refused_before:
+                break
         self._log_plan(self.plan, series)
         actions = self.plan.actions
-        failed_from = await self._apply_external_targets(windows, self.plan, limits)
         if failed_from is not None:
             # The plan relied on that window holding; nothing after it is safe.
             actions = tuple(a for a in actions if a.end <= failed_from)
@@ -1191,6 +1205,7 @@ class PriceOptimizationController:
         lead = datetime.now(UTC) + timedelta(minutes=self.config.minimum_lead_minutes)
         eligible = [
             meta is not None and meta[1] is not None and window.start > lead
+            and _target_key(meta[0]) not in self._refused_targets
             for window, meta in zip(self._external_windows, self._external_meta, strict=True)
         ]
         trial = tuple(
@@ -1258,8 +1273,7 @@ class PriceOptimizationController:
             schedule, reference = meta[0], meta[1]
             if reference is None:
                 continue
-            key = (schedule.sch_index, schedule.service_no,
-                   schedule.start_epoch, schedule.duration_seconds)
+            key = _target_key(schedule)
             replace_window = (
                 window.adjustable
                 and window.start < replace_until
@@ -1301,8 +1315,8 @@ class PriceOptimizationController:
                     allow_delete=allow_delete,
                     delete=replace_window,
                 )
-            except Exception:  # noqa: BLE001 - refused before send; plan around it
-                result = {"status": "refused"}
+            except Exception as error:  # noqa: BLE001 - refused before send; plan around it
+                result = {"status": "refused", "reason": str(error) or type(error).__name__}
             status = result.get("status")
             self._target_cache.pop(key, None)
             when = time_span(window.start, window.end)
@@ -1340,6 +1354,23 @@ class PriceOptimizationController:
                 log_activity(self.runtime, PRICE_STATUS,
                              f"Deleted aggregator Target SOC {when} ({reference:.0f} %); "
                              "the Gateway kept the old target")
+            elif status == "refused" and window.adjustable:
+                reason = str(result.get("reason"))
+                # One entry per reason: the same cause usually hits every target.
+                repeated = reason in self._refused_targets.values()
+                self._refused_targets[key] = reason
+                _LOGGER.warning(
+                    "Aggregator Target SOC %s could not be changed: %s", when, reason
+                )
+                if not repeated:
+                    log_activity(self.runtime, PRICE_STATUS,
+                                 f"Aggregator Target SOC {when} cannot be changed "
+                                 f"({reason}); it is kept and the plan is made around it",
+                                 "Who: price optimization, with Allow changing aggregator "
+                                 "schedules on. Why: the change was refused before anything "
+                                 "was sent, so the aggregator target stays as it is and the "
+                                 "battery is planned to follow it. Later targets refused for "
+                                 "the same reason are not logged again.")
             elif window.adjustable:
                 log_activity(self.runtime, PRICE_STATUS,
                              f"Could not lower aggregator Target SOC {when} ({status}); "
@@ -1350,6 +1381,13 @@ class PriceOptimizationController:
                     self._publish("blocked", "price_external_target_recovery_required")
                     return failed_from
         return failed_from
+
+    def _prune_refused_targets(self) -> None:
+        now = datetime.now(UTC).timestamp()
+        self._refused_targets = {
+            key: reason for key, reason in self._refused_targets.items()
+            if key[2] + key[3] > now
+        }
 
     async def _reconcile(self, actions: tuple[PricePlanAction, ...]) -> bool:
         manager = self.runtime.scheduler_mutation_manager
@@ -1462,6 +1500,11 @@ def best_net_profit(
         best = profit if best is None else max(best, profit)
         cheapest = min(cheapest, price)
     return best
+
+
+def _target_key(schedule: Any) -> tuple[int, int, int, int]:
+    return (schedule.sch_index, schedule.service_no,
+            schedule.start_epoch, schedule.duration_seconds)
 
 
 def _action_key(action: PricePlanAction) -> tuple[object, ...]:

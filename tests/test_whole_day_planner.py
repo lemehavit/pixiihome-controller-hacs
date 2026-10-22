@@ -241,3 +241,11 @@ def test_discharge_money_is_one_cycle_after_the_energy_cost() -> None:
         round_trip=0.9, grid_import_cost=0.65, cycle_cost=0.3,
     )
     assert charge is not None and charge.expected_margin_sek == 0.0
+
+
+def test_discharge_before_a_fixed_target_is_valued_at_its_refill_price() -> None:
+    from custom_components.pixiihome_controller.control.whole_day_planner import _basis
+
+    assert _basis(2.0, 0.0, 0.0, 1.5) == 2.0
+    assert _basis(None, 3.0, 2.0, 9.0) == 1.5
+    assert _basis(None, 0.0, 0.0, 1.7) == 1.7
