@@ -167,3 +167,20 @@ def test_source_id_names_the_aggregator_when_it_is_the_managed_source() -> None:
         source_id=None, ownership=SchedulerOwnership(Ownership.UNKNOWN, None)
     )
     assert _source_name(runtime, schedule) == "schedule of unknown source"
+
+
+def test_cause_waits_for_the_schedule_list_after_a_start() -> None:
+    dr = _schedule(NOW - timedelta(minutes=5), 60, 107, None)
+    runtime = _runtime((dr,))
+    snapshot = runtime.scheduler_coordinator.last_good_snapshot
+    runtime.scheduler_coordinator.last_good_snapshot = None
+    runtime.telemetry.service = 107
+    clock = [NOW]
+    tracker = _tracker(runtime, clock)
+    tracker.sample()
+    assert runtime.events == []  # no "not started by this integration" guess
+    runtime.scheduler_coordinator.last_good_snapshot = snapshot
+    clock[0] += timedelta(seconds=15)
+    tracker.sample()
+    assert "not started by this integration" not in runtime.events[-1]["message"]
+    assert "Target SoC" in runtime.events[-1]["message"]

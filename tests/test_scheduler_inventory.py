@@ -535,3 +535,33 @@ def test_matching_detail_enriches_without_duplicate_schedule() -> None:
     )
     assert view.sch_index == entry.sch_index
     assert view.completeness.value == "complete"
+
+
+@pytest.mark.asyncio
+async def test_narrow_list_read_during_details_is_noticed_and_read_again() -> None:
+    running = make_entry(1, start_epoch=999_000, duration_seconds=3600)
+    later = make_entry(2, start_epoch=1_005_000)
+    coordinator, client, _now = make_coordinator((running, later))
+    client.window_entries[1_004_999] = (later,)
+    get_detail = client.get_detail
+    narrowed = []
+
+    async def detail_with_interleaved_read(sch_index: int) -> SchedulerDetail:
+        if sch_index == 2 and not narrowed:
+            narrowed.append(True)
+            # Another reader (a write's own observation) lists a narrow window.
+            await coordinator.manager.refresh_list(1_004_999, 1_005_100)
+        return await get_detail(sch_index)
+
+    client.get_detail = detail_with_interleaved_read  # type: ignore[method-assign]
+    await coordinator.async_refresh()
+
+    # The lost entry is noticed and the window is read once more.
+    snapshot = coordinator.snapshot
+    assert snapshot is not None
+    assert snapshot.data_status == "current"
+    assert [schedule.sch_index for schedule in snapshot.schedules] == [1, 2]
+    assert coordinator.last_good_snapshot is snapshot
+
+
+

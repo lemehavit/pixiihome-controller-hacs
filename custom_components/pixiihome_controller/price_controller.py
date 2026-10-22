@@ -486,6 +486,30 @@ class PriceOptimizationController:
                 if expiry.status is not SchedulerTransactionStatus.SUCCESS:
                     self._publish("waiting_for_priority", "price_stop_quarantine_active")
                     return
+        # An own schedule whose DELETE outcome was never confirmed blocks all
+        # writes. One keyed GET (nothing is sent) settles it: proven absence
+        # retires the identity, an exact unchanged schedule is owned again.
+        for conflicted in tuple(ownership.records.values()):
+            if (
+                conflicted.owner != PRICE_OWNER
+                or conflicted.lifecycle is not OwnershipLifecycle.CONFLICTED
+                or conflicted.m_id in self.soc_guard._attempted
+            ):
+                continue
+            recovered = await mutation_manager.recover_conflicted_price_delete(conflicted.m_id)
+            if recovered.status is not SchedulerTransactionStatus.SUCCESS:
+                continue
+            gone = recovered.lifecycle_after is OwnershipLifecycle.ORPHANED
+            log_activity(
+                self.runtime, PRICE_STATUS,
+                f"Post-check: {_describe(conflicted)} is "
+                + ("confirmed removed" if gone else "still in place and unchanged"),
+                "Who: price optimization. Why: the Gateway never confirmed an earlier "
+                "removal, so all price writes were paused. A read-only check of the "
+                "schedule settled it"
+                + (" and the pause is lifted." if gone
+                   else "; the plan decides what to do with it."),
+            )
         config = self.config
         assert config.price_entity_id is not None
         state = self.runtime.hass.states.get(config.price_entity_id)
@@ -583,7 +607,7 @@ class PriceOptimizationController:
         if manager is None:
             self._publish("blocked", "price_scheduler_inventory_unavailable")
             return
-        schedules = manager.normalized_schedules
+        schedules = snapshot.schedules
         if any(
             _record_has_schedule_shape(record, schedule)
             and not _record_matches_schedule(record, schedule, schedules)
@@ -825,8 +849,11 @@ class PriceOptimizationController:
         gateway = self.runtime.gateway_scheduler
         manager = self.runtime.scheduler_manager
         battery = self.runtime.battery
+        # Moving an aggregator schedule changes it, which needs the same
+        # permission as adjusting its Target SOC.
         if (
-            source_id is None
+            not self.runtime.operational_settings.get("price_adjust_external_target_soc")
+            or source_id is None
             or gateway is None
             or manager is None
             or battery.raw_soc is None
@@ -853,7 +880,7 @@ class PriceOptimizationController:
         )
         if not charge_actions:
             return True
-        schedules = sorted(manager.normalized_schedules, key=lambda item: item.start_epoch)
+        schedules = sorted(self._inventory(), key=lambda item: item.start_epoch)
         source_targets = [
             schedule
             for schedule in schedules
@@ -950,6 +977,17 @@ class PriceOptimizationController:
             return True
         return True
 
+    def _inventory(self) -> tuple[Any, ...]:
+        """Schedules of the last complete canonical inventory window.
+
+        Never the scheduler manager's shared list: the calendar, the panel and
+        each write's own observation replace that with narrower windows, which
+        can hide a running or upcoming foreign schedule.
+        """
+        coordinator = self.runtime.scheduler_coordinator
+        snapshot = None if coordinator is None else coordinator.last_good_snapshot
+        return () if snapshot is None else tuple(snapshot.schedules)
+
     def _price_records(self) -> list[SchedulerOwnershipRecord]:
         ownership = self.runtime.scheduler_ownership
         if ownership is None:
@@ -964,19 +1002,19 @@ class PriceOptimizationController:
 
     def _known_external_end(self, service: int | None) -> datetime | None:
         """End of the single enabled foreign schedule explaining ``service`` now."""
-        manager = self.runtime.scheduler_manager
-        if manager is None or service is None:
+        if service is None:
             return None
         owned = self._price_records()
         now = int(datetime.now(UTC).timestamp())
+        schedules = self._inventory()
         running = [
-            schedule for schedule in manager.normalized_schedules
+            schedule for schedule in schedules
             if schedule.enabled
             and schedule.service_type == service
             and schedule.start_epoch <= now < schedule.end_epoch
             and schedule.recurrence.recurring is False
             and not any(
-                _record_matches_schedule(record, schedule, manager.normalized_schedules)
+                _record_matches_schedule(record, schedule, schedules)
                 for record in owned
             )
         ]
@@ -991,9 +1029,8 @@ class PriceOptimizationController:
         the Gateway; any other service, or an unreadable target, has unknown
         resulting energy and ends planning at its start.
         """
-        manager = self.runtime.scheduler_manager
         owned = self._price_records()
-        schedules = () if manager is None else tuple(manager.normalized_schedules)
+        schedules = self._inventory()
         now = int(datetime.now(UTC).timestamp())
         battery = self.runtime.battery
         gateway = self.runtime.gateway_scheduler

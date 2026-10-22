@@ -136,6 +136,10 @@ class BatteryActivityTracker:
         changed = False
         self._track_external_schedules(now)
         direction = direction_of(self.power_w)
+        if service not in (None, 0) and self._snapshot() is None:
+            # Right after a start the schedule list is not read yet; naming
+            # the cause now would wrongly say "not started by this integration".
+            service = None
         if service is not None and service != self.service:
             first = self.service is None
             self.service = service

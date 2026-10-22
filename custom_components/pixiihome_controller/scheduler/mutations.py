@@ -485,6 +485,63 @@ class SchedulerMutationManager:
             self.diagnostics.recovery_attempts += 1
             return await self._recover_provisional_locked(m_id)
 
+    async def recover_conflicted_price_delete(self, m_id: int) -> SchedulerTransactionResult:
+        """Resolve an own price schedule whose DELETE outcome was unconfirmed.
+
+        One keyed GET, nothing is sent. Proven absence (response 11) retires
+        the identity; an exact, unchanged schedule is owned again so the plan
+        can decide what to do with it. Anything else stays conflicted.
+        """
+        async with self._lock:
+            self.diagnostics.recovery_attempts += 1
+            operation = SchedulerMutationOperation.DELETE
+            record = self.ownership.get(m_id)
+            if (
+                record is None
+                or record.owner != "automatic_price_optimization"
+                or record.service not in {"demandresponse", "peakshaving"}
+                or record.lifecycle is not OwnershipLifecycle.CONFLICTED
+            ):
+                return self._local_failure(operation, m_id, "demandresponse", record,
+                                           "price_delete_recovery_not_applicable")
+            # A pending CREATE or UPDATE (for example a SOC-guard stop) has its
+            # own recovery path; never settle it as a delete.
+            for other in (SchedulerMutationOperation.CREATE, SchedulerMutationOperation.UPDATE):
+                if await self.journal.find_recovery_transaction_id(
+                    operation=other.value,
+                    target_identity=JournalTargetIdentity(m_id=record.m_id),
+                ) is not None:
+                    return self._local_failure(operation, record.m_id, record.service, record,
+                                               "price_delete_recovery_not_applicable")
+            try:
+                expected = scheduler_expected_state_from_record(record)
+            except (CommandValidationError, TypeError, ValueError):
+                return self._local_failure(operation, record.m_id, record.service, record,
+                                           "recovery_expected_state_invalid")
+            readback, failure = await self._execute_get(
+                ScheduledGet(m_id=record.m_id, expected_service=record.service).build()
+            )
+            if failure is not None or readback is None:
+                return self._local_failure(operation, record.m_id, record.service, record,
+                                           "recovery_readback_execution_failed")
+            absent = reconcile_scheduler_delete(readback, expected_m_id=record.m_id)
+            if absent.status is SchedulerReconciliationStatus.ABSENT:
+                transitioned = replace(record, lifecycle=OwnershipLifecycle.ORPHANED)
+                reconciliation = absent
+            else:
+                present = reconcile_scheduler_get(readback, expected)
+                if (
+                    present.status is not SchedulerReconciliationStatus.MATCH
+                    or expected.starttime <= datetime.now(UTC)
+                ):
+                    return self._local_failure(operation, record.m_id, record.service, record,
+                                               "recovery_readback_unresolved")
+                transitioned = replace(record, lifecycle=OwnershipLifecycle.OWNED)
+                reconciliation = present
+            return self._finish(await self._persist_recovery_result(
+                record, transitioned, reconciliation, operation=operation,
+            ))
+
     async def reconcile_expired_price(self, m_id: int) -> SchedulerTransactionResult:
         """Retire an expired own price identity using GET only, never a retry.
 
@@ -1304,16 +1361,18 @@ class SchedulerMutationManager:
         record: SchedulerOwnershipRecord,
         transitioned: SchedulerOwnershipRecord,
         reconciliation: SchedulerReconciliationResult,
+        *,
+        operation: SchedulerMutationOperation = SchedulerMutationOperation.CREATE,
     ) -> SchedulerTransactionResult:
         transaction_id = await self.journal.find_recovery_transaction_id(
-            operation=SchedulerMutationOperation.CREATE.value,
+            operation=operation.value,
             target_identity=JournalTargetIdentity(m_id=record.m_id),
         )
         if transaction_id is None:
             return await self._persist_reconciled_result(
                 record,
                 transitioned,
-                SchedulerMutationOperation.CREATE,
+                operation,
                 None,
                 reconciliation,
             )
@@ -1333,7 +1392,7 @@ class SchedulerMutationManager:
         except Exception:
             self.diagnostics.persistence_failures += 1
             return SchedulerTransactionResult(
-                SchedulerMutationOperation.CREATE,
+                operation,
                 SchedulerTransactionStatus.PERSISTENCE_FAILED,
                 record.m_id,
                 record.service,
@@ -1348,7 +1407,7 @@ class SchedulerMutationManager:
             self.allocator.owned_ids.discard(record.m_id)
         self.diagnostics.successful_reconciliations += 1
         return SchedulerTransactionResult(
-            SchedulerMutationOperation.CREATE,
+            operation,
             SchedulerTransactionStatus.SUCCESS,
             record.m_id,
             record.service,

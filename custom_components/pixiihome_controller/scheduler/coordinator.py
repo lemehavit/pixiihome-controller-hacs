@@ -273,11 +273,26 @@ class SchedulerInventoryCoordinator:
         publish: bool,
     ) -> SchedulerInventorySnapshot:
         try:
-            await self.manager.refresh_list(from_epoch, to_epoch)
-            detail_failures = await self._async_refresh_missing_details()
-            schedules = tuple(self.manager.normalized_schedules)
+            # Other readers (calendar, panel, a write's own observation) share
+            # the manager's list and may replace it with a narrower window
+            # while details are fetched. Keep only this window's entries, read
+            # once more if some were lost, and never call such a snapshot
+            # current or keep it as the last good one.
+            for _attempt in range(2):
+                listed = await self.manager.refresh_list(from_epoch, to_epoch)
+                detail_failures = await self._async_refresh_missing_details()
+                schedules = tuple(self.manager.normalized_schedules)
+                lost = False
+                if listed is not None:
+                    indices = {entry.sch_index for entry in listed}
+                    schedules = tuple(
+                        schedule for schedule in schedules if schedule.sch_index in indices
+                    )
+                    lost = len({schedule.sch_index for schedule in schedules}) != len(indices)
+                if not lost:
+                    break
             authenticated = _authenticated(self.manager)
-            status = "partial" if detail_failures else "current"
+            status = "partial" if detail_failures or lost else "current"
             snapshot = _snapshot_for_schedules(
                 schedules,
                 data_status=status,
@@ -304,7 +319,8 @@ class SchedulerInventoryCoordinator:
             return snapshot
 
         if publish:
-            self._last_good_snapshot = snapshot
+            if not lost:
+                self._last_good_snapshot = snapshot
             self._publish(snapshot)
             self._schedule_next_boundary(snapshot)
         return snapshot

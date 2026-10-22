@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.7 — 2026-10-22
+
+- Fix: when the Gateway never confirmed the removal of an own price schedule
+  (timeout), every later price write stayed blocked
+  (`price_create_safety_blocked`, "Efterkontroll krävs"). Price optimization
+  now settles this itself with one read-only check, never a second delete:
+  if the schedule is gone the block is lifted, if it is still there and
+  unchanged it is treated as an own schedule again. Anything else stays
+  blocked. The logbook says what the check found.
+- Fix: a narrow schedule-list read (calendar, panel, Gateway check) running at
+  the same time as a full refresh could drop schedules from the inventory the
+  planner and activity log use. The refresh now notices this, reads again,
+  and never publishes a list with missing schedules as complete.
+- Fix: right after a restart the activity log could say a running schedule
+  was "not started by this integration" before the schedule list was read.
+  It now waits for the list.
+- Moving an aggregator charge schedule to a cheaper hour now also requires
+  **Allow changing aggregator schedules**, like every other change to
+  aggregator schedules.
+
 ## 0.5.6 — 2026-10-22
 
 - Price calendar: discharges without export now read "max N kW". That power
