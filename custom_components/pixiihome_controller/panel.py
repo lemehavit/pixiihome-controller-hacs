@@ -1248,7 +1248,7 @@ async def websocket_panel_apply(
 async def websocket_panel_recover(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any],
 ) -> None:
-    """Read back a pending MQTT CREATE without resending the schedule."""
+    """Read back a pending CREATE or DELETE without sending anything again."""
     runtime = _runtime_for_entry(hass, msg["entry_id"])
     if not isinstance(runtime, RuntimeData):
         connection.send_error(msg["id"], "unavailable", "scheduler_unavailable")
@@ -1258,18 +1258,36 @@ async def websocket_panel_recover(
     manager = runtime.scheduler_mutation_manager
     if (
         transaction is None or transaction.phase is not JournalPhase.RECOVERY_REQUIRED
-        or transaction.operation != ControlOperation.CREATE.value
+        or transaction.operation
+        not in {ControlOperation.CREATE.value, ControlOperation.DELETE.value}
         or transaction.target_identity.m_id is None or manager is None
     ):
         connection.send_error(msg["id"], "recovery_pending", "recovery_target_invalid")
         return
     try:
-        result = await manager.recover_provisional(transaction.target_identity.m_id)
+        if transaction.operation == ControlOperation.DELETE.value:
+            # Same read-only post-check the price controller runs on its own.
+            controller = runtime.price_optimization_controller
+            if controller is None:
+                raise RuntimeError("price_optimization_unavailable")
+            await controller.check_unconfirmed_deletes()
+            settled = journal is not None and all(
+                item.transaction_id != transaction.transaction_id
+                for item in (runtime.control_journal or journal).unresolved_transactions
+            )
+        else:
+            result = await manager.recover_provisional(transaction.target_identity.m_id)
+            settled = result.status.value == "success"
     except Exception:  # noqa: BLE001 - keep uncertain outcomes pending
         connection.send_error(msg["id"], "recovery_pending", "recovery_readback_unavailable")
         return
+    if settled:
+        try:
+            await runtime.async_resume_after_recovery()
+        except Exception:  # noqa: BLE001 - the switches can still be turned on by hand
+            pass
     connection.send_result(msg["id"], {
-        "status": "reconciled" if result.status.value == "success" else "recovery_required",
+        "status": "reconciled" if settled else "recovery_required",
         "transaction_id": transaction.transaction_id,
     })
 

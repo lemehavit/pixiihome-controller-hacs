@@ -1055,3 +1055,74 @@ async def test_scheduler_options_reload_restores_both_persistent_states(
     assert second.scheduler_ownership is not None
     assert second.scheduler_ownership.records[240000001].lifecycle is OwnershipLifecycle.OWNED
     assert second.scheduler_mutation_manager.diagnostics_snapshot()["recovery_attempts"] == 0
+
+
+@pytest.mark.asyncio
+async def test_switches_held_off_by_an_unfinished_command_return_once_it_is_settled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, entry, _, _ = await _configured_runtime(monkeypatch)
+    journal = runtime.control_journal
+    assert journal is not None
+    on = {
+        "automatic_solar_charging_enabled": False,
+        "adaptive_peak_shaving_enabled": False,
+        "load_balancing_enabled": False,
+        "automatic_price_optimization_enabled": True,
+    }
+    runtime.control_journal = journal.with_product_state(controller_state={
+        **journal.controller_state,
+        "production_control_authority": {"enabled": True, "revision": 3},
+        "controller_state": on,
+    })
+    await runtime._save_control_journal_verified(runtime.control_journal)
+    await runtime.begin_control_transaction(
+        transaction_id="tx-1", operation="delete",
+        target_identity=JournalTargetIdentity(m_id=240000001),
+    )
+    await runtime.transition_control_transaction("tx-1", JournalPhase.COMMAND_SENT)
+
+    restarted = RuntimeData(runtime.hass, "GATEWAY", entry=entry)
+    await restarted.async_initialize_control_state()
+    # Held off while the outcome is unknown, and nothing resumes early.
+    assert restarted.production_control_enabled() is False
+    assert restarted.controller_state.automatic_price_optimization_enabled is False
+    assert await restarted.async_resume_after_recovery() is False
+
+    # A second restart before settling still remembers the switches.
+    again = RuntimeData(runtime.hass, "GATEWAY", entry=entry)
+    await again.async_initialize_control_state()
+    await again.transition_control_transaction("tx-1", JournalPhase.RECONCILED)
+    # Each switch comes back through its normal path and its checks.
+    switched: list[tuple[str, bool]] = []
+
+    async def set_enabled(self: RuntimeData, key: str, enabled: bool) -> None:
+        assert self.production_control_enabled() is True
+        switched.append((key, enabled))
+
+    monkeypatch.setattr(RuntimeData, "_async_set_controller_enabled_locked", set_enabled)
+
+    assert await again.async_resume_after_recovery() is True
+    assert again.production_control_enabled() is True
+    assert again.release_gate.live_writes_enabled is True
+    assert switched == [("automatic_price_optimization_enabled", True)]
+    assert again.control_journal is not None
+    assert "resume_after_recovery" not in again.control_journal.controller_state
+    assert await again.async_resume_after_recovery() is False
+
+
+@pytest.mark.asyncio
+async def test_switches_are_not_remembered_when_authority_was_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, entry, _, _ = await _configured_runtime(monkeypatch)
+    await runtime.begin_control_transaction(
+        transaction_id="tx-1", operation="delete",
+        target_identity=JournalTargetIdentity(m_id=240000001),
+    )
+    restarted = RuntimeData(runtime.hass, "GATEWAY", entry=entry)
+    await restarted.async_initialize_control_state()
+    await restarted.transition_control_transaction("tx-1", JournalPhase.RECONCILED)
+
+    assert await restarted.async_resume_after_recovery() is False
+    assert restarted.production_control_enabled() is False

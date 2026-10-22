@@ -1031,9 +1031,9 @@ async def test_delete_accepts_an_owned_price_schedule_of_another_service() -> No
     assert result.service == "demandresponse"
 
 
-def _timed_out_price_delete(gets: list[Any]):
+def _timed_out_price_delete(gets: list[Any], start: datetime = START):
     command = ScheduledCreate(
-        service="demandresponse", m_id=M_ID, starttime=START,
+        service="demandresponse", m_id=M_ID, starttime=start,
         duration_seconds=3600, values={"pacref": -5000},
     ).build()
     store = store_with_record()

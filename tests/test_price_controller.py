@@ -46,7 +46,11 @@ class Coordinator:
     def last_good_snapshot(self):
         manager = getattr(self.manager, "scheduler_manager", None)
         schedules = tuple(manager.normalized_schedules) if manager is not None else ()
-        return SimpleNamespace(data_status="current", schedules=schedules)
+        now = int(datetime.now(UTC).timestamp())
+        return SimpleNamespace(
+            data_status="current", schedules=schedules, evaluated_at_epoch=now,
+            window_start_epoch=now - 3600, window_end_epoch=now + 48 * 3600,
+        )
 
     async def async_refresh(self):
         return self.last_good_snapshot
@@ -535,7 +539,9 @@ async def test_running_service_without_a_matching_schedule_still_blocks_writes()
 def _aggregator_day(instance, *, adjust: bool):
     from dataclasses import replace
 
-    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+    # Three hours ahead: the first price hour must stay beyond the minimum
+    # lead time even when the test runs just before a full hour.
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=3)
     prices = [(-1, 0.5), (0, 3.0), (1, 1.0), (2, 1.0), (3, 0.2), (4, 3.0)]
     instance.hass.states.state.attributes = {
         "unit_of_measurement": "SEK/kWh",

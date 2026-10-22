@@ -485,12 +485,17 @@ class SchedulerMutationManager:
             self.diagnostics.recovery_attempts += 1
             return await self._recover_provisional_locked(m_id)
 
-    async def recover_conflicted_price_delete(self, m_id: int) -> SchedulerTransactionResult:
+    async def recover_conflicted_price_delete(
+        self, m_id: int, *, absent_from_inventory: bool = False,
+    ) -> SchedulerTransactionResult:
         """Resolve an own price schedule whose DELETE outcome was unconfirmed.
 
         One keyed GET, nothing is sent. Proven absence (response 11) retires
         the identity; an exact, unchanged schedule is owned again so the plan
-        can decide what to do with it. Anything else stays conflicted.
+        can decide what to do with it. When the keyed GET itself gets no
+        usable answer, the caller's proof that a complete schedule list read
+        after the conflict holds nothing at that time also counts as absence.
+        Anything else stays conflicted.
         """
         async with self._lock:
             self.diagnostics.recovery_attempts += 1
@@ -522,13 +527,22 @@ class SchedulerMutationManager:
                 ScheduledGet(m_id=record.m_id, expected_service=record.service).build()
             )
             if failure is not None or readback is None:
-                return self._local_failure(operation, record.m_id, record.service, record,
-                                           "recovery_readback_execution_failed")
-            absent = reconcile_scheduler_delete(readback, expected_m_id=record.m_id)
+                if not absent_from_inventory:
+                    return self._local_failure(operation, record.m_id, record.service, record,
+                                               "recovery_readback_execution_failed")
+                absent = SchedulerReconciliationResult(
+                    SchedulerReconciliationStatus.ABSENT,
+                    "absent_from_complete_inventory",
+                    subject_m_id=record.m_id,
+                    subject_service=record.service,
+                )
+            else:
+                absent = reconcile_scheduler_delete(readback, expected_m_id=record.m_id)
             if absent.status is SchedulerReconciliationStatus.ABSENT:
                 transitioned = replace(record, lifecycle=OwnershipLifecycle.ORPHANED)
                 reconciliation = absent
             else:
+                assert readback is not None
                 present = reconcile_scheduler_get(readback, expected)
                 if (
                     present.status is not SchedulerReconciliationStatus.MATCH

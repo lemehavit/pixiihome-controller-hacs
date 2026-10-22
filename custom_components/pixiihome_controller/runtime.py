@@ -41,6 +41,7 @@ from .const import (
     CONF_SCHEDULER_USERNAME,
     DOMAIN,
     LIVE_WRITES_ENABLED,
+    RESUME_AFTER_RECOVERY,
 )
 from .control.controllers import (
     ControllerArbitrator,
@@ -412,7 +413,20 @@ class RuntimeData:
             authority_forced_closed = (
                 loaded_from_backup or recovery_blocked or journal_store_ambiguous
             )
+            resume = original_controller_state.get(RESUME_AFTER_RECOVERY)
             if authority_forced_closed:
+                # Only an unfinished command closes control here; remember the
+                # user's switches so they come back once it is settled. A
+                # backup or ambiguous store never resumes on its own.
+                if (
+                    recovery_blocked
+                    and not (loaded_from_backup or journal_store_ambiguous)
+                    and not isinstance(resume, dict)
+                    and stored_authority.enabled
+                ):
+                    resume = controller_state.as_dict()
+                elif loaded_from_backup or journal_store_ambiguous:
+                    resume = None
                 authority = ProductionControlAuthority(revision=stored_authority.revision)
                 controller_state = ControllerState()
             elif not authority.enabled and (
@@ -423,6 +437,9 @@ class RuntimeData:
                 controller_state = ControllerState()
             normalized_controller_state = dict(original_controller_state)
             normalized_controller_state["production_control_authority"] = authority.as_dict()
+            normalized_controller_state.pop(RESUME_AFTER_RECOVERY, None)
+            if isinstance(resume, dict) and not authority.enabled:
+                normalized_controller_state[RESUME_AFTER_RECOVERY] = resume
             if "operational_settings" in original_controller_state:
                 normalized_controller_state["operational_settings"] = operational_settings.as_dict()
             if (
@@ -662,6 +679,8 @@ class RuntimeData:
                 "production_control_authority": authority.as_dict(),
                 "controller_state": controller_state.as_dict(),
             }
+            # An explicit choice replaces any switches waiting for recovery.
+            state.pop(RESUME_AFTER_RECOVERY, None)
             candidate = journal.with_product_state(controller_state=state)
             try:
                 await self._save_control_journal_verified(candidate)
@@ -735,6 +754,65 @@ class RuntimeData:
                 operational_settings=operational_settings,
                 controller_state=controller_state,
             )
+
+    async def async_resume_after_recovery(self) -> bool:
+        """Turn the remembered switches back on once no command is unsettled.
+
+        A restart with an unfinished command closes control and remembers
+        what was on. Nothing is resumed while any transaction is unresolved.
+        Each controller comes back through its normal switch path, so its own
+        checks still apply.
+        """
+        async with self._control_journal_lock:
+            journal = self.control_journal
+            if journal is None or journal.unresolved_transactions:
+                return False
+            resume = journal.controller_state.get(RESUME_AFTER_RECOVERY)
+            if not isinstance(resume, dict) or self.production_control_enabled():
+                return False
+            authority = ProductionControlAuthority(
+                enabled=True, revision=self.production_authority.revision + 1,
+            )
+            state = {
+                **journal.controller_state,
+                "production_control_authority": authority.as_dict(),
+            }
+            state.pop(RESUME_AFTER_RECOVERY, None)
+            candidate = journal.with_product_state(controller_state=state)
+            try:
+                await self._save_control_journal_verified(candidate)
+            except Exception:
+                self._fail_closed_control_state("control_journal_persistence_failed")
+                raise
+            self.control_journal = candidate
+            self.production_authority = authority
+            self.release_gate.live_writes_enabled = True
+            self.release_gate.blocked_reasons = set()
+        restored: list[str] = []
+        failed: list[str] = []
+        async with self._controller_transition_lock:
+            for key, value in ControllerState.from_mapping(resume).as_dict().items():
+                if not value:
+                    continue
+                name = key.removesuffix("_enabled").replace("_", " ")
+                try:
+                    await self._async_set_controller_enabled_locked(key, True)
+                except Exception as error:  # noqa: BLE001 - report, keep the rest
+                    failed.append(f"{name} ({error})")
+                else:
+                    restored.append(name)
+        from .activity import log_activity
+
+        log_activity(
+            self, "price_optimization_status",
+            "Control authority turned back on"
+            + (f"; switched on again: {', '.join(restored)}" if restored else "")
+            + (f"; could not switch on: {', '.join(failed)}" if failed else ""),
+            "Who: the integration. Why: these switches were on before the restart. "
+            "They were held off until an unfinished command was settled by a "
+            "read-only check, which has now happened.",
+        )
+        return True
 
     async def _persist_product_controller_state_locked(
         self,

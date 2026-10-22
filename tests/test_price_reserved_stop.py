@@ -413,8 +413,46 @@ async def test_planner_settles_an_unconfirmed_own_delete_before_new_writes(absen
     )
     controller = PriceOptimizationController(instance)
     await controller.tick()
-    fake_mutations.recover_conflicted_price_delete.assert_awaited_once_with(M_ID)
+    fake_mutations.recover_conflicted_price_delete.assert_awaited_once()
+    assert fake_mutations.recover_conflicted_price_delete.await_args.args == (M_ID,)
     assert len(executor.mutation_commands) == 1  # never a second DELETE
     assert store.records[M_ID].lifecycle is (
         OwnershipLifecycle.ORPHANED if absent else OwnershipLifecycle.CONFLICTED
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("listed", [False, True])
+async def test_unanswered_get_is_settled_by_a_later_complete_list_without_the_schedule(listed):
+    from custom_components.pixiihome_controller.control.settings import ControllerState
+
+    from .test_price_controller import external_schedule
+    from .test_scheduler_manager import _timed_out_price_delete
+
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=3)
+    executor, store, _, real_manager = _timed_out_price_delete(
+        [TimeoutError(), TimeoutError()], start,
+    )
+    await real_manager.delete(M_ID)
+    instance, fake_mutations = runtime()
+    # Read-only settling also runs while price optimization is switched off.
+    instance.controller_state = ControllerState()
+    instance.scheduler_ownership = store
+    instance.scheduler_mutation_manager = fake_mutations
+    fake_mutations.recover_conflicted_price_delete = AsyncMock(
+        side_effect=real_manager.recover_conflicted_price_delete
+    )
+    instance.scheduler_manager.normalized_schedules = (
+        [replace(external_schedule(start), service_type=102)] if listed else []
+    )
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    # The list must be read after the conflict was first seen.
+    assert store.records[M_ID].lifecycle is OwnershipLifecycle.CONFLICTED
+    controller._conflicts_seen[M_ID] -= timedelta(minutes=5)
+    await controller.tick()
+    assert len(executor.mutation_commands) == 1
+    assert store.records[M_ID].lifecycle is (
+        OwnershipLifecycle.CONFLICTED if listed else OwnershipLifecycle.ORPHANED
+    )
+    assert controller.status == "disabled"
