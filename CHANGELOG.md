@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.3 — 2026-10-22
+
+- Activity log: external schedules now show the Gateway's source ID, for example
+  "external schedule (source 7)", instead of "schedule of unknown source". When
+  the ID equals the configured managed aggregator source ID, the schedule is
+  named "aggregator schedule".
+
 ## 0.5.2 — 2026-10-21
 
 - Logbook entries now fill Home Assistant's **What happened** with who caused the

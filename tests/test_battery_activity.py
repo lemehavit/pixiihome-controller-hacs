@@ -149,3 +149,21 @@ def test_our_own_price_schedule_is_not_reported_as_external() -> None:
     clock[0] += timedelta(seconds=15)
     tracker.sample()
     assert runtime.events == []
+
+
+def test_source_id_names_the_aggregator_when_it_is_the_managed_source() -> None:
+    from custom_components.pixiihome_controller.battery_activity import _source_name
+
+    schedule = SimpleNamespace(
+        source_id=7, ownership=SchedulerOwnership(Ownership.UNKNOWN, None)
+    )
+    runtime = SimpleNamespace(price_optimization_controller=None)
+    assert _source_name(runtime, schedule) == "external schedule (source 7)"
+    runtime.price_optimization_controller = SimpleNamespace(
+        config=SimpleNamespace(managed_source_id=7)
+    )
+    assert _source_name(runtime, schedule) == "aggregator schedule (source 7)"
+    schedule = SimpleNamespace(
+        source_id=None, ownership=SchedulerOwnership(Ownership.UNKNOWN, None)
+    )
+    assert _source_name(runtime, schedule) == "schedule of unknown source"

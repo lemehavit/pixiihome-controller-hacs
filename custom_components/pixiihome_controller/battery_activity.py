@@ -345,7 +345,7 @@ class BatteryActivityTracker:
             if own_schedule_owner(self.runtime, schedule) is not None:
                 continue
             return Cause(
-                _source_name(schedule),
+                _source_name(self.runtime, schedule),
                 f"Gateway schedule #{schedule.sch_index}",
                 _epoch_span(schedule.start_epoch, schedule.end_epoch),
             )
@@ -378,7 +378,7 @@ class BatteryActivityTracker:
             current[key] = (
                 f"{service_type_label(schedule.service_type)} "
                 f"{_epoch_span(schedule.start_epoch, schedule.end_epoch)} "
-                f"({_source_name(schedule)})",
+                f"({_source_name(self.runtime, schedule)})",
                 schedule.end_epoch,
             )
         previous, self._external = self._external, current
@@ -437,11 +437,27 @@ def _owns(controller: Any) -> bool:
         return False
 
 
-def _source_name(schedule: Any) -> str:
-    label = schedule.ownership.source_label
-    if schedule.ownership.ownership.value == "external":
-        return f"external schedule ({label})" if label else "external schedule"
-    return f"external schedule ({label})" if label else "schedule of unknown source"
+def _source_name(runtime: Any, schedule: Any) -> str:
+    """Who created an external schedule, as far as the Gateway tells us."""
+    source_id = getattr(schedule, "source_id", None)
+    controller = getattr(runtime, "price_optimization_controller", None)
+    try:
+        managed = getattr(getattr(controller, "config", None), "managed_source_id", None)
+    except Exception:  # noqa: BLE001 - naming is best effort
+        managed = None
+    details = [
+        part for part in (
+            schedule.ownership.source_label,
+            None if source_id is None else f"source {source_id}",
+        ) if part
+    ]
+    if source_id is not None and source_id == managed:
+        name = "aggregator schedule"
+    elif source_id is not None or schedule.ownership.ownership.value == "external":
+        name = "external schedule"
+    else:
+        return "schedule of unknown source"
+    return f"{name} ({', '.join(details)})" if details else name
 
 
 def _epoch_span(start: int, end: int) -> str:
