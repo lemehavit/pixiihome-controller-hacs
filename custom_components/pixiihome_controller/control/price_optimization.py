@@ -111,7 +111,8 @@ class ExternalWindow:
     end: datetime
     target_usable_soc_percent: float | None = None
     # An adjustable window's target will be lowered to the planned level, so
-    # it holds the battery instead of refilling it: energy passes through.
+    # it holds the battery instead of refilling it: energy passes through. When
+    # the plan uses its time, the window is deleted instead.
     adjustable: bool = False
 
     def __post_init__(self) -> None:
@@ -368,8 +369,10 @@ def build_price_plan(
     # only moved within one segment: the next Target SOC window overwrites the
     # state of charge, and any energy discharged before it is bought back at
     # that window's price.
+    # An adjustable window is lowered to the planned level or, when the plan
+    # uses its time, deleted; either way its time is the plan's.
     blocked = [
-        any(window.start < item.end and item.start < window.end for window in windows)
+        any(window.start < item.end and item.start < window.end for window in resets)
         for item in candidates
     ]
     segment = [sum(1 for window in resets if window.end <= item.start) for item in candidates]

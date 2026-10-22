@@ -69,6 +69,8 @@ class PriceOptimizationController:
         self.price_last_updated: datetime | None = None
         self.owned_schedule_count = 0
         self.external_conflict_count = 0
+        # (sch_index, start_epoch) of aggregator schedules this controller deleted.
+        self.deleted_external: set[tuple[int, int]] = set()
         self.create_count = 0
         self.delete_count = 0
         self.external_move_count = 0
@@ -1125,6 +1127,16 @@ class PriceOptimizationController:
         writes = 0
         failed_from: datetime | None = None
         lead = datetime.now(UTC) + timedelta(minutes=self.config.minimum_lead_minutes)
+        # A deleted aggregator target cannot be restored, so only windows the
+        # applied cycle uses, or that start before the pass after next could
+        # still reach them, are replaced; later ones are held for now.
+        first_discharge = next(
+            (a for a in plan.actions if a.direction is PriceDirection.DISCHARGE), None
+        )
+        replace_until = max(
+            first_discharge.end if first_discharge is not None else lead,
+            lead + timedelta(minutes=self.config.refresh_minutes * 1.5),
+        )
         for window, meta in zip(windows, self._external_meta, strict=True):
             if meta is None or window.start <= lead:
                 continue
@@ -1133,7 +1145,18 @@ class PriceOptimizationController:
                 continue
             key = (schedule.sch_index, schedule.service_no,
                    schedule.start_epoch, schedule.duration_seconds)
-            if window.adjustable:
+            replace_window = (
+                window.adjustable
+                and window.start < replace_until
+                and any(
+                    action.start < window.end and window.start < action.end
+                    for action in plan.actions
+                )
+            )
+            if replace_window:
+                # The plan uses this time itself: remove the aggregator target.
+                desired, allow_delete = reference, True
+            elif window.adjustable:
                 usable = max(floor, planned.get(window.start, floor))
                 desired = float(min(100, ceil(battery.effective_min_soc + usable * span / 100)))
                 if desired >= reference - 0.5:
@@ -1161,6 +1184,7 @@ class PriceOptimizationController:
                     expected_reference=reference,
                     new_reference=desired,
                     allow_delete=allow_delete,
+                    delete=replace_window,
                 )
             except Exception:  # noqa: BLE001 - refused before send; plan around it
                 result = {"status": "refused"}
@@ -1183,7 +1207,19 @@ class PriceOptimizationController:
                     self._lowered.pop(key, None)
                     log_activity(self.runtime, PRICE_STATUS,
                                  f"Restored aggregator Target SOC {when} to {desired:.0f} %")
+            elif status == "deleted" and replace_window:
+                self.deleted_external.add((schedule.sch_index, schedule.start_epoch))
+                self._lowered.pop(key, None)
+                self.external_target_delete_count += 1
+                log_activity(self.runtime, PRICE_STATUS,
+                             f"Replaced aggregator Target SOC {when} ({reference:.0f} %) "
+                             "with the price plan",
+                             "Who: price optimization, with Allow changing aggregator "
+                             "schedules on. Why: the price plan uses this time itself "
+                             "(see the new plan) and earns more than the aggregator's "
+                             "Target SOC, so the aggregator schedule was deleted.")
             elif status == "deleted":
+                self.deleted_external.add((schedule.sch_index, schedule.start_epoch))
                 self._lowered.pop(key, None)
                 self.external_target_delete_count += 1
                 log_activity(self.runtime, PRICE_STATUS,

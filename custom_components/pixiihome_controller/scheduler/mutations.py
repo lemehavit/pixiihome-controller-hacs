@@ -275,7 +275,7 @@ class SchedulerMutationManager:
             return await self._update_locked(update)
 
     async def delete(self, m_id: int | str) -> SchedulerTransactionResult:
-        """Run one owned Target SoC DELETE without retrying."""
+        """Run one owned schedule DELETE (any reconcilable service) without retrying."""
         async with self._lock:
             self.diagnostics.delete_attempts += 1
             return await self._delete_locked(m_id)
@@ -835,7 +835,7 @@ class SchedulerMutationManager:
         )
 
     async def _delete_locked(self, m_id: int | str) -> SchedulerTransactionResult:
-        record = self._owned_record(m_id, SchedulerMutationOperation.DELETE, "targetsoc")
+        record = self._owned_record(m_id, SchedulerMutationOperation.DELETE, None)
         if isinstance(record, SchedulerTransactionResult):
             return self._finish(record)
         if record.service not in RECONCILABLE_SCHEDULER_SERVICES:

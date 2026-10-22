@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.5 — 2026-10-22
+
+- Fix: price optimization could not remove its own future schedules when the
+  plan changed (`price_delete_service_mismatch`). The delete path only
+  accepted Target SoC records, but price schedules are Demand Response or
+  Fixed Peak Shaving. Every new plan with a different first action was
+  blocked by this since the first version.
+- With **Allow changing aggregator schedules** on, the price plan may now use
+  the time of an aggregator Target SOC schedule itself. When it does (for
+  example to discharge in the day's most expensive hour), that aggregator
+  schedule is deleted and replaced by the plan's own schedule. Only windows
+  needed within the next planning passes are deleted; later ones are lowered
+  until then. Off: aggregator schedules are never touched.
+- Activity log: an aggregator schedule removed by price optimization is
+  logged with that cause instead of "removed outside this integration".
+
 ## 0.5.4 — 2026-10-22
 
 - The whole-day planner now honours **Allow changing aggregator schedules**,

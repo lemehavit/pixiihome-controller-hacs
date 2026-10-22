@@ -1014,3 +1014,18 @@ async def test_recovery_orphan_commit_failure_keeps_provisional_and_id() -> None
     assert M_ID in allocator.owned_ids
     assert executor.mutation_commands == []
     assert len(executor.get_commands) == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_accepts_an_owned_price_schedule_of_another_service() -> None:
+    # Price optimization owns demandresponse/peakshaving schedules; deleting
+    # one that left the plan must not fail on a Target SoC service check.
+    store = store_with_record()
+    store.records[M_ID] = replace(store.records[M_ID], service="demandresponse")
+    executor = FakeExecutor([], [])
+    manager_instance = manager(executor, store=store)
+
+    result = await manager_instance.delete(M_ID)
+
+    assert result.reason != "service_mismatch"
+    assert result.service == "demandresponse"

@@ -793,7 +793,7 @@ async def test_invalid_soc_cannot_even_read(soc):
     assert not client.calls
 
 
-async def _set_target(control, *, reference=80, new=40, allow_delete=True):
+async def _set_target(control, *, reference=80, new=40, allow_delete=True, delete=False):
     return await control.set_external_target_soc(
         sch_index=4435,
         expected_service_no=RECORD["service_no"],
@@ -802,7 +802,32 @@ async def _set_target(control, *, reference=80, new=40, allow_delete=True):
         expected_reference=reference,
         new_reference=new,
         allow_delete=allow_delete,
+        delete=delete,
     )
+
+
+@pytest.mark.asyncio
+async def test_replaced_target_is_deleted_directly_without_a_reference_write() -> None:
+    runtime, client, control = controller()
+
+    result = await _set_target(control, new=80, delete=True)
+
+    assert result["status"] == "deleted"
+    assert not client.present
+    assert client.soc["reference"] == 80  # the reference was never written
+    assert runtime.started is not None
+    assert runtime.started["operation"] == "automatic_price_external_target_soc_delete"
+    assert runtime.phases[-1] is JournalPhase.RECONCILED
+
+
+@pytest.mark.asyncio
+async def test_direct_delete_still_refuses_a_changed_target() -> None:
+    _, client, control = controller()
+
+    with pytest.raises(HomeAssistantError, match="scheduler_external_target_changed"):
+        await _set_target(control, reference=90, delete=True)
+
+    assert client.present
 
 
 @pytest.mark.asyncio

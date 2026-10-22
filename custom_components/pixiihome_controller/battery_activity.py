@@ -393,8 +393,18 @@ class BatteryActivityTracker:
                     "was found in the Gateway's schedule list and will run at that time "
                     "unless it is removed. This integration never changes it.",
                 )
+        controller = getattr(self.runtime, "price_optimization_controller", None)
+        deleted = getattr(controller, "deleted_external", set())
         for key, (text, end) in previous.items():
             if key not in current and end > epoch:
+                if (key[0], key[1]) in deleted:
+                    self._log(
+                        now, f"Aggregator schedule removed by price optimization: {text}",
+                        "Who: price optimization, with Allow changing aggregator schedules "
+                        "on. Why: its plan uses this time and earns more; see the price "
+                        "optimization entry at the same time.",
+                    )
+                    continue
                 self._log(
                     now, f"External schedule removed from the Gateway: {text}",
                     "Who: removed outside this integration before it ended. This "
