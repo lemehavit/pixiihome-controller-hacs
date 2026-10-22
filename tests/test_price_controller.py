@@ -569,7 +569,7 @@ async def test_aggregator_target_between_discharge_and_recharge_is_lowered():
 
 
 @pytest.mark.asyncio
-async def test_whole_day_planner_also_lowers_a_held_aggregator_target():
+async def test_whole_day_planner_also_handles_a_held_aggregator_target():
     instance, mutations = runtime()
     window, calls = _aggregator_day(instance, adjust=True)
     instance.energy_forecast = SimpleNamespace(
@@ -586,8 +586,44 @@ async def test_whole_day_planner_also_lowers_a_held_aggregator_target():
     assert controller.planner_engine == "whole_day"
     assert len(calls) == 1
     assert calls[0]["sch_index"] == window.sch_index
-    assert calls[0]["new_reference"] < 90
+    # The plan charges in the cheap hour the aggregator window covers.
+    assert calls[0]["delete"] is True
     assert mutations.created
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("adjust", [True, False])
+async def test_aggregator_target_in_the_best_hour_is_replaced_only_when_allowed(adjust):
+    instance, mutations = runtime()
+    window, calls = _aggregator_day(instance, adjust=adjust)
+    start = datetime.fromtimestamp(window.start_epoch, UTC) - timedelta(hours=1)
+    prices = [(-1, 0.5), (0, 1.0), (1, 4.0), (2, 1.0), (3, 0.2), (4, 1.0)]
+    instance.hass.states.state.attributes = {
+        "unit_of_measurement": "SEK/kWh",
+        "prices": [
+            {"start": (start + timedelta(hours=h)).isoformat(),
+             "end": (start + timedelta(hours=h + 1)).isoformat(), "price": p}
+            for h, p in prices
+        ],
+    }
+
+    async def set_target(**kwargs):
+        calls.append(kwargs)
+        return {"status": "deleted" if kwargs["delete"] else "adjusted"}
+
+    instance.gateway_scheduler.set_external_target_soc = set_target
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    window_start = datetime.fromtimestamp(window.start_epoch, UTC)
+    if adjust:
+        assert len(calls) == 1 and calls[0]["delete"] is True
+        assert controller.external_target_delete_count == 1
+        assert any(request.starttime == window_start for request in mutations.created)
+    else:
+        assert calls == []
+        assert all(request.starttime != window_start for request in mutations.created)
 
 
 @pytest.mark.asyncio

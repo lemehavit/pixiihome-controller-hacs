@@ -147,6 +147,12 @@ schedules instead of being refilled by each of them:
   (or the last planned discharge) are changed. Their target is lowered to the
   planned state of charge at that time, never below the price optimizer's
   minimum usable SOC (or the automation policy's minimum).
+- The plan may also use the time of such a window itself (for example to sell
+  in the day's most expensive hour). That window is then **deleted** (replaced
+  by the price plan's own schedule), verified by a fresh schedule list. A
+  deleted schedule cannot be restored, so only windows the plan uses within
+  the next planning passes are deleted; later ones are only lowered until then.
+  The activity log names price optimization as the cause.
 - Each change is journaled, sent once and verified by readback. If the Gateway
   acknowledges a write but keeps the old target, that schedule is deleted
   instead (also verified). Uncertain results require recovery and are never

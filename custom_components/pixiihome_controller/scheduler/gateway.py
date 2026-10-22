@@ -818,6 +818,7 @@ class GatewaySchedulerController:
         expected_reference: float,
         new_reference: float,
         allow_delete: bool,
+        delete: bool = False,
     ) -> dict[str, Any]:
         """Change one future foreign one-shot Target SoC reference, or delete it.
 
@@ -825,7 +826,8 @@ class GatewaySchedulerController:
         schedule, its unshared parameter record and the current reference are
         re-read first. Each write is sent once and verified by readback; an
         uncertain result is journaled for recovery and never retried. Deletion
-        is only attempted when a verified reference write had no effect.
+        is attempted when a verified reference write had no effect, or directly
+        with ``delete`` when the plan uses the window's time itself.
         """
         values = (sch_index, expected_service_no, expected_start_epoch, expected_duration_seconds)
         if any(type(value) is not int or value < 0 for value in values):
@@ -865,15 +867,19 @@ class GatewaySchedulerController:
             ]:
                 # A shared parameter record would also change other schedules.
                 raise HomeAssistantError("scheduler_external_target_shared")
-            reasons = self._reasons(ControlOperation.UPDATE)
-            if reasons:
-                raise HomeAssistantError(", ".join(reasons))
             identity = JournalTargetIdentity(
                 sch_index=sch_index,
                 service_no=expected_service_no,
                 source_id=before.get("source_id"),
                 asset_id=before.get("asset_id"),
             )
+            if delete:
+                return await self._delete_external_target(
+                    sch_index, identity, before, current, start, end
+                )
+            reasons = self._reasons(ControlOperation.UPDATE)
+            if reasons:
+                raise HomeAssistantError(", ".join(reasons))
             result = await self._journaled_external_write(
                 "automatic_price_external_target_soc_adjust",
                 identity,
@@ -903,27 +909,41 @@ class GatewaySchedulerController:
             await self.runtime.transition_control_transaction(
                 result["transaction_id"], JournalPhase.FAILED, reason="reference_unchanged"
             )
-            reasons = self._reasons(ControlOperation.DELETE)
-            if reasons:
-                raise HomeAssistantError(", ".join(reasons))
-            deleted = await self._journaled_external_write(
-                "automatic_price_external_target_soc_delete",
-                identity,
-                {"before": before, "reference_before": current},
-                lambda: self.client.write_record(sch_index, before, None),
+            return await self._delete_external_target(
+                sch_index, identity, before, current, start, end
             )
-            if deleted["status"] != "sent":
-                return deleted
-            manager = self.runtime.scheduler_manager
-            assert manager is not None
-            entries = await manager.refresh_list(start, end)
-            gone = all(entry.sch_index != sch_index for entry in entries)
-            await self.runtime.transition_control_transaction(
-                deleted["transaction_id"],
-                JournalPhase.RECONCILED if gone else JournalPhase.RECOVERY_REQUIRED,
-                reason="readback_verified" if gone else "readback_mismatch",
-            )
-            return {**deleted, "status": "deleted" if gone else "recovery_required"}
+
+    async def _delete_external_target(
+        self,
+        sch_index: int,
+        identity: JournalTargetIdentity,
+        before: dict[str, Any],
+        reference: float,
+        start: int,
+        end: int,
+    ) -> dict[str, Any]:
+        """Delete one verified foreign Target SoC schedule once and confirm it is gone."""
+        reasons = self._reasons(ControlOperation.DELETE)
+        if reasons:
+            raise HomeAssistantError(", ".join(reasons))
+        deleted = await self._journaled_external_write(
+            "automatic_price_external_target_soc_delete",
+            identity,
+            {"before": before, "reference_before": reference},
+            lambda: self.client.write_record(sch_index, before, None),
+        )
+        if deleted["status"] != "sent":
+            return deleted
+        manager = self.runtime.scheduler_manager
+        assert manager is not None
+        entries = await manager.refresh_list(start, end)
+        gone = all(entry.sch_index != sch_index for entry in entries)
+        await self.runtime.transition_control_transaction(
+            deleted["transaction_id"],
+            JournalPhase.RECONCILED if gone else JournalPhase.RECOVERY_REQUIRED,
+            reason="readback_verified" if gone else "readback_mismatch",
+        )
+        return {**deleted, "status": "deleted" if gone else "recovery_required"}
 
     async def _journaled_external_write(
         self,

@@ -16,9 +16,9 @@ and forecast net load ``n`` = load − solar:
 * without export permission the battery never discharges beyond house load.
 
 Known external Target SOC windows reset stored energy to their target; the
-missing energy is bought at the window's price. Adjustable windows (their
-target will be lowered to the planned level) only hold the battery idle, so
-energy passes through them. Energy left at the end is valued at the
+missing energy is bought at the window's price. Adjustable windows are
+planned as free time: their target is lowered to the planned level, or the
+window is deleted when the plan uses its time. Energy left at the end is valued at the
 horizon's mean import price after discharge losses.
 """
 
@@ -166,7 +166,8 @@ def build_whole_day_plan(
 
     count = len(candidates)
     blocked = [
-        any(w.start < item.end and item.start < w.end for w in windows) for item in candidates
+        any(w.start < item.end and item.start < w.end for w in windows if not w.adjustable)
+        for item in candidates
     ]
     # reset[k] = (target index, refill price) applied at the start of slot k.
     resets: dict[int, tuple[int, float]] = {}

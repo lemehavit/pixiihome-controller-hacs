@@ -137,8 +137,9 @@ def test_adjustable_target_soc_windows_let_a_discharge_stand() -> None:
     ]
     result = _plan(series, lambda start, end: (1.0, 0.0), external_windows=held, **kwargs)
     kinds = [slot.kind for slot in result.slots]
-    assert kinds[1] == kinds[3] == "self_consumption"
-    assert kinds[2] == kinds[4] == "external"
+    # Held windows are free time for the plan: their target is lowered, or
+    # they are deleted where the plan uses them.
+    assert kinds[1:5] == ["self_consumption"] * 4
     socs = dict(result.plan.window_socs)
     assert socs[held[0].start] < 90.0
     assert socs[held[1].start] < socs[held[0].start]
