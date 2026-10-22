@@ -94,8 +94,12 @@ merged into one schedule.
 
 The whole-day plan is calculated every round even when the switch is off, and
 shown in the attribute `whole_day_plan` of **Price optimization status** next to
-the standard plan's margin. Compare the two before turning it on. While it is on,
-aggregator Target SOC schedules are planned around, never lowered or deleted.
+the standard plan's margin. Compare the two before turning it on. Aggregator
+Target SOC schedules are handled as in the standard plan: with **Allow changing
+aggregator schedules** off they refill the battery and are planned around; with
+it on, those between a planned discharge and the next planned charge are
+lowered to the planned level (never below the minimum SOC), so a sale is not
+undone by the aggregator's next refill.
 If the forecast is missing, the standard plan is used and `planner_engine` shows
 `standard_whole_day_unavailable`.
 

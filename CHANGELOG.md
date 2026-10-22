@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.4 — 2026-10-22
+
+- The whole-day planner now honours **Allow changing aggregator schedules**,
+  like the standard planner: aggregator Target SOC schedules between a planned
+  discharge and the next planned charge are lowered to the planned level (never
+  below the minimum SOC) instead of being treated as a refill that undoes every
+  sale. Before, the whole-day planner always planned around them, so with an
+  aggregator refilling every other hour it only used the battery after the last
+  refill of the day.
+- Whole-day planner: a discharge that only exceeds the expected house load by
+  less than one energy step of the planner (rounding) now follows the house
+  load (Fixed Peak Shaving) instead of becoming a fixed export of that power.
+
 ## 0.5.3 — 2026-10-22
 
 - Activity log: external schedules now show the Gateway's source ID, for example

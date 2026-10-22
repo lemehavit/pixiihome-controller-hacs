@@ -767,7 +767,7 @@ class PriceOptimizationController:
                 self.whole_day = build_whole_day_plan(
                     series,
                     **arguments,
-                    external_windows=tuple(replace(w, adjustable=False) for w in windows),
+                    external_windows=windows,
                     forecast=lambda start, end: forecast.net_forecast(start, end, high=high),
                 )
             except ValueError:
@@ -786,12 +786,6 @@ class PriceOptimizationController:
             )
         return replace(
             plan, actions=merge_adjacent_actions(plan.actions, policy.max_duration_seconds)
-        )
-
-    def _whole_day_active(self) -> bool:
-        return (
-            bool(self.runtime.operational_settings.get("price_whole_day_planner"))
-            and getattr(self.runtime, "energy_forecast", None) is not None
         )
 
     def _validated_limits(self) -> dict[str, float]:
@@ -1077,9 +1071,6 @@ class PriceOptimizationController:
         the next planned charge (or the last discharge) stay adjustable; the
         rest keep refilling the battery as the aggregator intends.
         """
-        if self._whole_day_active():
-            # The whole-day planner never changes aggregator schedules.
-            return self._external_windows
         lead = datetime.now(UTC) + timedelta(minutes=self.config.minimum_lead_minutes)
         eligible = [
             meta is not None and meta[1] is not None and window.start > lead

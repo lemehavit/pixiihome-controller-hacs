@@ -569,6 +569,28 @@ async def test_aggregator_target_between_discharge_and_recharge_is_lowered():
 
 
 @pytest.mark.asyncio
+async def test_whole_day_planner_also_lowers_a_held_aggregator_target():
+    instance, mutations = runtime()
+    window, calls = _aggregator_day(instance, adjust=True)
+    instance.energy_forecast = SimpleNamespace(
+        net_load_kw=lambda start, end, high=False: 1.0,
+        net_forecast=lambda start, end, high=False: (1.0, 0.0),
+    )
+    instance.operational_settings = instance.operational_settings.set(
+        "price_whole_day_planner", True
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert controller.planner_engine == "whole_day"
+    assert len(calls) == 1
+    assert calls[0]["sch_index"] == window.sch_index
+    assert calls[0]["new_reference"] < 90
+    assert mutations.created
+
+
+@pytest.mark.asyncio
 async def test_aggregator_targets_are_untouched_when_the_switch_is_off():
     instance, _ = runtime()
     _, calls = _aggregator_day(instance, adjust=False)

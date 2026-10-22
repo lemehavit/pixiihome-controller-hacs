@@ -16,8 +16,10 @@ and forecast net load ``n`` = load − solar:
 * without export permission the battery never discharges beyond house load.
 
 Known external Target SOC windows reset stored energy to their target; the
-missing energy is bought at the window's price. Energy left at the end is
-valued at the horizon's mean import price after discharge losses.
+missing energy is bought at the window's price. Adjustable windows (their
+target will be lowered to the planned level) only hold the battery idle, so
+energy passes through them. Energy left at the end is valued at the
+horizon's mean import price after discharge losses.
 """
 
 from __future__ import annotations
@@ -132,10 +134,13 @@ def build_whole_day_plan(
         key=lambda window: window.start,
     )
     for window in windows:
-        if not window.known:
+        if not window.known and not window.adjustable:
             end_limit = min(end_limit, max(window.start, current))
             break
-    windows = [window for window in windows if window.known and window.start < end_limit]
+    windows = [
+        window for window in windows
+        if (window.known or window.adjustable) and window.start < end_limit
+    ]
     candidates = tuple(
         item for item in series.intervals if item.start >= start_limit and item.end <= end_limit
     )
@@ -166,6 +171,8 @@ def build_whole_day_plan(
     # reset[k] = (target index, refill price) applied at the start of slot k.
     resets: dict[int, tuple[int, float]] = {}
     for window in windows:
+        if window.adjustable:
+            continue
         assert window.target_usable_soc_percent is not None
         k = next((i for i, item in enumerate(candidates) if item.start >= window.end), count)
         inside = [item.price_sek_per_kwh for item in series.intervals
@@ -261,7 +268,13 @@ def build_whole_day_plan(
     charged_energy = charged_cost = 0.0
     margin_total = 0.0
     first_energy = level * step
+    window_socs: dict[datetime, float] = {}
     for index, item in enumerate(candidates):
+        for window in windows:
+            if window.adjustable and window.start not in window_socs and (
+                window.start <= item.start
+            ):
+                window_socs[window.start] = level * step / usable_capacity_kwh * 100
         delta = choice[index][level]
         cost, battery = slot_cost(index, delta, decision=False)
         base_cost, _ = slot_cost(index, 0, decision=False)
@@ -282,6 +295,7 @@ def build_whole_day_plan(
         action = _action(
             item, load, solar, battery, soc, margin,
             maximum_discharge_kw=maximum_discharge_kw,
+            step_kw=step / (eta * item.duration_hours),
             reference=(charged_cost / charged_energy) if charged_energy > 0 else None,
         )
         net = load - solar
@@ -292,14 +306,21 @@ def build_whole_day_plan(
         if action is not None:
             actions.append(action)
     margin_total += terminal_value * (level * step - first_energy)
+    for window in windows:
+        if window.adjustable:
+            window_socs.setdefault(window.start, level * step / usable_capacity_kwh * 100)
     socs = [usable_soc_percent, *(slot.usable_soc_percent for slot in slots)]
     payload = {
         "series": series.fingerprint,
         "engine": "whole_day_dp_v1",
         "actions": [action.as_dict() for action in actions],
+        "held": sorted(w.start.isoformat() for w in windows if w.adjustable),
     }
     fingerprint = sha256(repr(payload).encode()).hexdigest()
-    plan = PricePlan(tuple(actions), (), fingerprint, min(socs), max(socs), margin_total)
+    plan = PricePlan(
+        tuple(actions), (), fingerprint, min(socs), max(socs), margin_total,
+        tuple(sorted(window_socs.items())),
+    )
     return WholeDayResult(plan, tuple(slots), baseline, planned)
 
 
@@ -312,6 +333,7 @@ def _action(
     margin: float,
     *,
     maximum_discharge_kw: float,
+    step_kw: float,
     reference: float | None,
 ) -> PricePlanAction | None:
     net = load - solar
@@ -329,7 +351,10 @@ def _action(
     if battery < -0.05:
         delivered = -battery * hours
         basis = reference if reference is not None else price
-        if -battery <= max(0.0, net) + 0.05:
+        # Less than one energy step beyond the house load is rounding in the
+        # energy grid, not a planned export: follow the house load instead of
+        # forcing a fixed export power.
+        if -battery <= max(0.0, net) + max(0.05, step_kw):
             # Following the whole house load: let the battery cover it as it
             # varies. Covering only part of it: cap the discharge.
             power = (
