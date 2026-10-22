@@ -75,6 +75,9 @@ class PriceOptimizationController:
         self.deleted_external: set[tuple[int, int]] = set()
         self.create_count = 0
         self.delete_count = 0
+        # Plan figures of the schedules this controller created, by schedule
+        # key, so their expected profit stays visible if the plan moves on.
+        self.created_actions: dict[tuple[object, ...], PricePlanAction] = {}
         self.external_move_count = 0
         self.current_service: int | None = None
         self._source_fingerprint: str | None = None
@@ -1396,6 +1399,11 @@ class PriceOptimizationController:
                 self._publish("blocked", f"price_create_{result.reason}")
                 return False
             self.create_count += 1
+            now = datetime.now(UTC)
+            self.created_actions = {
+                k: a for k, a in self.created_actions.items() if a.end > now
+            }
+            self.created_actions[key] = action
             log_activity(
                 self.runtime, PRICE_STATUS,
                 f"Scheduled {action.direction.value} {time_span(action.start, action.end)} "

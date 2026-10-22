@@ -143,3 +143,38 @@ def test_calendar_marks_self_consumption_power_as_a_ceiling():
     assert "· 2 kW ·" in events[0].summary
     assert "· max 0.7 kW ·" in events[1].summary
     assert "· 3 kW ·" in events[2].summary
+
+
+def discharge(start=NOW + timedelta(hours=3)):
+    return PricePlanAction(
+        start=start, end=start + timedelta(hours=1), direction=PriceDirection.DISCHARGE,
+        power_kw=4.0, service="demandresponse", values={"pacref": -4000.0},
+        discharge_mode=None, price_sek_per_kwh=2.5, reference_price_sek_per_kwh=0.5,
+        spread_sek_per_kwh=2.0, projected_usable_soc_percent=40, expected_margin_sek=5.6,
+        net_profit_sek_per_kwh=1.4,
+    )
+
+
+def test_every_event_shows_the_plans_expected_money():
+    charge, sell = action(), discharge()
+    instance = controller((charge, sell))
+    record(instance, sell, m_id=240000002)
+    events = PixiiPriceOptimizationCalendar(instance.runtime)._events(NOW)
+    assert "+5,60 kr" in events[1].summary
+    assert "Förväntad förtjänst: 5,60 kr" in events[1].description
+    assert "netto 1,40 kr/kWh" in events[1].description
+    # The charge only buys energy; its profit belongs to the discharge.
+    assert "kr ·" not in events[0].summary
+    assert "Köper ca 2,00 kWh à 0,50 kr/kWh (ca 1,00 kr)" in events[0].description
+
+
+def test_created_schedule_keeps_its_money_after_the_plan_moves_on():
+    sell = discharge()
+    instance = controller(())
+    record(instance, sell, m_id=240000002)
+    entry = price_timeline(instance, NOW)[0]
+    assert entry["expected_profit_sek"] is None
+    from custom_components.pixiihome_controller.price_controller import _action_key
+
+    instance.created_actions = {_action_key(sell): sell}
+    assert price_timeline(instance, NOW)[0]["expected_profit_sek"] == 5.6

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.10 — 2026-10-22
+
+- Every event in the price optimization calendar now shows the plan's money.
+  A discharge shows its expected profit in the title (for example
+  "+5,60 kr") and in the description, with net profit per kWh, the price and
+  what the energy cost. A charge shows how much energy it buys and what it
+  costs; its profit is counted on the discharge that uses it.
+- Created schedules keep their figures even after the plan is recalculated.
+  `schedule_timeline` gains `expected_profit_sek`, `net_profit_sek_per_kwh`,
+  `price_sek_per_kwh`, `reference_price_sek_per_kwh`, `energy_kwh` and
+  `charge_cost_sek`.
+
 ## 0.5.9 — 2026-10-22
 
 - Fix: the manual-control buttons (Start charging, Start discharging, Start

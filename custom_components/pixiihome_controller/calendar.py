@@ -86,13 +86,18 @@ class PixiiPriceOptimizationCalendar(CalendarEntity):
                 if item["discharge_mode"] == "self_consumption"
                 else f"{item['power_kw']:g} kW"
             )
+            profit = item.get("expected_profit_sek")
+            summary = f"{direction} · {power}"
+            if profit is not None:
+                summary += f" · +{_kr(profit)} kr"
             events.append(CalendarEvent(
                 start=datetime.fromisoformat(item["start"]),
                 end=datetime.fromisoformat(item["end"]),
-                summary=f"{direction} · {power} · {status}",
+                summary=f"{summary} · {status}",
                 description="\n".join((
                     f"Prisoptimering: {status}",
                     mode,
+                    _economics_text(item),
                     "Tider visas i Home Assistants tidszon (Europe/Stockholm rekommenderas).",
                     "Skapat i Pixii betyder verifierat vid senaste efterkontrollen.",
                     f"Styrstatus: {self.controller.status}",
@@ -113,6 +118,32 @@ class PixiiPriceOptimizationCalendar(CalendarEntity):
             event for event in self._events(start_date)
             if event.start < end_date and event.end > start_date
         ]
+
+
+def _kr(value: float) -> str:
+    return f"{value:.2f}".replace(".", ",")
+
+
+def _economics_text(item: dict) -> str:
+    """Expected money for one interval, in the plan's own figures."""
+    if "net_profit_sek_per_kwh" not in item:
+        return (
+            "Förväntad förtjänst: okänd (planen har räknats om sedan schemat skapades)"
+        )
+    price = _kr(item["price_sek_per_kwh"])
+    net = _kr(item["net_profit_sek_per_kwh"])
+    if item["direction"] == "charge":
+        return (
+            f"Köper ca {_kr(item['energy_kwh'])} kWh à {price} kr/kWh "
+            f"(ca {_kr(item['charge_cost_sek'])} kr). Förtjänsten räknas på "
+            f"urladdningen som använder energin; väntat netto {net} kr/kWh."
+        )
+    return (
+        f"Förväntad förtjänst: {_kr(item['expected_profit_sek'])} kr "
+        f"(netto {net} kr/kWh efter verkningsgrad och kostnader; "
+        f"elpris {price} kr/kWh, energin kostade {_kr(item['reference_price_sek_per_kwh'])} "
+        "kr/kWh)"
+    )
 
 
 class PixiiSchedulerCalendar(CalendarEntity):
