@@ -56,6 +56,8 @@ class PriceOptimizationController:
     def __init__(self, runtime: RuntimeData) -> None:
         self.runtime = runtime
         self.soc_guard = PriceSocGuard(runtime)
+        self.delete_recovery_reason: str | None = None
+        self._conflicts_seen: dict[int, datetime] = {}
         self.status = "disabled"
         self.reason: str | None = None
         self.plan: PricePlan | None = None
@@ -198,6 +200,7 @@ class PriceOptimizationController:
         whole_day = self.whole_day
         return {
             **self.soc_guard.attributes(),
+            "delete_post_check_reason": self.delete_recovery_reason,
             "reason": self.reason,
             "reason_text": reason_text(self.reason) if self.reason else None,
             "blocked_since": self.problem_since.isoformat() if self.problem_since else None,
@@ -453,8 +456,99 @@ class PriceOptimizationController:
         """Build and safely reconcile one fresh price plan."""
         async with self._lock:
             await self._tick_locked()
+        await self._resume_after_recovery()
+
+    async def check_unconfirmed_deletes(self) -> None:
+        """Run the read-only post-check now, for example from the panel."""
+        async with self._lock:
+            await self._settle_unconfirmed_deletes()
+        await self._resume_after_recovery()
+
+    def needs_post_check(self) -> bool:
+        """Whether an own schedule's removal still waits for its post-check."""
+        ownership = self.runtime.scheduler_ownership
+        return ownership is not None and any(
+            record.owner == PRICE_OWNER and record.lifecycle is OwnershipLifecycle.CONFLICTED
+            for record in ownership.records.values()
+        )
+
+    async def _resume_after_recovery(self) -> None:
+        # Outside the planner lock: turning price optimization back on goes
+        # through the normal switch path, which prepares and starts this loop.
+        if hasattr(self.runtime, "async_resume_after_recovery"):
+            if await self.runtime.async_resume_after_recovery():
+                self.request_refresh()
+
+    async def _settle_unconfirmed_deletes(self) -> None:
+        # An own schedule whose DELETE outcome was never confirmed blocks all
+        # writes. One keyed GET (nothing is sent) settles it: proven absence
+        # retires the identity, an exact unchanged schedule is owned again.
+        mutation_manager = self.runtime.scheduler_mutation_manager
+        ownership = self.runtime.scheduler_ownership
+        if mutation_manager is None or ownership is None:
+            return
+        for conflicted in tuple(ownership.records.values()):
+            if (
+                conflicted.owner != PRICE_OWNER
+                or conflicted.lifecycle is not OwnershipLifecycle.CONFLICTED
+                or conflicted.m_id in self.soc_guard._attempted
+            ):
+                continue
+            seen = self._conflicts_seen.setdefault(conflicted.m_id, datetime.now(UTC))
+            recovered = await mutation_manager.recover_conflicted_price_delete(
+                conflicted.m_id,
+                absent_from_inventory=self._absent_from_inventory(conflicted, seen),
+            )
+            if recovered.status is not SchedulerTransactionStatus.SUCCESS:
+                self.delete_recovery_reason = recovered.reason
+                continue
+            self.delete_recovery_reason = None
+            self._conflicts_seen.pop(conflicted.m_id, None)
+            gone = recovered.lifecycle_after is OwnershipLifecycle.ORPHANED
+            log_activity(
+                self.runtime, PRICE_STATUS,
+                f"Post-check: {_describe(conflicted)} is "
+                + ("confirmed removed" if gone else "still in place and unchanged"),
+                "Who: price optimization. Why: the Gateway never confirmed an earlier "
+                "removal, so all price writes were paused. A read-only check of the "
+                "schedule settled it"
+                + (" and the pause is lifted." if gone
+                   else "; the plan decides what to do with it."),
+            )
+
+    def _absent_from_inventory(self, record: SchedulerOwnershipRecord, seen: datetime) -> bool:
+        """Whether a complete list read after ``seen`` has nothing in the record's place."""
+        coordinator = self.runtime.scheduler_coordinator
+        snapshot = None if coordinator is None else coordinator.last_good_snapshot
+        start = _record_start(record)
+        duration = record.intended_state.get("duration")
+        if (
+            snapshot is None
+            or snapshot.data_status != "current"
+            or snapshot.evaluated_at_epoch <= seen.timestamp()
+            or start is None
+            or type(duration) is not int
+        ):
+            return False
+        begin = int(start.timestamp())
+        end = begin + duration
+        # The list must cover the schedule's whole time, which is still ahead.
+        if not (snapshot.window_start_epoch <= begin and end <= snapshot.window_end_epoch):
+            return False
+        if begin <= snapshot.evaluated_at_epoch:
+            return False
+        return not any(
+            schedule.start_epoch == begin
+            or schedule.service_type == _SERVICE_TYPE.get(record.service)
+            and schedule.start_epoch < end
+            and begin < schedule.start_epoch + (schedule.duration_seconds or 0)
+            for schedule in snapshot.schedules
+        )
 
     async def _tick_locked(self) -> None:
+        # Read-only, so it also runs while the switches are off: after a
+        # restart they stay off until every unconfirmed outcome is settled.
+        await self._settle_unconfirmed_deletes()
         if not self.runtime.controller_state.automatic_price_optimization_enabled:
             self._publish("disabled")
             return
@@ -486,30 +580,6 @@ class PriceOptimizationController:
                 if expiry.status is not SchedulerTransactionStatus.SUCCESS:
                     self._publish("waiting_for_priority", "price_stop_quarantine_active")
                     return
-        # An own schedule whose DELETE outcome was never confirmed blocks all
-        # writes. One keyed GET (nothing is sent) settles it: proven absence
-        # retires the identity, an exact unchanged schedule is owned again.
-        for conflicted in tuple(ownership.records.values()):
-            if (
-                conflicted.owner != PRICE_OWNER
-                or conflicted.lifecycle is not OwnershipLifecycle.CONFLICTED
-                or conflicted.m_id in self.soc_guard._attempted
-            ):
-                continue
-            recovered = await mutation_manager.recover_conflicted_price_delete(conflicted.m_id)
-            if recovered.status is not SchedulerTransactionStatus.SUCCESS:
-                continue
-            gone = recovered.lifecycle_after is OwnershipLifecycle.ORPHANED
-            log_activity(
-                self.runtime, PRICE_STATUS,
-                f"Post-check: {_describe(conflicted)} is "
-                + ("confirmed removed" if gone else "still in place and unchanged"),
-                "Who: price optimization. Why: the Gateway never confirmed an earlier "
-                "removal, so all price writes were paused. A read-only check of the "
-                "schedule settled it"
-                + (" and the pause is lifted." if gone
-                   else "; the plan decides what to do with it."),
-            )
         config = self.config
         assert config.price_entity_id is not None
         state = self.runtime.hass.states.get(config.price_entity_id)

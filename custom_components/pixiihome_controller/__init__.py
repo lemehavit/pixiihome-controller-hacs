@@ -565,6 +565,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             runtime.price_optimization_controller.status = "blocked"
             runtime.price_optimization_controller.reason = str(error)
             runtime.price_optimization_controller.start()
+    elif runtime.price_optimization_controller.needs_post_check():
+        # Switched off (for example held off by a restart), but an own
+        # schedule's removal is unconfirmed: run only the read-only check.
+        runtime.price_optimization_controller.start()
     runtime.load_balancing_observer.start()
     try:
         await runtime.energy_forecast.start()

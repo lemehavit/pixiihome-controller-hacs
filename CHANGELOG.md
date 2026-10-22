@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.8 — 2026-10-22
+
+- Fix: the post-check from 0.5.7 never ran after a restart. A restart with an
+  unconfirmed command switches control authority and the automatic
+  controllers off, and price optimization only ran its checks while switched
+  on. The read-only post-check now runs even with the switches off.
+- The post-check can also prove a removal when the Gateway does not answer
+  the keyed check: a complete schedule list, read after the problem was
+  seen, with nothing at that schedule's time counts as proof that it is gone.
+  Nothing is ever sent again.
+- Switches that were on before such a restart are remembered and turned back
+  on once every unconfirmed command is settled, each through its normal
+  switch path. The logbook says what came back. Turning a switch by hand in
+  the meantime replaces the remembered state. A journal read from backup or
+  with mismatching copies still never resumes on its own.
+- The panel's "Kontrollera resultat" also handles an unconfirmed removal.
+- New attribute `delete_post_check_reason` on the price status shows why a
+  post-check has not settled yet.
+
 ## 0.5.7 — 2026-10-22
 
 - Fix: when the Gateway never confirmed the removal of an own price schedule
