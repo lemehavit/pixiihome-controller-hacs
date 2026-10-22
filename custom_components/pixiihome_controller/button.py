@@ -48,12 +48,13 @@ BUTTON_DESCRIPTIONS: tuple[PixiiButtonDescription, ...] = (
         "aps_stop",
         PixiiFeature.ADAPTIVE_PEAK_SHAVING,
     ),
-    PixiiButtonDescription("start_battery_calibration", "calibration_start"),
+    PixiiButtonDescription(
+        "start_battery_calibration", "calibration_start", PixiiFeature.MANUAL_CONTROL
+    ),
 )
 
 UNSUPPORTED_PRODUCTION_BUTTONS = frozenset({
     "stop_manual_power", "stop_target_soc", "stop_adaptive_peak_shaving",
-    "start_battery_calibration",
 })
 
 
@@ -114,7 +115,7 @@ class PixiiNativeButton(ButtonEntity):
             return False
         if (
             self.description.operation
-            in {"manual_stop", "target_soc_stop", "aps_stop", "calibration_start"}
+            in {"manual_stop", "target_soc_stop", "aps_stop"}
             and hasattr(self.runtime, "production_adapter")
         ):
             return False

@@ -552,6 +552,11 @@ class PriceOptimizationController:
         if not self.runtime.controller_state.automatic_price_optimization_enabled:
             self._publish("disabled")
             return
+        # The simulator runtime has no calibration hold.
+        calibrating = getattr(self.runtime, "battery_calibration_active", None)
+        if calibrating is not None and calibrating():
+            self._publish("waiting_for_priority", "battery_calibration_running")
+            return
         try:
             await self.prepare()
         except ValueError as error:

@@ -248,7 +248,8 @@
           "lease_expiring": "Stopping solar charging",
           "soc_limit": "Maximum usable SoC reached",
           "blocked": "Blocked",
-          "deferring": "Waiting: exporting now, charging later"
+          "deferring": "Waiting: exporting now, charging later",
+          "waiting_for_priority": "Waiting for schedules and services"
         }
       },
       "adaptive_peak_shaving_status": {
@@ -444,6 +445,12 @@
       },
       "price_blocked_notify_hours": {
         "name": "Notify when price optimization is stopped for"
+      },
+      "calibration_endpoint_soc_percent": {
+        "name": "Calibration endpoint SoC"
+      },
+      "calibration_duration_seconds": {
+        "name": "Calibration duration"
       }
     },
     "button": {

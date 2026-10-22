@@ -119,7 +119,7 @@ require authority, authenticated administrator context and all operation checks.
 | `stop_manual_power` — Stop manual power | Simulator only | Exercises simulated stop; no corresponding generic production stop entity. |
 | `stop_target_soc` — Stop target SoC | Simulator only | Simulated target stop. |
 | `stop_adaptive_peak_shaving` — Stop adaptive peak shaving | Simulator only | Simulated APS stop; automatic-controller owned cleanup is a separate path. |
-| `start_battery_calibration` — Start battery calibration | Simulator only | Simulated calibration; not an endorsed production battery-maintenance operation. |
+| `start_battery_calibration` — Start battery calibration | Production and simulator | Discharges, then charges to the calibration endpoint SoC. Refused if another service or schedule is in the window; see [manual control](manual-control.md#battery-calibration). |
 
 ## Number settings
 
@@ -139,6 +139,8 @@ phase, service and ownership checks.
 | `manual_power_duration_seconds`<br>Manual/APS duration | 3600 | 60–604800; 60 | s | Duration for manual fixed-power and one-shot APS starts. Automatic APS uses its own lease field. Choose a finite interval before starting. |
 | `target_soc_percent`<br>Target SoC | 80 | 10–100; 1 | % | Native Target SOC reference used by Start target SoC. Distinct from usable-SOC limits used by automatic features. |
 | `target_soc_duration_seconds`<br>Target SoC duration | 3600 | 60–604800; 60 | s | Maximum native target interval requested by Start target SoC; not a guarantee of reaching the target. |
+| `calibration_endpoint_soc_percent`<br>Calibration endpoint SoC | 90 | 10–100; 1 | % | SoC the battery charges to after the calibration discharge. |
+| `calibration_duration_seconds`<br>Calibration duration | 7200 | 1800–86400; 60 | s | Duration sent with Start battery calibration; automatic control waits this long. |
 
 ### Adaptive peak shaving numbers
 

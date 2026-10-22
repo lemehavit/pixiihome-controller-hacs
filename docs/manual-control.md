@@ -46,12 +46,33 @@ The automatic controller explicitly uses `keep_active=false`; the similarly
 identified switch enables that controller. Use the
 [automatic APS guide](solar-and-aps.md#adaptive-peak-shaving) for that workflow.
 
+## Battery calibration
+
+**Start battery calibration** sends Pixii's `batterycalibration` service
+(Pixii MQTT documentation 13880 rev 1.7, section 4.2.5) with
+`starttime: "now"`. The battery first discharges and then charges to
+**Calibration endpoint SoC** (default 90 %). **Calibration duration** (default
+2 hours) is the service's duration. Calibration is a prioritised service, so
+the button refuses to start when:
+
+- another service is running (the integration's own solar or APS lease is
+  fine; it is paused),
+- the Gateway schedule list is not current or does not cover the whole window,
+- a recurring schedule exists, or
+- any schedule lies inside the window. An aggregator Target SoC schedule is
+  the only exception, and only when **Allow changing aggregator schedules** is
+  on.
+
+While the calibration runs, price optimization, solar charging and adaptive
+peak shaving wait (reason `battery_calibration_running`). The end time is kept
+across restarts. The logbook records the start and who pressed the button.
+
 ## Stop buttons and simulator differences
 
-The generic **Stop manual power**, **Stop target SoC**, **Stop adaptive peak shaving**
-and **Start battery calibration** buttons are **not created for production**.
-Their service-specific production stop/calibration contracts are not verified.
-They exist only on the isolated simulator surface.
+The generic **Stop manual power**, **Stop target SoC** and **Stop adaptive peak
+shaving** buttons are **not created for production**. Their service-specific
+production stop contracts are not verified. They exist only on the isolated
+simulator surface.
 
 Choose finite durations before starting a production operation. A controller's
 exact owned-lease cleanup is a separate path and does not make a generic Stop

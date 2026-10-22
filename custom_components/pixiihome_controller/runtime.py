@@ -41,6 +41,7 @@ from .const import (
     CONF_SCHEDULER_USERNAME,
     DOMAIN,
     LIVE_WRITES_ENABLED,
+    BATTERY_CALIBRATION_UNTIL,
     RESUME_AFTER_RECOVERY,
 )
 from .control.controllers import (
@@ -200,6 +201,9 @@ class RuntimeData:
     energy_forecast: EnergyForecastService | None = field(init=False, default=None)
     battery_activity: BatteryActivityTracker | None = field(init=False, default=None)
     operational_settings_error: str | None = field(init=False, default=None)
+    # Epoch when a manually started battery calibration ends; the automatic
+    # controllers hold off until then.
+    battery_calibration_until: float | None = field(init=False, default=None)
     _production_previews: dict[str, dict[str, Any]] = field(
         init=False, default_factory=dict, repr=False
     )
@@ -414,6 +418,14 @@ class RuntimeData:
                 loaded_from_backup or recovery_blocked or journal_store_ambiguous
             )
             resume = original_controller_state.get(RESUME_AFTER_RECOVERY)
+            calibration_until = original_controller_state.get(BATTERY_CALIBRATION_UNTIL)
+            self.battery_calibration_until = (
+                float(calibration_until)
+                if isinstance(calibration_until, int | float)
+                and not isinstance(calibration_until, bool)
+                and calibration_until > time()
+                else None
+            )
             if authority_forced_closed:
                 # Only an unfinished command closes control here; remember the
                 # user's switches so they come back once it is settled. A
@@ -1187,7 +1199,20 @@ class RuntimeData:
                 },
             )
         elif operation == "calibration_start":
-            raise HomeAssistantError("battery_calibration_semantics_unverified")
+            # Pixii doc 13880 rev 1.7, 4.2.5: a prioritised service that first
+            # discharges the battery, then charges it to endpoint_soc.
+            request = ProductionAdapterRequest(
+                ControlOperation.DIRECT_BATTERY_CALIBRATION,
+                {
+                    "soc_percent": self.operational_settings.get(
+                        "calibration_endpoint_soc_percent"
+                    ),
+                    "duration_seconds": self.operational_settings.get(
+                        "calibration_duration_seconds"
+                    ),
+                },
+            )
+            self._require_calibration_window(int(request.payload["duration_seconds"]))
         else:
             raise HomeAssistantError("Unknown native control operation")
         if self.control_journal is not None and self.control_journal.unresolved_transactions:
@@ -1252,12 +1277,126 @@ class RuntimeData:
                 JournalPhase.FAILED,
                 reason=result.status.value,
             )
+        if request.operation is ControlOperation.DIRECT_BATTERY_CALIBRATION and result.successful:
+            await self._start_calibration_hold(
+                int(request.payload["duration_seconds"]),
+                float(request.payload["soc_percent"]),
+                lifecycle,
+                user_id,
+            )
         output = result.as_dict()
         output["successful"] = lifecycle == "reconciled"
         output["lifecycle"] = lifecycle
         output["readback"] = readback.as_dict() if readback is not None else None
         output["authority_revision"] = self.production_authority.revision
         return output
+
+    def battery_calibration_active(self) -> bool:
+        """Whether a manually started calibration may still be running."""
+        until = self.battery_calibration_until
+        return until is not None and time() < until
+
+    def _require_calibration_window(self, duration_seconds: int) -> None:
+        """Refuse a calibration that would override another service or schedule.
+
+        Calibration is prioritised, so it would push aside whatever runs in its
+        window. Only an aggregator Target SOC may be overridden, and only when
+        changing aggregator schedules is allowed. Everything else must be idle
+        and the complete schedule list must cover the whole window.
+        """
+        settings = self.operational_settings
+        allow_aggregator = bool(settings.get("price_adjust_external_target_soc"))
+        price = self.price_optimization_controller
+        aggregator_source = price.config.managed_source_id if price is not None else None
+        service = self.telemetry.value("core", "srv_type")
+        own_lease = any(
+            controller is not None and controller.owns_live_lease()
+            for controller in (
+                self.solar_charging_controller,
+                self.adaptive_peak_shaving_controller,
+            )
+        )
+        if not (
+            service == 0
+            or (service == 105 and own_lease)
+            or (service == 107 and allow_aggregator and aggregator_source is not None)
+        ):
+            raise HomeAssistantError(
+                "Kalibrering nekad: en annan tjänst körs just nu (battery_calibration_service_running)"
+            )
+        coordinator = self.scheduler_coordinator
+        snapshot = None if coordinator is None else coordinator.last_good_snapshot
+        now = int(time())
+        end = now + duration_seconds
+        if (
+            snapshot is None
+            or snapshot.data_status != "current"
+            or snapshot.window_start_epoch > now
+            or snapshot.window_end_epoch < end
+        ):
+            raise HomeAssistantError(
+                "Kalibrering nekad: schemalistan från Gateway är inte aktuell "
+                "(battery_calibration_schedule_list_unavailable)"
+            )
+        for schedule in snapshot.schedules:
+            if not schedule.enabled:
+                continue
+            if schedule.recurrence.recurring is not False:
+                # Repeats are not expanded in the list; their times are unknown.
+                raise HomeAssistantError(
+                    "Kalibrering nekad: ett återkommande schema finns "
+                    "(battery_calibration_recurring_schedule)"
+                )
+            if not (schedule.start_epoch < end and now < schedule.end_epoch):
+                continue
+            if (
+                allow_aggregator
+                and aggregator_source is not None
+                and schedule.service_type == 107
+                and schedule.source_id == aggregator_source
+            ):
+                continue
+            starts = datetime.fromtimestamp(schedule.start_epoch, UTC).astimezone()
+            raise HomeAssistantError(
+                f"Kalibrering nekad: ett schema kl {starts:%H:%M} ligger inom "
+                "kalibreringstiden (battery_calibration_conflicts_with_schedule)"
+            )
+
+    async def _start_calibration_hold(
+        self,
+        duration_seconds: int,
+        endpoint_soc: float,
+        lifecycle: str,
+        user_id: str | None,
+    ) -> None:
+        """Hold the automatic controllers off for the calibration window."""
+        until = time() + duration_seconds
+        self.battery_calibration_until = until
+        async with self._control_journal_lock:
+            journal = self.control_journal
+            if journal is not None:
+                candidate = journal.with_product_state(
+                    controller_state={
+                        **journal.controller_state,
+                        BATTERY_CALIBRATION_UNTIL: until,
+                    }
+                )
+                try:
+                    await self._save_control_journal_verified(candidate)
+                    self.control_journal = candidate
+                except Exception:  # noqa: BLE001 - the hold still applies in memory
+                    pass
+        from .activity import log_activity
+
+        ends = datetime.fromtimestamp(until, UTC).astimezone()
+        log_activity(
+            self,
+            "price_optimization_status",
+            f"Battery calibration started: discharges, then charges to {endpoint_soc:g} %; "
+            f"automatic control waits until {ends:%H:%M}"
+            + ("" if lifecycle == "reconciled" else " (start not confirmed by readback)"),
+            cause=f"Started by hand (user {user_id})" if user_id else "Started by hand",
+        )
 
     async def async_verify_aps_lease(self, message_id: int) -> dict[str, Any]:
         """Read back one integration-owned APS lease by its exact Pixii m_id."""

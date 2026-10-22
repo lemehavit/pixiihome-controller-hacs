@@ -7,6 +7,13 @@
   restart. Their availability was only checked once at start-up, often while
   control authority was still held off. They now follow authority within
   about 30 seconds.
+- New: **Start battery calibration** button, with **Calibration endpoint SoC**
+  (default 90 %) and **Calibration duration** (default 2 h). It follows
+  Pixii's documented `batterycalibration` service: discharge, then charge to
+  the endpoint. It is refused if another service runs or any schedule lies in
+  the window; an aggregator Target SoC may only be overridden when changing
+  aggregator schedules is allowed. Price optimization, solar charging and APS
+  wait while it runs, also across a restart, and the logbook records it.
 
 ## 0.5.8 — 2026-10-22
 

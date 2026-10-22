@@ -279,6 +279,11 @@ class SolarChargingController:
         if not enabled:
             self.disable()
             return
+        # The simulator runtime has no calibration hold.
+        calibrating = getattr(self.runtime, "battery_calibration_active", None)
+        if calibrating is not None and calibrating():
+            self._publish("waiting_for_priority", "battery_calibration_running")
+            return
         if self.runtime.controller_state.adaptive_peak_shaving_enabled:
             self._retiring = True
             self._publish("blocked", "solar_conflicts_with_adaptive_peak_shaving")
