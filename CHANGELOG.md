@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.12 — 2026-10-22
+
+- Fix: when an aggregator Target SOC could not be changed, price
+  optimization dropped everything planned after it and tried again on every
+  pass ("Could not lower aggregator Target SOC … (refused); nothing after it
+  was scheduled", twice every 15 minutes). The reason was never shown. Now
+  the reason is logged once (logbook and Home Assistant log), the target is
+  kept as the aggregator set it and the plan is made around it right away,
+  so the rest of the plan is still scheduled.
+- Fix: with the whole-day planner, a discharge before a fixed aggregator
+  Target SOC window is now valued against buying the energy back in that
+  window (what the plan itself assumes), not against the price at planning
+  time. That made every evening action show a negative profit while the plan
+  total was positive.
+
 ## 0.5.11 — 2026-10-22
 
 - Fix: with the whole-day planner, a discharge showed its gross saving as

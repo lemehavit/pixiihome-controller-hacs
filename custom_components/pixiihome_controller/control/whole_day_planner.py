@@ -184,10 +184,16 @@ def build_whole_day_plan(
         resets[k] = (target, price)
 
     mean_price = sum(item.price_sek_per_kwh for item in candidates) / count
-    # What energy already in the battery cost is unknown; like the standard
-    # planner, estimate it at the latest known price.
-    known = [item for item in series.intervals if item.start <= current]
-    stored_price = known[-1].price_sek_per_kwh if known else candidates[0].price_sek_per_kwh
+    # What a discharged kWh really costs: when a fixed aggregator Target SOC
+    # window follows, it is bought back there; otherwise it is what the
+    # plan's own grid charges paid, or what energy left at the end is worth.
+    next_refill: list[float | None] = []
+    upcoming: float | None = None
+    for index in range(count - 1, -1, -1):
+        if index + 1 in resets:
+            upcoming = resets[index + 1][1]
+        next_refill.append(upcoming)
+    next_refill.reverse()
     terminal_value = max(0.0, (mean_price + gic) * eta - cycle_cost_sek_per_kwh)
 
     def slot_cost(index: int, delta: int, *, decision: bool) -> tuple[float, float]:
@@ -301,7 +307,7 @@ def build_whole_day_plan(
             item, load, solar, battery, soc,
             maximum_discharge_kw=maximum_discharge_kw,
             step_kw=step / (eta * item.duration_hours),
-            reference=(charged_cost / charged_energy) if charged_energy > 0 else stored_price,
+            reference=_basis(next_refill[index], charged_cost, charged_energy, mean_price),
             round_trip=rt,
             grid_import_cost=gic,
             cycle_cost=cycle_cost_sek_per_kwh,
@@ -403,6 +409,14 @@ def _action(
             price - basis, soc, margin, margin / delivered,
         )
     return None
+
+
+def _basis(
+    refill: float | None, charged_cost: float, charged_energy: float, mean_price: float
+) -> float:
+    if refill is not None:
+        return refill
+    return charged_cost / charged_energy if charged_energy > 0 else mean_price
 
 
 def _blocked(series: PriceSeries, blocker: str, soc: float) -> WholeDayResult:
