@@ -97,6 +97,10 @@ def _economics(action: Any) -> dict[str, Any]:
         return {"expected_profit_sek": None}
     hours = action.duration_seconds / 3600
     energy = action.power_kw * hours
+    if action.direction is PriceDirection.DISCHARGE and action.net_profit_sek_per_kwh:
+        # Without export the power is only a ceiling; this is what the plan
+        # expects the house to take.
+        energy = action.expected_margin_sek / action.net_profit_sek_per_kwh
     return {
         "expected_profit_sek": (
             round(action.expected_margin_sek, 2)

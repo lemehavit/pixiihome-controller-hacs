@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.11 — 2026-10-22
+
+- Fix: with the whole-day planner, a discharge showed its gross saving as
+  profit and the sell price as what the energy cost, so the net per kWh could
+  exceed the price. A discharge now shows one full cycle: what it saves minus
+  what its energy cost (the plan's grid charges, or the latest known price
+  for energy already in the battery) after losses and cycle cost. Charges
+  show no profit of their own. The plan's total is unchanged.
+- The calendar no longer shows a net figure for charges, and the expected
+  energy of a discharge without export is what the house is expected to
+  take, not power × time.
+
 ## 0.5.10 — 2026-10-22
 
 - Every event in the price optimization calendar now shows the plan's money.
