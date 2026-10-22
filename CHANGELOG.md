@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.6 — 2026-10-22
+
+- Price calendar: discharges without export now read "max N kW". That power
+  is a ceiling (the battery follows the house load up to it), unlike export
+  and charging, which run at the stated power.
+
 ## 0.5.5 — 2026-10-22
 
 - Fix: price optimization could not remove its own future schedules when the

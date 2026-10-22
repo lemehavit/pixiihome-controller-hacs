@@ -120,3 +120,26 @@ def test_ended_proposals_and_orphaned_records_disappear():
     instance = controller((action(NOW - timedelta(hours=2)),))
     record(instance, action(), lifecycle=OwnershipLifecycle.ORPHANED)
     assert price_timeline(instance, NOW) == []
+
+
+def test_calendar_marks_self_consumption_power_as_a_ceiling():
+    from dataclasses import replace
+
+    from custom_components.pixiihome_controller.control.price_optimization import (
+        PriceDischargeMode,
+    )
+
+    charge = action()
+    own_use = replace(
+        action(NOW + timedelta(hours=2), power=0.7), direction=PriceDirection.DISCHARGE,
+        service="peakshaving", discharge_mode=PriceDischargeMode.SELF_CONSUMPTION,
+    )
+    export = replace(
+        action(NOW + timedelta(hours=4), power=3.0), direction=PriceDirection.DISCHARGE,
+        discharge_mode=PriceDischargeMode.EXPORT,
+    )
+    instance = controller((charge, own_use, export))
+    events = PixiiPriceOptimizationCalendar(instance.runtime)._events(NOW)
+    assert "· 2 kW ·" in events[0].summary
+    assert "· max 0.7 kW ·" in events[1].summary
+    assert "· 3 kW ·" in events[2].summary

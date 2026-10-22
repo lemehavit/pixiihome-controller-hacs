@@ -75,13 +75,21 @@ class PixiiPriceOptimizationCalendar(CalendarEntity):
             }[item["schedule_status"]]
             mode = {
                 "export": "Export till elnätet",
-                "self_consumption": "Egen förbrukning, utan export",
+                "self_consumption": "Egen förbrukning, utan export: batteriet täcker husets "
+                "förbrukning upp till maxeffekten, resten tas från elnätet",
                 None: "Laddning från elnätet",
             }[item["discharge_mode"]]
+            # Without export the power is a ceiling: the battery follows the
+            # house load up to it. Export and charging run at that power.
+            power = (
+                f"max {item['power_kw']:g} kW"
+                if item["discharge_mode"] == "self_consumption"
+                else f"{item['power_kw']:g} kW"
+            )
             events.append(CalendarEvent(
                 start=datetime.fromisoformat(item["start"]),
                 end=datetime.fromisoformat(item["end"]),
-                summary=f"{direction} · {item['power_kw']:g} kW · {status}",
+                summary=f"{direction} · {power} · {status}",
                 description="\n".join((
                     f"Prisoptimering: {status}",
                     mode,
