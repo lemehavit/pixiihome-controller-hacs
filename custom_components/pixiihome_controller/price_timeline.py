@@ -25,6 +25,11 @@ def price_timeline(controller: Any, now: datetime) -> list[dict[str, Any]]:
     ]
     entries: list[dict[str, Any]] = []
     keys: set[tuple[object, ...]] = set()
+    plan = controller.plan
+    planned = {
+        **getattr(controller, "created_actions", {}),
+        **({} if plan is None else {_action_key(action): action for action in plan.actions}),
+    }
     for record in records:
         if record.lifecycle.value not in {"owned", "provisional", "conflicted"}:
             continue
@@ -62,8 +67,8 @@ def price_timeline(controller: Any, now: datetime) -> list[dict[str, Any]]:
             "schedule_status": "scheduled" if record.lifecycle.value == "owned" else "unverified",
             "message_id": record.m_id,
             "in_progress": start <= current < end,
+            **_economics(planned.get(key)),
         })
-    plan = controller.plan
     if (
         plan is not None
         and controller.runtime.controller_state.automatic_price_optimization_enabled
@@ -77,8 +82,35 @@ def price_timeline(controller: Any, now: datetime) -> list[dict[str, Any]]:
                 "schedule_status": "planned",
                 "message_id": None,
                 "in_progress": action.start <= current < action.end,
+                **_economics(action),
             })
     return sorted(entries, key=lambda item: (item["start"], item["uid"]))
+
+
+def _economics(action: Any) -> dict[str, Any]:
+    """The plan's money figures for one interval; None when no plan has them.
+
+    A discharge carries the profit of the whole cycle. A charge only buys the
+    energy; its profit is counted on the discharge that uses it.
+    """
+    if action is None:
+        return {"expected_profit_sek": None}
+    hours = action.duration_seconds / 3600
+    energy = action.power_kw * hours
+    return {
+        "expected_profit_sek": (
+            round(action.expected_margin_sek, 2)
+            if action.direction is PriceDirection.DISCHARGE else None
+        ),
+        "net_profit_sek_per_kwh": round(action.net_profit_sek_per_kwh, 4),
+        "price_sek_per_kwh": round(action.price_sek_per_kwh, 4),
+        "reference_price_sek_per_kwh": round(action.reference_price_sek_per_kwh, 4),
+        "energy_kwh": round(energy, 2),
+        "charge_cost_sek": (
+            round(energy * action.price_sek_per_kwh, 2)
+            if action.direction is PriceDirection.CHARGE else None
+        ),
+    }
 
 
 def next_price_action(controller: Any, direction: PriceDirection) -> dict[str, Any] | None:
