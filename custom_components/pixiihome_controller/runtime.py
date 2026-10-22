@@ -27,6 +27,7 @@ from .command import (
     CorrelatedCommandRequest,
 )
 from .const import (
+    BATTERY_CALIBRATION_UNTIL,
     CONF_AUTOMATION_POLICY,
     CONF_COMMAND_STATE,
     CONF_CONTROL_JOURNAL_INITIALIZED,
@@ -41,7 +42,6 @@ from .const import (
     CONF_SCHEDULER_USERNAME,
     DOMAIN,
     LIVE_WRITES_ENABLED,
-    BATTERY_CALIBRATION_UNTIL,
     RESUME_AFTER_RECOVERY,
 )
 from .control.controllers import (
@@ -1322,7 +1322,8 @@ class RuntimeData:
             or (service == 107 and allow_aggregator and aggregator_source is not None)
         ):
             raise HomeAssistantError(
-                "Kalibrering nekad: en annan tjänst körs just nu (battery_calibration_service_running)"
+                "Kalibrering nekad: en annan tjänst körs just nu "
+                "(battery_calibration_service_running)"
             )
         coordinator = self.scheduler_coordinator
         snapshot = None if coordinator is None else coordinator.last_good_snapshot
