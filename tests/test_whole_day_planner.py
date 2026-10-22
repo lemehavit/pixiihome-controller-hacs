@@ -120,6 +120,45 @@ def test_known_target_soc_window_resets_energy_and_blocks_actions() -> None:
     assert len(truncated.slots) == 2
 
 
+def test_adjustable_target_soc_windows_let_a_discharge_stand() -> None:
+    # An aggregator refills to 90 % every other hour. A fixed refill undoes
+    # each discharge at a high price; a held (lowered) window keeps it.
+    series = _series([1.0, 3.6, 3.4, 3.6, 3.4, 2.0])
+    windows = [
+        ExternalWindow(series.intervals[i].start, series.intervals[i].end, 90.0)
+        for i in (2, 4)
+    ]
+    kwargs = dict(usable_soc_percent=90.0, minimum_lead_minutes=0)
+    fixed = _plan(series, lambda start, end: (1.0, 0.0), external_windows=windows, **kwargs)
+    assert all(slot.kind != "self_consumption" for slot in fixed.slots[1:5])
+    held = [
+        ExternalWindow(w.start, w.end, w.target_usable_soc_percent, adjustable=True)
+        for w in windows
+    ]
+    result = _plan(series, lambda start, end: (1.0, 0.0), external_windows=held, **kwargs)
+    kinds = [slot.kind for slot in result.slots]
+    assert kinds[1] == kinds[3] == "self_consumption"
+    assert kinds[2] == kinds[4] == "external"
+    socs = dict(result.plan.window_socs)
+    assert socs[held[0].start] < 90.0
+    assert socs[held[1].start] < socs[held[0].start]
+
+
+def test_rounding_past_the_house_load_follows_the_load_instead_of_exporting() -> None:
+    # With 0.184 kWh energy steps, 0.6 kW of load lies between three and four
+    # steps; the plan rounds up past it, which must not become a forced export.
+    series = _series([0.5, 3.0])
+    result = _plan(
+        series, lambda start, end: (0.6, 0.0), usable_soc_percent=90.0,
+        usable_capacity_kwh=18.4, export_allowed=True,
+        export_minimum_difference_sek_per_kwh=1.5, minimum_lead_minutes=0,
+    )
+    assert result.slots[1].battery_kw < -0.65
+    discharge = [a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE]
+    assert discharge
+    assert all(a.discharge_mode is PriceDischargeMode.SELF_CONSUMPTION for a in discharge)
+
+
 def test_missing_forecast_blocks_the_whole_day_plan() -> None:
     result = _plan(_series([1.0, 2.0]), lambda start, end: None)
     assert result.plan.blockers == ("energy_forecast_unavailable",)
