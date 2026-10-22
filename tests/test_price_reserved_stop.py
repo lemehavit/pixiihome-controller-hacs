@@ -394,3 +394,27 @@ async def test_replay_anonymized_delete_and_core_samples_preserves_failed_outcom
     assert mid in instance.allocator.owned_ids
     assert len(executor.mutation_commands) == 1
     assert outcome["status"] == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("absent", [True, False])
+async def test_planner_settles_an_unconfirmed_own_delete_before_new_writes(absent):
+    from .test_scheduler_manager import _timed_out_price_delete, get_ack
+
+    get = (replace(get_ack(), response=11, m_id=M_ID, service="demandresponse")
+           if absent else TimeoutError())
+    executor, store, _, real_manager = _timed_out_price_delete([get])
+    await real_manager.delete(M_ID)
+    instance, fake_mutations = runtime()
+    instance.scheduler_ownership = store
+    instance.scheduler_mutation_manager = fake_mutations
+    fake_mutations.recover_conflicted_price_delete = AsyncMock(
+        side_effect=real_manager.recover_conflicted_price_delete
+    )
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    fake_mutations.recover_conflicted_price_delete.assert_awaited_once_with(M_ID)
+    assert len(executor.mutation_commands) == 1  # never a second DELETE
+    assert store.records[M_ID].lifecycle is (
+        OwnershipLifecycle.ORPHANED if absent else OwnershipLifecycle.CONFLICTED
+    )

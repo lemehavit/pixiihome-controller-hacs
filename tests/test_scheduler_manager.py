@@ -1029,3 +1029,88 @@ async def test_delete_accepts_an_owned_price_schedule_of_another_service() -> No
 
     assert result.reason != "service_mismatch"
     assert result.service == "demandresponse"
+
+
+def _timed_out_price_delete(gets: list[Any]):
+    command = ScheduledCreate(
+        service="demandresponse", m_id=M_ID, starttime=START,
+        duration_seconds=3600, values={"pacref": -5000},
+    ).build()
+    store = store_with_record()
+    store.records[M_ID] = replace(
+        store.records[M_ID], service="demandresponse",
+        intended_state=scheduler_expected_state_from_command(command).as_mapping(),
+        owner="automatic_price_optimization",
+    )
+    executor = FakeExecutor(
+        [SchedulerExecutionResult(SchedulerExecutionStatus.TIMED_OUT)], gets,
+    )
+    allocator = MessageIdAllocator(next_value=M_ID + 1, owned_ids={M_ID})
+    return executor, store, allocator, manager(executor, store=store, allocator=allocator)
+
+
+def _demandresponse_get(**changes: Any):
+    source = get_ack()
+    values = {"pacref": -5000, "starttime": source.values["starttime"], "duration": 3600,
+              "service_status": 5, "service_duration_left": 3590, **changes}
+    return replace(source, service="demandresponse", socref=None, values=values)
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_price_delete_is_settled_by_one_get_when_absent() -> None:
+    absent = replace(get_ack(), response=11, m_id=M_ID, service="demandresponse")
+    executor, store, allocator, manager_instance = _timed_out_price_delete([absent])
+    failed = await manager_instance.delete(M_ID)
+    assert failed.lifecycle_after is OwnershipLifecycle.CONFLICTED
+
+    recovered = await manager_instance.recover_conflicted_price_delete(M_ID)
+
+    assert recovered.status is SchedulerTransactionStatus.SUCCESS
+    assert store.records[M_ID].lifecycle is OwnershipLifecycle.ORPHANED
+    assert M_ID not in allocator.owned_ids
+    assert len(executor.mutation_commands) == 1  # the original DELETE only
+    assert len(executor.get_commands) == 1
+    journal = manager_instance.journal
+    assert isinstance(journal, InMemoryJournalPort)
+    assert journal.journal.transactions[-1].phase is JournalPhase.RECONCILED
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_price_delete_of_an_unchanged_schedule_is_owned_again() -> None:
+    executor, store, _, manager_instance = _timed_out_price_delete([_demandresponse_get()])
+    await manager_instance.delete(M_ID)
+
+    recovered = await manager_instance.recover_conflicted_price_delete(M_ID)
+
+    assert recovered.status is SchedulerTransactionStatus.SUCCESS
+    assert store.records[M_ID].lifecycle is OwnershipLifecycle.OWNED
+    assert len(executor.mutation_commands) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("readback", [TimeoutError(), "changed"])
+async def test_unconfirmed_price_delete_stays_conflicted_without_proof(readback) -> None:
+    get = _demandresponse_get(pacref=-3000) if readback == "changed" else readback
+    executor, store, _, manager_instance = _timed_out_price_delete([get])
+    await manager_instance.delete(M_ID)
+
+    recovered = await manager_instance.recover_conflicted_price_delete(M_ID)
+
+    assert recovered.status is not SchedulerTransactionStatus.SUCCESS
+    assert store.records[M_ID].lifecycle is OwnershipLifecycle.CONFLICTED
+    assert len(executor.mutation_commands) == 1
+    journal = manager_instance.journal
+    assert isinstance(journal, InMemoryJournalPort)
+    assert journal.journal.transactions[-1].phase is JournalPhase.RECOVERY_REQUIRED
+
+
+@pytest.mark.asyncio
+async def test_conflict_recovery_ignores_schedules_not_owned_by_price_optimization() -> None:
+    executor, store, _, manager_instance = _timed_out_price_delete([])
+    store.records[M_ID] = replace(store.records[M_ID], owner=None,
+                                  lifecycle=OwnershipLifecycle.CONFLICTED)
+
+    result = await manager_instance.recover_conflicted_price_delete(M_ID)
+
+    assert result.reason == "price_delete_recovery_not_applicable"
+    assert executor.get_commands == []

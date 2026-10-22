@@ -37,8 +37,19 @@ class States:
 
 
 class Coordinator:
+    """Canonical inventory, kept in step with the fake manager's schedules."""
+
+    def __init__(self) -> None:
+        self.manager = None
+
+    @property
+    def last_good_snapshot(self):
+        manager = getattr(self.manager, "scheduler_manager", None)
+        schedules = tuple(manager.normalized_schedules) if manager is not None else ()
+        return SimpleNamespace(data_status="current", schedules=schedules)
+
     async def async_refresh(self):
-        return SimpleNamespace(data_status="current", schedules=[])
+        return self.last_good_snapshot
 
 
 class Mutations:
@@ -123,6 +134,7 @@ def runtime(*, export_allowed: bool = False, schedule_writes: bool = True):
         _automation_policy=policy,
         plant_health=lambda: PlantHealth(True, True, True, True, True, ()),
     )
+    instance.scheduler_coordinator.manager = instance
     return instance, mutations
 
 
@@ -406,6 +418,12 @@ async def test_future_target_is_not_assumed_to_have_reached_its_soc_before_a_lat
     controller = PriceOptimizationController(instance)
     series = normalize_price_series(instance.hass.states.state.attributes, "SEK/kWh")
     proposal = controller._build_plan(series, controller._validated_limits())
+    # Without permission to change aggregator schedules nothing is even read.
+    assert await controller._move_one_managed_external_charge(series, proposal.actions)
+    assert reads == []
+    instance.operational_settings = instance.operational_settings.set(
+        "price_adjust_external_target_soc", True
+    )
     assert await controller._move_one_managed_external_charge(series, proposal.actions)
     assert reads == [300]
     assert controller.external_move_count == 0
