@@ -188,11 +188,15 @@ class BatteryActivityTracker:
         if cause is None:
             return f"The battery runs {label}; the cause is unknown." + tail
         window = f" ({cause.window})" if cause.window else ""
-        if cause.source.startswith("external") or cause.source.startswith("schedule of"):
+        if cause.source.startswith(("external", "aggregator", "schedule of")):
+            hands_off = (
+                "only price optimization may lower or replace an aggregator Target SOC, "
+                "and only with Allow changing aggregator schedules on"
+                if cause.source.startswith("aggregator") else "it leaves it untouched"
+            )
             return (
                 f"Who: {cause.source}{window}, {cause.detail}. Why: that schedule runs {label} "
-                "now. It was not created by this integration, which leaves it untouched."
-                + tail
+                f"now. It was not created by this integration; {hands_off}." + tail
             )
         if cause.source == "not started by this integration":
             return (
