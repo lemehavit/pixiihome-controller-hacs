@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.15 — 2026-10-23
+
+- Fix: when the battery ran an aggregator schedule, Battery activity said
+  "Who: aggregator schedule (source 7) … (this integration)". It now says
+  the schedule was not created by this integration, and that only price
+  optimization may lower or replace an aggregator Target SOC, with "Allow
+  changing aggregator schedules" on.
+
 ## 0.5.14 — 2026-10-23
 
 - Fix: when price optimization removed one of its own schedules and the

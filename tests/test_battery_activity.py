@@ -192,3 +192,24 @@ def test_cause_waits_for_the_schedule_list_after_a_start() -> None:
     tracker.sample()
     assert "not started by this integration" not in runtime.events[-1]["message"]
     assert "Target SoC" in runtime.events[-1]["message"]
+
+
+def test_aggregator_schedule_is_never_called_this_integration() -> None:
+    target = _schedule(NOW - timedelta(minutes=5), 60, 107, None)
+    target.source_id = 7
+    target.ownership = SchedulerOwnership(Ownership.UNKNOWN, None)
+    runtime = _runtime((target,))
+    runtime.price_optimization_controller = SimpleNamespace(
+        config=SimpleNamespace(managed_source_id=7)
+    )
+    clock = [NOW]
+    tracker = _tracker(runtime, clock)
+    tracker.sample()
+    runtime.telemetry.service = 107
+    runtime.battery.power_w = 3000.0
+    clock[0] += timedelta(seconds=15)
+    tracker.sample()
+    assert "aggregator schedule (source 7)" in runtime.events[-1]["message"]
+    why = tracker._why()
+    assert "(this integration)" not in why
+    assert "not created by this integration" in why
