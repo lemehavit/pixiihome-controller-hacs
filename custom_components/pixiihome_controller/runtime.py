@@ -42,6 +42,7 @@ from .const import (
     CONF_SCHEDULER_USERNAME,
     DOMAIN,
     LIVE_WRITES_ENABLED,
+    LOWERED_EXTERNAL_TARGETS,
     RESUME_AFTER_RECOVERY,
 )
 from .control.controllers import (
@@ -204,6 +205,11 @@ class RuntimeData:
     # Epoch when a manually started battery calibration ends; the automatic
     # controllers hold off until then.
     battery_calibration_until: float | None = field(init=False, default=None)
+    # Aggregator Target SOC schedules price optimization lowered, with the
+    # aggregator's own reference, so they can be raised back after a restart.
+    lowered_external_targets: dict[tuple[int, int, int, int], float] = field(
+        init=False, default_factory=dict
+    )
     _production_previews: dict[str, dict[str, Any]] = field(
         init=False, default_factory=dict, repr=False
     )
@@ -419,6 +425,9 @@ class RuntimeData:
             )
             resume = original_controller_state.get(RESUME_AFTER_RECOVERY)
             calibration_until = original_controller_state.get(BATTERY_CALIBRATION_UNTIL)
+            self.lowered_external_targets = _lowered_targets_from(
+                original_controller_state.get(LOWERED_EXTERNAL_TARGETS)
+            )
             self.battery_calibration_until = (
                 float(calibration_until)
                 if isinstance(calibration_until, int | float)
@@ -1363,6 +1372,29 @@ class RuntimeData:
                 "kalibreringstiden (battery_calibration_conflicts_with_schedule)"
             )
 
+    async def async_save_lowered_targets(
+        self, lowered: dict[tuple[int, int, int, int], float]
+    ) -> None:
+        """Remember lowered aggregator targets across restarts (best effort)."""
+        self.lowered_external_targets = dict(lowered)
+        async with self._control_journal_lock:
+            journal = self.control_journal
+            if journal is None:
+                return
+            candidate = journal.with_product_state(
+                controller_state={
+                    **journal.controller_state,
+                    LOWERED_EXTERNAL_TARGETS: [
+                        [*key, reference] for key, reference in sorted(lowered.items())
+                    ],
+                }
+            )
+            try:
+                await self._save_control_journal_verified(candidate)
+                self.control_journal = candidate
+            except Exception:  # noqa: BLE001 - kept in memory; raising waits for evidence
+                pass
+
     async def _start_calibration_hold(
         self,
         duration_seconds: int,
@@ -2076,3 +2108,22 @@ class RuntimeData:
         return self.battery_model.reading(
             self.telemetry.payload("battery"), self.telemetry.payload("energy")
         )
+
+
+def _lowered_targets_from(value: object) -> dict[tuple[int, int, int, int], float]:
+    """Saved ``[sch_index, service_no, start, duration, reference]`` rows."""
+    lowered: dict[tuple[int, int, int, int], float] = {}
+    if not isinstance(value, list):
+        return lowered
+    now = time()
+    for row in value:
+        if not (
+            isinstance(row, list | tuple) and len(row) == 5
+            and all(isinstance(part, int) and not isinstance(part, bool) for part in row[:4])
+            and isinstance(row[4], int | float) and not isinstance(row[4], bool)
+        ):
+            continue
+        if row[2] + row[3] <= now:
+            continue  # that schedule has ended
+        lowered[(row[0], row[1], row[2], row[3])] = float(row[4])
+    return lowered

@@ -791,3 +791,65 @@ def test_a_blocked_write_names_its_safety_checks_once(monkeypatch):
 
     assert logged == ["Could not create 17:00: blocked by scheduler_visibility_stale"]
     assert controller.blocked_details == ["scheduler_visibility_stale"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remembered", [True, False])
+async def test_a_target_we_lowered_is_raised_back_after_a_restart(remembered):
+    from custom_components.pixiihome_controller.price_controller import _target_key
+
+    instance, _ = runtime()
+    window, calls = _aggregator_day(instance, adjust=True)
+
+    async def read_target(service_no):
+        return {"reference": 5}
+
+    instance.gateway_scheduler.client.read_target_soc = read_target
+    async def save(lowered):
+        return None
+
+    instance.async_save_lowered_targets = save
+    instance.lowered_external_targets = {_target_key(window): 90.0} if remembered else {}
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    raised = [call for call in calls if call["new_reference"] > 5 and not call["delete"]]
+    if remembered:
+        # The plan keeps more than 5 %: raised towards, never above, 90 %.
+        assert raised and all(call["new_reference"] <= 90 for call in raised)
+        assert controller.external_target_adjust_count == 1
+    else:
+        # A target this integration never lowered is never raised.
+        assert raised == []
+
+
+@pytest.mark.asyncio
+async def test_a_lowered_target_is_remembered_with_the_aggregator_value():
+    from custom_components.pixiihome_controller.price_controller import _target_key
+
+    instance, _ = runtime()
+    window, calls = _aggregator_day(instance, adjust=True)
+    saved = []
+
+    async def save(lowered):
+        saved.append(lowered)
+
+    instance.async_save_lowered_targets = save
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert len(calls) == 1 and calls[0]["new_reference"] < 90
+    assert saved[-1] == {_target_key(window): 90}
+
+
+def test_saved_lowered_targets_skip_ended_and_malformed_rows():
+    from time import time
+
+    from custom_components.pixiihome_controller.runtime import _lowered_targets_from
+
+    future = int(time()) + 3600
+    rows = [[4596, 3, future, 3600, 90], [1, 2, 100, 60, 80], ["x", 2, future, 60, 80], 5]
+    assert _lowered_targets_from(rows) == {(4596, 3, future, 3600): 90.0}
+    assert _lowered_targets_from(None) == {}

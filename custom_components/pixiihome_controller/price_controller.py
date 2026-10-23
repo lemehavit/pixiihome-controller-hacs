@@ -90,6 +90,7 @@ class PriceOptimizationController:
         self._external_meta: tuple[tuple[Any, float | None], ...] = ()
         # Original references of foreign targets this controller lowered.
         self._lowered: dict[tuple[int, int, int, int], float] = {}
+        self._lowered_loaded = False
         # Foreign targets the Gateway side refused to change, with the reason.
         # They are planned as fixed until they end, and logged once.
         self._refused_targets: dict[tuple[int, int, int, int], str] = {}
@@ -1246,7 +1247,29 @@ class PriceOptimizationController:
         """Lower held foreign targets to the plan; restore those no longer held.
 
         Returns the start of the first window that could not be held, if any.
+        The aggregator's own references of lowered targets are kept across
+        restarts, so a target can be raised back when the plan keeps more.
         """
+        if not self._lowered_loaded:
+            self._lowered_loaded = True
+            saved = getattr(self.runtime, "lowered_external_targets", None)
+            if isinstance(saved, dict):
+                for key, reference in saved.items():
+                    self._lowered.setdefault(key, reference)
+        before = dict(self._lowered)
+        try:
+            return await self._apply_external_targets_once(windows, plan, limits)
+        finally:
+            save: Any = getattr(self.runtime, "async_save_lowered_targets", None)
+            if self._lowered != before and save is not None:
+                await save(dict(self._lowered))
+
+    async def _apply_external_targets_once(
+        self,
+        windows: tuple[ExternalWindow, ...],
+        plan: PricePlan,
+        limits: dict[str, float],
+    ) -> datetime | None:
         gateway = self.runtime.gateway_scheduler
         battery = self.runtime.battery
         setter: Any = getattr(gateway, "set_external_target_soc", None)
@@ -1296,9 +1319,19 @@ class PriceOptimizationController:
             elif window.adjustable:
                 usable = max(floor, planned.get(window.start, floor))
                 desired = float(min(100, ceil(battery.effective_min_soc + usable * span / 100)))
+                original = self._lowered.get(key)
                 if desired >= reference - 0.5:
-                    continue
-                allow_delete = True
+                    # The plan keeps more energy than an earlier pass did: raise
+                    # a target we lowered back towards, never above, the
+                    # aggregator's own value.
+                    if original is None:
+                        continue
+                    desired = min(desired, original)
+                    if desired <= reference + 0.5:
+                        continue
+                    allow_delete = False
+                else:
+                    allow_delete = True
             elif key in self._lowered:
                 desired, allow_delete = self._lowered[key], False
                 if desired <= reference + 0.5:
@@ -1329,7 +1362,20 @@ class PriceOptimizationController:
             self._target_cache.pop(key, None)
             when = time_span(window.start, window.end)
             if status == "adjusted":
-                if window.adjustable:
+                if window.adjustable and desired > reference:
+                    original = self._lowered.get(key, desired)
+                    if desired >= original - 0.5:
+                        self._lowered.pop(key, None)
+                    self.external_target_adjust_count += 1
+                    log_activity(self.runtime, PRICE_STATUS,
+                                 f"Raised aggregator Target SOC {when} from {reference:.0f} % "
+                                 f"to {desired:.0f} % (the aggregator set {original:.0f} %)",
+                                 "Who: price optimization, with Allow changing aggregator "
+                                 "schedules on. Why: an earlier plan lowered this target, but "
+                                 "the current plan keeps more energy in the battery, so the "
+                                 "target is raised to the planned level, never above the "
+                                 "aggregator's own value.")
+                elif window.adjustable:
                     self._lowered.setdefault(key, reference)
                     self.external_target_adjust_count += 1
                     log_activity(self.runtime, PRICE_STATUS,
