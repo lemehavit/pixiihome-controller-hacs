@@ -775,3 +775,19 @@ def test_owned_record_matches_its_unique_gateway_entry_only():
     assert not _record_matches_schedule(record, foreign, [foreign])
     provisional = SimpleNamespace(**{**vars(record), "lifecycle": OwnershipLifecycle.PROVISIONAL})
     assert not _record_matches_schedule(provisional, ours, [ours])
+
+
+def test_a_blocked_write_names_its_safety_checks_once(monkeypatch):
+    import custom_components.pixiihome_controller.price_controller as module
+
+    logged = []
+    monkeypatch.setattr(module, "log_activity",
+                        lambda _runtime, _key, message, *_args: logged.append(message))
+    controller = SimpleNamespace(runtime=None, blocked_details=[], _reported_block=())
+    blocked = SimpleNamespace(blocked_reasons=("scheduler_visibility_stale",))
+
+    for _ in range(3):
+        PriceOptimizationController._report_blocked(controller, "create 17:00", blocked)  # type: ignore[arg-type]
+
+    assert logged == ["Could not create 17:00: blocked by scheduler_visibility_stale"]
+    assert controller.blocked_details == ["scheduler_visibility_stale"]

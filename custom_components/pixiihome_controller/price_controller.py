@@ -93,6 +93,9 @@ class PriceOptimizationController:
         # Foreign targets the Gateway side refused to change, with the reason.
         # They are planned as fixed until they end, and logged once.
         self._refused_targets: dict[tuple[int, int, int, int], str] = {}
+        # Safety checks that last stopped a schedule write (logged once).
+        self.blocked_details: list[str] = []
+        self._reported_block: tuple[str, ...] = ()
         self.external_target_adjust_count = 0
         self.external_target_delete_count = 0
         self.busy_until: datetime | None = None
@@ -212,6 +215,7 @@ class PriceOptimizationController:
             "delete_post_check_reason": self.delete_recovery_reason,
             "reason": self.reason,
             "reason_text": reason_text(self.reason) if self.reason else None,
+            "blocked_details": self.blocked_details if self.status == "blocked" else [],
             "blocked_since": self.problem_since.isoformat() if self.problem_since else None,
             "planner_engine": self.planner_engine,
             "uses_energy_forecast": getattr(self.runtime, "energy_forecast", None) is not None,
@@ -383,6 +387,7 @@ class PriceOptimizationController:
                     continue
                 result = await manager.delete(record.m_id)
                 if result.status is not SchedulerTransactionStatus.SUCCESS:
+                    self._report_blocked(f"remove {_describe(record)}", result)
                     self._publish("blocked", f"price_delete_{result.reason}")
                     return
                 self.delete_count += 1
@@ -756,6 +761,7 @@ class PriceOptimizationController:
         if not await self._reconcile(actions):
             return
         self.last_applied_at = datetime.now(UTC)
+        self._reported_block = ()
         self._publish("active" if actions else "ready")
 
     async def _priority_allows_mutation(self) -> bool:
@@ -1382,6 +1388,22 @@ class PriceOptimizationController:
                     return failed_from
         return failed_from
 
+    def _report_blocked(self, what: str, result: Any) -> None:
+        """Say once which safety checks stopped a write, until they change."""
+        details = tuple(result.blocked_reasons)
+        self.blocked_details = list(details)
+        if details == self._reported_block:
+            return
+        self._reported_block = details
+        if not details:
+            return
+        _LOGGER.warning("Price optimization could not %s: %s", what, ", ".join(details))
+        log_activity(self.runtime, PRICE_STATUS,
+                     f"Could not {what}: blocked by {', '.join(details)}",
+                     "Who: price optimization. Why: a safety check stopped the write "
+                     "before anything was sent; planning retries every pass and this "
+                     "is logged again only when the reasons change.")
+
     def _prune_refused_targets(self) -> None:
         now = datetime.now(UTC).timestamp()
         self._refused_targets = {
@@ -1407,6 +1429,7 @@ class PriceOptimizationController:
                 return False
             result = await manager.delete(record.m_id)
             if result.status is not SchedulerTransactionStatus.SUCCESS:
+                self._report_blocked(f"remove {_describe(record)}", result)
                 self._publish("blocked", f"price_delete_{result.reason}")
                 return False
             self.delete_count += 1
@@ -1434,6 +1457,7 @@ class PriceOptimizationController:
                 )
             )
             if result.status is not SchedulerTransactionStatus.SUCCESS:
+                self._report_blocked(f"create {_action_text(action)}", result)
                 self._publish("blocked", f"price_create_{result.reason}")
                 return False
             self.create_count += 1

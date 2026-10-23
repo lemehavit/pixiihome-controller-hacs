@@ -249,3 +249,28 @@ def test_discharge_before_a_fixed_target_is_valued_at_its_refill_price() -> None
     assert _basis(2.0, 0.0, 0.0, 1.5) == 2.0
     assert _basis(None, 3.0, 2.0, 9.0) == 1.5
     assert _basis(None, 0.0, 0.0, 1.7) == 1.7
+
+
+def test_discharge_before_a_planned_charge_is_valued_at_that_charge_price() -> None:
+    # Full battery, expensive now, cheap later: the plan uses the battery now
+    # and refills at 0.2, so the discharge is worth 3.0 - 0.2 / 0.9 per kWh.
+    series = _series([3.0, 3.0, 0.2, 0.2, 3.0])
+    result = _plan(
+        series, lambda start, end: (1.0, 0.0),
+        usable_soc_percent=80.0, grid_import_cost_sek_per_kwh=0.0,
+    )
+    first = next(a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE)
+    assert first.start == series.intervals[0].start
+    assert first.reference_price_sek_per_kwh == pytest.approx(0.2)
+
+
+def test_discharges_below_the_minimum_profit_are_not_written() -> None:
+    # Using the stored energy at 1.1 only pays a few öre per kWh against what
+    # it is worth, far below the 0.5 minimum, so the energy is kept.
+    series = _series([1.1, 1.1, 0.8, 0.8])
+    result = _plan(
+        series, lambda start, end: (1.0, 0.0),
+        usable_soc_percent=80.0, grid_import_cost_sek_per_kwh=0.0,
+    )
+    discharges = [a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE]
+    assert discharges == []

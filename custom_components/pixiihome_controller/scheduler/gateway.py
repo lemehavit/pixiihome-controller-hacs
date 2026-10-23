@@ -28,6 +28,7 @@ from ..protocol.scheduler import (
     scheduler_epoch_to_gateway_wire,
 )
 from .client import AiohttpSchedulerReadClient
+from .manager import SchedulerListResponseTooLargeError
 
 if TYPE_CHECKING:
     from ..runtime import RuntimeData
@@ -62,6 +63,7 @@ _DETAIL_KEYS = {
 }
 _CHANGE_KEYS = {"start_time", "duration"}
 _MAX_INTEGER = 2_147_483_647
+_SOC_SCOPE_ENTRY_LIMIT = 5000
 _GENERAL_SERVICE_WRITE_KEYS = ("soc_lim_en", "ref_delay", "power_share")
 _METER_LIMITATION_WRITE_KEYS = (
     "enabled",
@@ -1014,13 +1016,19 @@ class GatewaySchedulerController:
         return record
 
     async def _soc_targets(self, service_no: int) -> list[dict[str, Any]]:
-        """Bind all schedule references to a shared parameter record, including outside the view."""
+        """Bind all schedule references to a shared parameter record, including outside the view.
+
+        The Gateway keeps its whole history, which outgrew the inventory's
+        100-entry LIST limit, so the scope is read on its own, with a larger
+        limit and without replacing (or invalidating) the inventory.
+        """
         manager = self.runtime.scheduler_manager
         if manager is None:
             raise HomeAssistantError("scheduler_unavailable")
-        entries = await manager.refresh_list(0, _MAX_INTEGER)
-        if len(entries) > 1000:
-            raise HomeAssistantError("scheduler_soc_scope_unverified")
+        try:
+            entries = await manager.read_scope(0, _MAX_INTEGER, limit=_SOC_SCOPE_ENTRY_LIMIT)
+        except SchedulerListResponseTooLargeError as error:
+            raise HomeAssistantError("scheduler_soc_scope_unverified") from error
         return sorted(
             [
                 {

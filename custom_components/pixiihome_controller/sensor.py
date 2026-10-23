@@ -359,6 +359,11 @@ class PixiiPriceOptimizationSensor(SensorEntity):
     _attr_has_entity_name = True
     _attr_translation_key = "price_optimization_status"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    # Live on the entity (dashboards read them) but too large for the
+    # recorder's 16 KB attribute limit, which then dropped all of them.
+    _unrecorded_attributes = frozenset(
+        {"actions", "schedule_timeline", "whole_day_plan", "external_windows"}
+    )
 
     def __init__(self, runtime: RuntimeData, parent_device_id: str | None = None) -> None:
         controller = runtime.price_optimization_controller
@@ -539,6 +544,7 @@ class PixiiSchedulerInventorySensor(SensorEntity):
 
     _attr_has_entity_name = True
     _attr_translation_key = "scheduler_inventory"
+    _unrecorded_attributes = frozenset({"schedules"})
 
     def __init__(self, runtime: RuntimeData, parent_device_id: str | None = None) -> None:
         self.runtime = runtime

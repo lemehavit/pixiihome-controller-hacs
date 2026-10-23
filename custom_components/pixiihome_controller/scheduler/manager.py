@@ -88,6 +88,21 @@ class SchedulerRefreshManager:
         self._list_refresh_successes += 1
         return self._entries
 
+    async def read_scope(
+        self, from_epoch: int, to_epoch: int, *, limit: int
+    ) -> tuple[SchedulerEntry, ...]:
+        """One LIST for a scope check that never replaces the inventory evidence.
+
+        A wide range can list far more schedules than the inventory view, so it
+        has its own limit and a failure does not mark the inventory stale.
+        """
+        entries = tuple(await self._client.list_entries(from_epoch, to_epoch))
+        if len(entries) > limit:
+            raise SchedulerListResponseTooLargeError(
+                "scheduler LIST response exceeded the entry limit"
+            )
+        return entries
+
     async def refresh_detail(self, sch_index: int) -> SchedulerDetail:
         """Refresh the evidenced scheduler DETAIL operation for one index."""
         self._detail_refresh_attempts += 1

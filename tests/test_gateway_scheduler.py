@@ -427,6 +427,7 @@ class Runtime:
         self.production_authority = SimpleNamespace(revision=1)
         self.control_journal = SimpleNamespace(revision=0)
         self.scheduler_manager = self
+        self.scope_reads: list[tuple[int, int, int]] = []
         self.phases: list[JournalPhase] = []
         self.started: dict[str, Any] | None = None
         self.enabled = True
@@ -452,6 +453,10 @@ class Runtime:
             ownership_ambiguous=False,
             mqtt_connected=True,
         )
+
+    async def read_scope(self, start: int, end: int, *, limit: int) -> tuple[Any, ...]:
+        self.scope_reads.append((start, end, limit))
+        return await self.refresh_list(start, end)
 
     async def refresh_list(self, start: int, end: int) -> tuple[Any, ...]:
         if not self.client.present:
@@ -892,6 +897,39 @@ async def test_shared_target_parameter_record_is_never_written() -> None:
     runtime.refresh_list = shared  # type: ignore[method-assign]
 
     with pytest.raises(HomeAssistantError, match="scheduler_external_target_shared"):
+        await _set_target(control)
+
+    assert client.soc["reference"] == 80
+
+
+@pytest.mark.asyncio
+async def test_shared_record_check_reads_its_own_scope_with_a_larger_limit() -> None:
+    runtime, client, control = controller()
+
+    await _set_target(control)
+
+    # The full-history check no longer goes through the inventory LIST, whose
+    # 100-entry limit refused every change and made the inventory stale.
+    assert runtime.scope_reads and all(
+        start == 0 and limit == 5000 for start, _, limit in runtime.scope_reads
+    )
+    assert client.soc["reference"] == 40
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_scope_refuses_the_change_with_its_own_reason() -> None:
+    from custom_components.pixiihome_controller.scheduler.manager import (
+        SchedulerListResponseTooLargeError,
+    )
+
+    runtime, client, control = controller()
+
+    async def too_large(start: int, end: int, *, limit: int):
+        raise SchedulerListResponseTooLargeError("too many")
+
+    runtime.read_scope = too_large  # type: ignore[method-assign]
+
+    with pytest.raises(HomeAssistantError, match="scheduler_soc_scope_unverified"):
         await _set_target(control)
 
     assert client.soc["reference"] == 80
