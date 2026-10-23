@@ -419,6 +419,8 @@ async def test_planner_settles_an_unconfirmed_own_delete_before_new_writes(absen
     assert store.records[M_ID].lifecycle is (
         OwnershipLifecycle.ORPHANED if absent else OwnershipLifecycle.CONFLICTED
     )
+    # A removal confirmed by the post-check counts as one of ours.
+    assert controller.delete_count == (1 if absent else 0)
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.14 — 2026-10-23
+
+- Fix: when price optimization removed one of its own schedules and the
+  Gateway did not confirm the removal at once, the battery activity log said
+  "External schedule removed from the Gateway … This integration did not
+  remove it". Our own records are now recognised in every state, so that line
+  no longer appears for them.
+- The removal is now logged with its reason when it is sent ("Removing …
+  (no longer in the plan): the Gateway did not confirm it"), and a removal
+  that the read-only post-check confirms counts in the deleted schedules
+  counter.
+
 ## 0.5.13 — 2026-10-23
 
 - Fix: lowering an aggregator Target SOC was refused every time with

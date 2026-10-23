@@ -429,9 +429,9 @@ def own_schedule_owner(runtime: Any, schedule: Any) -> str | None:
         return None
     from .price_controller import _record_start
 
+    # Any lifecycle: a record whose removal is still being checked (conflicted)
+    # or already confirmed is still ours, never an external schedule.
     for record in records.values():
-        if getattr(record.lifecycle, "value", None) not in {"owned", "provisional"}:
-            continue
         start = _record_start(record)
         if (
             start is not None

@@ -519,6 +519,8 @@ class PriceOptimizationController:
             self.delete_recovery_reason = None
             self._conflicts_seen.pop(conflicted.m_id, None)
             gone = recovered.lifecycle_after is OwnershipLifecycle.ORPHANED
+            if gone:
+                self.delete_count += 1
             log_activity(
                 self.runtime, PRICE_STATUS,
                 f"Post-check: {_describe(conflicted)} is "
@@ -1429,6 +1431,16 @@ class PriceOptimizationController:
                 return False
             result = await manager.delete(record.m_id)
             if result.status is not SchedulerTransactionStatus.SUCCESS:
+                if not result.blocked_reasons:
+                    # Sent, but the outcome is unknown: say why it was sent; the
+                    # read-only post-check reports how it ended.
+                    log_activity(self.runtime, PRICE_STATUS,
+                                 f"Removing {_describe(record)} (no longer in the plan): "
+                                 f"the Gateway did not confirm it ({result.reason})",
+                                 "Who: price optimization. Why: the plan was recalculated "
+                                 "and this interval is no longer profitable or needed. "
+                                 "Price writes pause until a read-only check shows "
+                                 "whether it is gone; it is never sent again.")
                 self._report_blocked(f"remove {_describe(record)}", result)
                 self._publish("blocked", f"price_delete_{result.reason}")
                 return False
