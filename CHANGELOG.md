@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.17 — 2026-10-23
+
+- Fix: an aggregator Target SOC that price optimization had lowered was never
+  raised again when a later plan kept more energy in the battery, and the
+  aggregator's own value was forgotten at every restart. Lowered targets are
+  now remembered (with the aggregator's value) across restarts, and raised
+  back to the planned level, never above the aggregator's own value, with a
+  logbook entry "Raised aggregator Target SOC …". A target this integration
+  never lowered is never raised.
+
 ## 0.5.16 — 2026-10-23
 
 - Fix: with the whole-day planner, a lowered aggregator Target SOC followed
