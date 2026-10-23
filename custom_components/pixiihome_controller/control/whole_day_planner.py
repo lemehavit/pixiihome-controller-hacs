@@ -273,6 +273,27 @@ def build_whole_day_plan(
         value = updated
 
     level = resets[0][0] if 0 in resets else start_index
+    # Where the plan itself buys energy from the grid, so a discharge before a
+    # planned charge is valued at that charge price, not at an average.
+    grid_charge: list[bool] = []
+    probe = level
+    for index in range(count):
+        delta = choice[index][probe]
+        _, battery = slot_cost(index, delta, decision=False)
+        load, solar = flows[index]
+        grid_charge.append(battery > max(0.0, solar - load) + 0.05)
+        probe += delta
+        if index + 1 in resets:
+            probe = resets[index + 1][0]
+    planned_refill: list[float | None] = []
+    upcoming = None
+    for index in range(count - 1, -1, -1):
+        if index + 1 in resets:
+            upcoming = None
+        planned_refill.append(upcoming)
+        if grid_charge[index]:
+            upcoming = candidates[index].price_sek_per_kwh
+    planned_refill.reverse()
     slots: list[WholeDaySlot] = []
     actions: list[PricePlanAction] = []
     baseline = planned = 0.0
@@ -307,7 +328,11 @@ def build_whole_day_plan(
             item, load, solar, battery, soc,
             maximum_discharge_kw=maximum_discharge_kw,
             step_kw=step / (eta * item.duration_hours),
-            reference=_basis(next_refill[index], charged_cost, charged_energy, mean_price),
+            reference=_basis(
+                planned_refill[index] if planned_refill[index] is not None
+                else next_refill[index],
+                charged_cost, charged_energy, mean_price,
+            ),
             round_trip=rt,
             grid_import_cost=gic,
             cycle_cost=cycle_cost_sek_per_kwh,
@@ -317,7 +342,9 @@ def build_whole_day_plan(
             grid_part = (battery - max(0.0, -net)) * item.duration_hours
             charged_energy += grid_part
             charged_cost += grid_part * item.price_sek_per_kwh
-        if action is not None:
+        if action is not None and _meets_minimum(
+            action, minimum_difference_sek_per_kwh, export_minimum_difference_sek_per_kwh
+        ):
             actions.append(action)
     margin_total += terminal_value * (level * step - first_energy)
     for window in windows:
@@ -409,6 +436,18 @@ def _action(
             price - basis, soc, margin, margin / delivered,
         )
     return None
+
+
+def _meets_minimum(action: PricePlanAction, minimum: float, export_minimum: float) -> bool:
+    """A discharge is only written when its own cycle reaches your minimum.
+
+    The energy is then simply kept; the battery ends up fuller than planned,
+    never emptier.
+    """
+    if action.direction is not PriceDirection.DISCHARGE:
+        return True
+    required = export_minimum if action.discharge_mode is PriceDischargeMode.EXPORT else minimum
+    return action.net_profit_sek_per_kwh + 1e-9 >= required
 
 
 def _basis(

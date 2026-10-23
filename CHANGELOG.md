@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.13 — 2026-10-23
+
+- Fix: lowering an aggregator Target SOC was refused every time with
+  "scheduler LIST response exceeded the entry limit". The check that no other
+  schedule shares the target record read the whole Gateway history through
+  the normal schedule list, which allows 100 entries. It now reads that scope
+  separately (up to 5000 entries) and no longer marks the schedule list as
+  stale when it is too large.
+- Fix: that failed list also made the schedule list count as stale, which
+  blocked all new price schedules for about an hour without saying why
+  (`price_create_safety_blocked`). A blocked write now logs which safety
+  checks stopped it, once, and shows them in the attribute `blocked_details`.
+- Fix: with the whole-day planner, a discharge is only written when its own
+  profit reaches your minimum (self-use or export). A 19:00 slot that netted
+  0.21 kr/kWh against a 1.00 kr minimum was written before.
+- Fix: a discharge before a charge the plan itself makes is valued against
+  that charge price instead of an average price.
+- The large plan and schedule-list attributes are no longer stored in the
+  recorder (they exceeded 16 KB, so Home Assistant dropped all of them). They
+  are still on the entities for dashboards.
+
 ## 0.5.12 — 2026-10-22
 
 - Fix: when an aggregator Target SOC could not be changed, price
