@@ -300,13 +300,18 @@ def build_whole_day_plan(
     charged_energy = charged_cost = 0.0
     margin_total = 0.0
     first_energy = level * step
+    # The energy the battery really holds when only the written actions run: a
+    # discharge kept back by the minimum profit stays in the battery. Lowered
+    # aggregator targets follow this, never the unwritten trajectory, or the
+    # aggregator's Target SOC would empty the battery for the plan.
+    kept = first_energy
     window_socs: dict[datetime, float] = {}
     for index, item in enumerate(candidates):
         for window in windows:
             if window.adjustable and window.start not in window_socs and (
                 window.start <= item.start
             ):
-                window_socs[window.start] = level * step / usable_capacity_kwh * 100
+                window_socs[window.start] = kept / usable_capacity_kwh * 100
         delta = choice[index][level]
         cost, battery = slot_cost(index, delta, decision=False)
         base_cost, _ = slot_cost(index, 0, decision=False)
@@ -342,14 +347,19 @@ def build_whole_day_plan(
             grid_part = (battery - max(0.0, -net)) * item.duration_hours
             charged_energy += grid_part
             charged_cost += grid_part * item.price_sek_per_kwh
-        if action is not None and _meets_minimum(
+        written = action is not None and _meets_minimum(
             action, minimum_difference_sek_per_kwh, export_minimum_difference_sek_per_kwh
-        ):
+        )
+        if action is not None and written:
             actions.append(action)
+        if delta > 0 or written:
+            kept = min(levels * step, max(0.0, kept + delta * step))
+        if index + 1 in resets:
+            kept = level * step
     margin_total += terminal_value * (level * step - first_energy)
     for window in windows:
         if window.adjustable:
-            window_socs.setdefault(window.start, level * step / usable_capacity_kwh * 100)
+            window_socs.setdefault(window.start, kept / usable_capacity_kwh * 100)
     socs = [usable_soc_percent, *(slot.usable_soc_percent for slot in slots)]
     payload = {
         "series": series.fingerprint,

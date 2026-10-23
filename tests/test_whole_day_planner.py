@@ -274,3 +274,21 @@ def test_discharges_below_the_minimum_profit_are_not_written() -> None:
     )
     discharges = [a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE]
     assert discharges == []
+
+
+def test_lowered_targets_follow_only_the_discharges_that_are_written() -> None:
+    # The DP would use the full battery at 1.1, but that is below the minimum
+    # profit, so nothing is written. The aggregator's later Target SOC must
+    # then not be lowered as if the battery had been used, or the aggregator
+    # itself would empty it.
+    series = _series([1.1, 1.1, 0.8, 0.8])
+    window = ExternalWindow(
+        series.intervals[2].start, series.intervals[2].end, 100.0, adjustable=True
+    )
+    result = _plan(
+        series, lambda start, end: (1.0, 0.0),
+        usable_soc_percent=80.0, grid_import_cost_sek_per_kwh=0.0,
+        external_windows=(window,),
+    )
+    assert not [a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE]
+    assert dict(result.plan.window_socs)[window.start] == pytest.approx(80.0, abs=1.0)
