@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from custom_components.pixiihome_controller.battery_activity import BatteryActivityTracker
 from custom_components.pixiihome_controller.scheduler.models import (
     Ownership,
@@ -131,11 +133,14 @@ def test_new_and_removed_external_schedules_are_logged() -> None:
     assert "removed" in runtime.events[-1]["message"]
 
 
-def test_our_own_price_schedule_is_not_reported_as_external() -> None:
+@pytest.mark.parametrize("lifecycle", ["owned", "provisional", "conflicted", "orphaned"])
+def test_our_own_price_schedule_is_not_reported_as_external(lifecycle) -> None:
+    # A conflicted record is ours while its removal is checked; its
+    # disappearance must not be logged as removed by someone else.
     start = NOW + timedelta(hours=1)
     ours = _schedule(start, 45, 104, None)
     record = SimpleNamespace(
-        lifecycle=SimpleNamespace(value="owned"),
+        lifecycle=SimpleNamespace(value=lifecycle),
         owner="automatic_price_optimization",
         service="peakshaving",
         intended_state={"starttime": start.strftime("%Y-%m-%dT%H:%M:%SZ"), "duration": 2700},
@@ -146,6 +151,9 @@ def test_our_own_price_schedule_is_not_reported_as_external() -> None:
     tracker = _tracker(runtime, clock)
     tracker.sample()
     runtime.scheduler_coordinator.last_good_snapshot = SimpleNamespace(schedules=(ours,))
+    clock[0] += timedelta(seconds=15)
+    tracker.sample()
+    runtime.scheduler_coordinator.last_good_snapshot = SimpleNamespace(schedules=())
     clock[0] += timedelta(seconds=15)
     tracker.sample()
     assert runtime.events == []
