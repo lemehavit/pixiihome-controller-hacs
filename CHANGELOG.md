@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.16 — 2026-10-23
+
+- Fix: with the whole-day planner, a lowered aggregator Target SOC followed
+  the planner's full trajectory, including discharges that are never written
+  because they stay below your minimum profit. On 23 October the 20–21 and
+  22–23 targets were lowered to 76 % and 71 % for such a discharge; the
+  aggregator's Target SOC could then have emptied the battery to the grid at
+  about 1.2–1.4 kr/kWh, below your export minimum. Targets now follow only the
+  actions that are written: energy that is kept back stays in the battery.
+
 ## 0.5.15 — 2026-10-23
 
 - Fix: when the battery ran an aggregator schedule, Battery activity said
