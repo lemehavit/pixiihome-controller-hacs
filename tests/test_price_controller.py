@@ -853,3 +853,33 @@ def test_saved_lowered_targets_skip_ended_and_malformed_rows():
     rows = [[4596, 3, future, 3600, 90], [1, 2, 100, 60, 80], ["x", 2, future, 60, 80], 5]
     assert _lowered_targets_from(rows) == {(4596, 3, future, 3600): 90.0}
     assert _lowered_targets_from(None) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_passing_safety_refusal_is_tried_again_next_pass():
+    # 23 Oct: an unconfirmed removal briefly made the ownership store invalid;
+    # that refusal was kept until the window ended and the evening peak
+    # discharge was never written again.
+    from homeassistant.exceptions import HomeAssistantError
+
+    instance, _ = runtime()
+    _, calls = _aggregator_day(instance, adjust=True)
+    answers = ["refuse", "adjust"]
+
+    async def setter(**kwargs):
+        calls.append(kwargs)
+        if answers.pop(0) == "refuse":
+            raise HomeAssistantError(
+                "scheduler_ownership_store_invalid, scheduler_ownership_ambiguous"
+            )
+        return {"status": "adjusted"}
+
+    instance.gateway_scheduler.set_external_target_soc = setter
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+    first = len(calls)
+    await controller.tick()
+
+    assert first == 1 and len(calls) == 2
+    assert controller.external_target_adjust_count == 1

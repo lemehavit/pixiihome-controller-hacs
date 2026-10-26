@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.18 — 2026-10-26
+
+- Fix: the 25-hour day when summer time ends stopped price optimization
+  for about 35 hours (`price_interval_invalid`, Sat 24 Oct 13:10 until Mon
+  00:00), and "Battery savings" showed 0.00 kr for that Sunday. A price list
+  where an interval ends before it starts, the repeated hour appears twice at
+  the same instant, or that hour is missing is now mended instead of
+  rejected.
+- Fix: a refused change of an aggregator Target SOC was planned around until
+  that window ended, even when the reason was only momentary (the ownership
+  check right after an unconfirmed removal). On 23 Oct this replaced the
+  17:00–19:45 discharge with "nothing planned" for the evening peak. Only
+  lasting reasons are kept now; others are tried again on the next pass.
+- Every new reason for "blocked" is written to the Home Assistant log at
+  once.
+- "Nothing planned" no longer says the best price pair is below your minimum
+  when it is above it; it then says that SOC limits, house load or fixed
+  aggregator windows leave no room.
+- "Next price-optimized charge/discharge" no longer flips between a time and
+  unknown at every planning pass.
+
 ## 0.5.17 — 2026-10-23
 
 - Fix: an aggregator Target SOC that price optimization had lowered was never

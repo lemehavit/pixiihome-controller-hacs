@@ -94,6 +94,10 @@ class PriceOptimizationController:
         # Foreign targets the Gateway side refused to change, with the reason.
         # They are planned as fixed until they end, and logged once.
         self._refused_targets: dict[tuple[int, int, int, int], str] = {}
+        # Refusals caused by a passing state (a safety check, a list being
+        # refreshed) only hold for the pass they happened in.
+        self._transient_refusals: set[tuple[int, int, int, int]] = set()
+        self._logged_block_reason: str | None = None
         # Safety checks that last stopped a schedule write (logged once).
         self.blocked_details: list[str] = []
         self._reported_block: tuple[str, ...] = ()
@@ -140,6 +144,14 @@ class PriceOptimizationController:
     def _track_problem(self, status: str, reason: str | None) -> None:
         """Notify once when planning has been blocked longer than the set limit."""
         now = datetime.now(UTC)
+        if status == "blocked" and reason != self._logged_block_reason:
+            # Every new block is in the Home Assistant log at once, not only
+            # after the notification limit.
+            self._logged_block_reason = reason
+            _LOGGER.warning("Price optimization blocked: %s (%s)", reason,
+                            reason_text(reason) if reason else "")
+        elif status != "blocked":
+            self._logged_block_reason = None
         if status not in {"blocked", "waiting_telemetry"}:
             if self.problem_notified:
                 _dismiss_notification(self.runtime)
@@ -194,11 +206,26 @@ class PriceOptimizationController:
             log_activity(self.runtime, PRICE_STATUS,
                          f"Nothing planned ({engine} planner): no future prices to compare")
             return
+        if best + 1e-9 >= minimum:
+            # The prices would pay, so something else leaves no room for it.
+            log_activity(
+                self.runtime, PRICE_STATUS,
+                f"Nothing planned ({engine} planner): the best charge-then-use price pair "
+                f"would give about {best:.2f} kr/kWh (your minimum is {minimum:.2f}), but "
+                "the battery's SOC limits, the expected house load or fixed aggregator "
+                "Target SOC windows leave no room for it",
+                "Who: price optimization. Why: a profitable price pair exists, but the "
+                "battery cannot both take and use the energy around it: it is already at "
+                "a SOC limit, the house would not use it in the expensive hours, or an "
+                "aggregator Target SOC window that cannot be changed refills or holds the "
+                "battery in between.",
+            )
+            return
         log_activity(
             self.runtime, PRICE_STATUS,
             f"Nothing planned ({engine} planner): the best charge-then-use price pair "
-            f"gives about {best:.2f} kr/kWh net profit after losses, your minimum is "
-            f"{minimum:.2f} kr/kWh (or the battery is already at its SOC limits)",
+            f"gives about {best:.2f} kr/kWh net profit after losses, below your minimum "
+            f"of {minimum:.2f} kr/kWh",
             "Who: price optimization. Why: no charge-then-use pair in the price horizon "
             "pays enough after losses and costs. Lower Minimum net profit for "
             "self-consumption, or wait for a day with a larger price difference.",
@@ -655,7 +682,11 @@ class PriceOptimizationController:
         except ValueError as error:
             self._publish("blocked", str(error))
             return
-        self.plan = plan
+        if self.plan is None or not plan.ready:
+            # This first plan ignores the aggregator's windows; showing it
+            # between passes made "next charge" flip between a time and unknown,
+            # so the last complete plan stays visible until the new one is done.
+            self.plan = plan
         self.last_planned_at = datetime.now(UTC)
         current_time = datetime.now(UTC)
         current_interval = next(
@@ -1413,13 +1444,17 @@ class PriceOptimizationController:
                 # One entry per reason: the same cause usually hits every target.
                 repeated = reason in self._refused_targets.values()
                 self._refused_targets[key] = reason
+                if not _lasting_refusal(reason):
+                    self._transient_refusals.add(key)
                 _LOGGER.warning(
                     "Aggregator Target SOC %s could not be changed: %s", when, reason
                 )
                 if not repeated:
                     log_activity(self.runtime, PRICE_STATUS,
                                  f"Aggregator Target SOC {when} cannot be changed "
-                                 f"({reason}); it is kept and the plan is made around it",
+                                 f"({reason}); it is kept and the plan is made around it"
+                                 + ("" if _lasting_refusal(reason)
+                                    else "; the next pass tries again"),
                                  "Who: price optimization, with Allow changing aggregator "
                                  "schedules on. Why: the change was refused before anything "
                                  "was sent, so the aggregator target stays as it is and the "
@@ -1456,8 +1491,9 @@ class PriceOptimizationController:
         now = datetime.now(UTC).timestamp()
         self._refused_targets = {
             key: reason for key, reason in self._refused_targets.items()
-            if key[2] + key[3] > now
+            if key[2] + key[3] > now and key not in self._transient_refusals
         }
+        self._transient_refusals.clear()
 
     async def _reconcile(self, actions: tuple[PricePlanAction, ...]) -> bool:
         manager = self.runtime.scheduler_mutation_manager
@@ -1582,6 +1618,23 @@ def best_net_profit(
         best = profit if best is None else max(best, profit)
         cheapest = min(cheapest, price)
     return best
+
+
+# Refusals that stay true for the target's lifetime. Anything else (the
+# safety policy, an ownership check after an unconfirmed removal, a list that
+# could not be read) can clear by the next pass, so it is retried then.
+_LASTING_TARGET_REFUSALS = frozenset({
+    "scheduler_external_target_shared",
+    "scheduler_external_target_identity_invalid",
+    "scheduler_external_target_reference_invalid",
+    "scheduler_soc_service_unsupported",
+    "scheduler_soc_value_invalid",
+    "scheduler_installer_access_required",
+})
+
+
+def _lasting_refusal(reason: str) -> bool:
+    return any(part.strip() in _LASTING_TARGET_REFUSALS for part in reason.split(","))
 
 
 def _target_key(schedule: Any) -> tuple[int, int, int, int]:
