@@ -720,14 +720,44 @@ def _greenely_intervals(
 def _timestamped_intervals(
     raw_items: Sequence[Mapping[str, Any]], factor: float
 ) -> tuple[PriceInterval, ...]:
-    result: list[PriceInterval] = []
+    rows: list[tuple[datetime, datetime, float]] = []
     for item in raw_items:
         start = _aware_datetime(item.get("start") or item.get("start_time"))
         raw_end = item.get("end") or item.get("end_time")
         end = _aware_datetime(raw_end) if raw_end is not None else start + timedelta(hours=1)
         raw_price = item.get("price", item.get("value"))
-        result.append(PriceInterval(start, end, _price(raw_price) * factor))
-    return tuple(result)
+        rows.append((start.astimezone(UTC), end.astimezone(UTC), _price(raw_price) * factor))
+    return _contiguous(rows)
+
+
+def _contiguous(rows: list[tuple[datetime, datetime, float]]) -> tuple[PriceInterval, ...]:
+    """Mend what a daylight-saving day can break in a price list.
+
+    On the 25-hour day, price sources have produced intervals whose end is not
+    after their start, the repeated hour twice at the same instant, or a gap
+    where it should be. That stopped planning for the whole day. An interval
+    without a valid end ends where the next begins (or after the usual
+    length), a second interval at the same instant is dropped, overlaps are
+    cut and a gap of at most an hour is covered by the interval before it.
+    """
+    rows = sorted(rows, key=lambda row: row[0])
+    lengths = sorted(end - start for start, end, _ in rows if end > start)
+    usual = lengths[len(lengths) // 2] if lengths else timedelta(hours=1)
+    starts = [start for start, _, _ in rows]
+    mended: list[list[Any]] = []
+    for index, (start, end, price) in enumerate(rows):
+        if mended and start == mended[-1][0]:
+            continue
+        following = next((later for later in starts[index + 1:] if later > start), None)
+        if end <= start:
+            end = following if following is not None and following - start <= usual \
+                else start + usual
+        elif following is not None and end > following:
+            end = following
+        if mended and timedelta(0) < start - mended[-1][1] <= timedelta(hours=1):
+            mended[-1][1] = start
+        mended.append([start, end, price])
+    return tuple(PriceInterval(start, end, price) for start, end, price in mended)
 
 
 def _greenely_wall_time(date_value: str, time_value: str) -> datetime:

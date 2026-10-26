@@ -360,3 +360,43 @@ def test_held_window_keeps_energy_and_reports_its_planned_soc() -> None:
     assert held < 60  # discharged before the window and not refilled by it
     after = [a for a in result.actions if a.start >= window.end]
     assert any(a.direction is PriceDirection.CHARGE for a in after)
+
+
+def _dst_day(broken):
+    """Sun 25 Oct 2026, 100 quarter hours in UTC, written as Nord Pool does."""
+    stockholm = ZoneInfo("Europe/Stockholm")
+    first = datetime(2026, 10, 24, 22, 0, tzinfo=UTC)
+    items = []
+    for index in range(100):
+        start = first + timedelta(minutes=15 * index)
+        items.append({
+            "start": start.astimezone(stockholm).isoformat(),
+            "end": (start + timedelta(minutes=15)).astimezone(stockholm).isoformat(),
+            "value": 0.1 + index / 1000,
+        })
+    return broken(items) or items
+
+
+@pytest.mark.parametrize("broken", [
+    lambda items: None,
+    # The last summer-time quarter ends "02:00" on the wrong offset: before it starts.
+    lambda items: items[19].update(end="2026-10-25T02:00:00+02:00"),
+    # A quarter whose end equals its start.
+    lambda items: items[20].update(end=items[20]["start"]),
+    # The repeated hour written twice with the same offset.
+    lambda items: [
+        *items[:24],
+        *[{**item, "start": items[16 + n]["start"], "end": items[16 + n]["end"]}
+          for n, item in enumerate(items[24:28])],
+        *items[28:],
+    ],
+    # The repeated hour missing.
+    lambda items: [*items[:20], *items[24:]],
+])
+def test_the_25_hour_day_never_stops_planning(broken) -> None:
+    series = normalize_price_series({"raw_today": _dst_day(broken)}, "SEK/kWh")
+    intervals = series.intervals
+    assert intervals[0].start == datetime(2026, 10, 24, 22, 0, tzinfo=UTC)
+    assert intervals[-1].end == datetime(2026, 10, 25, 23, 0, tzinfo=UTC)
+    assert all(a.end == b.start for a, b in zip(intervals, intervals[1:], strict=False))
+    assert all(item.end > item.start for item in intervals)
