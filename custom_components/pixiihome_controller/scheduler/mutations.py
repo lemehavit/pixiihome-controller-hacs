@@ -241,6 +241,8 @@ ControlPolicyProvider = Callable[[ControlOperation], ControlPolicyInput]
 SchedulerOwnershipPersistence = Callable[[dict[str, Any]], Awaitable[None] | None]
 SchedulerTransactionIdFactory = Callable[[], str]
 PriceStopVerifier = Callable[[datetime, datetime | None], Awaitable[bool]]
+# Clock margin past a one-shot schedule's end before its DELETE outcome is moot.
+_ENDED_DELETE_MARGIN = timedelta(minutes=5)
 
 
 @dataclass(slots=True)
@@ -526,6 +528,31 @@ class SchedulerMutationManager:
             readback, failure = await self._execute_get(
                 ScheduledGet(m_id=record.m_id, expected_service=record.service).build()
             )
+            # A one-shot schedule whose whole interval has passed can no longer
+            # run, whether or not the DELETE took. Keep its identity reserved
+            # (never reused, never re-sent) instead of blocking writes forever.
+            ended_at = expected.starttime + timedelta(seconds=expected.duration)
+            if (
+                datetime.now(UTC) >= ended_at + _ENDED_DELETE_MARGIN
+                and not absent_from_inventory
+                and (
+                    failure is not None or readback is None
+                    or reconcile_scheduler_delete(readback, expected_m_id=record.m_id).status
+                    is not SchedulerReconciliationStatus.ABSENT
+                )
+            ):
+                return self._finish(await self._persist_recovery_result(
+                    record,
+                    replace(record, lifecycle=OwnershipLifecycle.EXPIRED_RESERVED,
+                            reservation_until=ended_at.isoformat()),
+                    SchedulerReconciliationResult(
+                        SchedulerReconciliationStatus.AMBIGUOUS,
+                        "interval_ended_delete_outcome_moot",
+                        subject_m_id=record.m_id,
+                        subject_service=record.service,
+                    ),
+                    operation=operation,
+                ))
             if failure is not None or readback is None:
                 if not absent_from_inventory:
                     return self._local_failure(operation, record.m_id, record.service, record,

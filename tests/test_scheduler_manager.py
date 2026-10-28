@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -40,6 +40,7 @@ from custom_components.pixiihome_controller.scheduler.ownership import (
     OwnershipLifecycle,
     SchedulerOwnershipRecord,
     SchedulerOwnershipStore,
+    scheduler_expected_state_from_record,
 )
 
 from .conftest import load_json
@@ -1114,3 +1115,48 @@ async def test_conflict_recovery_ignores_schedules_not_owned_by_price_optimizati
 
     assert result.reason == "price_delete_recovery_not_applicable"
     assert executor.get_commands == []
+
+
+def _move_start(store: Any, start: datetime) -> datetime:
+    # The clock moves on after the DELETE; shift the schedule into the past.
+    record = store.records[M_ID]
+    expected = replace(scheduler_expected_state_from_record(record), starttime=start)
+    store.records[M_ID] = replace(record, intended_state=expected.as_mapping())
+    return start.replace(microsecond=0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("readback", [TimeoutError(), "present"])
+async def test_unconfirmed_price_delete_settles_once_its_interval_has_ended(readback) -> None:
+    # 28 Oct: a 15:30 charge's DELETE was never confirmed and the keyed GET
+    # kept failing, so every price write stayed blocked long after it ended.
+    get = _demandresponse_get() if readback == "present" else readback
+    executor, store, allocator, manager_instance = _timed_out_price_delete([get])
+    await manager_instance.delete(M_ID)
+    assert store.records[M_ID].lifecycle is OwnershipLifecycle.CONFLICTED
+    start = _move_start(store, datetime.now(UTC) - timedelta(hours=2))
+
+    recovered = await manager_instance.recover_conflicted_price_delete(M_ID)
+
+    assert recovered.status is SchedulerTransactionStatus.SUCCESS
+    record = store.records[M_ID]
+    assert record.lifecycle is OwnershipLifecycle.EXPIRED_RESERVED
+    assert record.reservation_until == (start + timedelta(hours=1)).isoformat()
+    assert M_ID in allocator.owned_ids  # never reused
+    assert len(executor.mutation_commands) == 1  # never re-sent
+    journal = manager_instance.journal
+    assert isinstance(journal, InMemoryJournalPort)
+    assert journal.journal.transactions[-1].phase is JournalPhase.RECONCILED
+    assert not store.has_unresolved_records()
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_price_delete_waits_while_its_interval_is_running() -> None:
+    executor, store, _, manager_instance = _timed_out_price_delete([TimeoutError()])
+    await manager_instance.delete(M_ID)
+    _move_start(store, datetime.now(UTC) - timedelta(minutes=30))
+
+    recovered = await manager_instance.recover_conflicted_price_delete(M_ID)
+
+    assert recovered.status is not SchedulerTransactionStatus.SUCCESS
+    assert store.records[M_ID].lifecycle is OwnershipLifecycle.CONFLICTED
