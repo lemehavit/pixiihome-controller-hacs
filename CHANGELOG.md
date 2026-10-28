@@ -10,6 +10,13 @@
   2 kr export minimum. A refill by a fixed aggregator Target SOC now
   carries the same minimum-profit hurdle as the plan's own grid charges, so
   the plan, its segments and its expected money match what is written.
+- Change: when the plan has no charge of its own after a discharge, the
+  aggregator Target SOC windows are now held (lowered) up to the cheapest
+  later aggregator refill in the horizon, not only up to the last
+  discharge. On 29 Oct only 18-19 was held, so the 20-21 window refilled
+  at 4.36 kr and the export did not pay; holding 20-21 lets the 22-23
+  window refill at 3.58 instead. Only when "Allow changing aggregator
+  schedules" is on.
 - Test: the planner settles an ended, unconfirmed own DELETE end to end.
 
 ## 0.5.19 — 2026-10-28
