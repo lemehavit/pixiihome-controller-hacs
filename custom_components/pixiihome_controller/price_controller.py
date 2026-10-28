@@ -547,17 +547,23 @@ class PriceOptimizationController:
             self.delete_recovery_reason = None
             self._conflicts_seen.pop(conflicted.m_id, None)
             gone = recovered.lifecycle_after is OwnershipLifecycle.ORPHANED
+            ended = recovered.lifecycle_after is OwnershipLifecycle.EXPIRED_RESERVED
             if gone:
                 self.delete_count += 1
             log_activity(
                 self.runtime, PRICE_STATUS,
                 f"Post-check: {_describe(conflicted)} is "
-                + ("confirmed removed" if gone else "still in place and unchanged"),
+                + ("confirmed removed" if gone
+                   else "over, so its removal no longer matters" if ended
+                   else "still in place and unchanged"),
                 "Who: price optimization. Why: the Gateway never confirmed an earlier "
-                "removal, so all price writes were paused. A read-only check of the "
-                "schedule settled it"
-                + (" and the pause is lifted." if gone
-                   else "; the plan decides what to do with it."),
+                "removal, so all price writes were paused. "
+                + ("Its time has passed and a one-shot schedule cannot run again, so "
+                   "its ID is kept reserved (never reused or re-sent) and the pause "
+                   "is lifted." if ended
+                   else "A read-only check of the schedule settled it"
+                   + (" and the pause is lifted." if gone
+                      else "; the plan decides what to do with it.")),
             )
 
     def _absent_from_inventory(self, record: SchedulerOwnershipRecord, seen: datetime) -> bool:

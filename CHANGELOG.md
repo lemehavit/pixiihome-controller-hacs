@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.19 — 2026-10-28
+
+- Fix: when the Gateway did not confirm the removal of one of our own price
+  schedules and the read-only post-check could not settle it before that
+  schedule started, every price write stayed blocked indefinitely
+  (`scheduler_ownership_store_invalid`, Control Recovery "required"). On 28
+  Oct this hit a 15:30-15:45 charge and blocked tomorrow evening's export.
+  Once a one-shot schedule's whole interval has passed (plus 5 minutes) it
+  cannot run again, so its outcome no longer matters: the identity is kept
+  reserved (`expired_reserved`, never reused or re-sent) and the block lifts.
+  Nothing is sent to the Gateway; the activity log says why.
+
 ## 0.5.18 — 2026-10-26
 
 - Fix: the 25-hour day when summer time ends stopped price optimization
