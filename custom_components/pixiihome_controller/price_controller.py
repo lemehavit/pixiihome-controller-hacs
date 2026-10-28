@@ -1269,7 +1269,19 @@ class PriceOptimizationController:
              if a.direction is PriceDirection.CHARGE and a.start >= discharges[0].end),
             None,
         )
-        until = recharge.start if recharge is not None else max(a.end for a in discharges)
+        if recharge is not None:
+            until = recharge.start
+        else:
+            # No own charge: the battery is refilled by a later aggregator
+            # window. Hold the windows up to the cheapest of them, so the
+            # energy is bought back there instead of at the first, often
+            # still expensive one.
+            last = max(a.end for a in discharges)
+            later = [w for w in self._external_windows if w.start >= last]
+            until = (
+                min(later, key=lambda w: (_window_price(series, w), w.start)).start
+                if later else last
+            )
         return tuple(
             replace(window, adjustable=flag and discharges[0].start <= window.start < until)
             for window, flag in zip(self._external_windows, eligible, strict=True)
@@ -1641,6 +1653,13 @@ _LASTING_TARGET_REFUSALS = frozenset({
 
 def _lasting_refusal(reason: str) -> bool:
     return any(part.strip() in _LASTING_TARGET_REFUSALS for part in reason.split(","))
+
+
+def _window_price(series: PriceSeries, window: ExternalWindow) -> float:
+    """Mean price while an external window runs (unknown prices sort last)."""
+    inside = [item.price_sek_per_kwh for item in series.intervals
+              if item.start < window.end and window.start < item.end]
+    return sum(inside) / len(inside) if inside else float("inf")
 
 
 def _target_key(schedule: Any) -> tuple[int, int, int, int]:

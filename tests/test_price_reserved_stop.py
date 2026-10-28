@@ -458,3 +458,23 @@ async def test_unanswered_get_is_settled_by_a_later_complete_list_without_the_sc
         OwnershipLifecycle.CONFLICTED if listed else OwnershipLifecycle.ORPHANED
     )
     assert controller.status == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_planner_settles_an_unconfirmed_delete_whose_interval_has_ended():
+    from .test_scheduler_manager import _move_start, _timed_out_price_delete
+
+    executor, store, _, real_manager = _timed_out_price_delete([TimeoutError()])
+    await real_manager.delete(M_ID)
+    _move_start(store, datetime.now(UTC) - timedelta(hours=7))
+    instance, fake_mutations = runtime()
+    instance.scheduler_ownership = store
+    instance.scheduler_mutation_manager = fake_mutations
+    fake_mutations.recover_conflicted_price_delete = AsyncMock(
+        side_effect=real_manager.recover_conflicted_price_delete
+    )
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    assert controller.delete_recovery_reason is None
+    assert store.records[M_ID].lifecycle is OwnershipLifecycle.EXPIRED_RESERVED
+    assert len(executor.mutation_commands) == 1

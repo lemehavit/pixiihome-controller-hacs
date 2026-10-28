@@ -292,3 +292,38 @@ def test_lowered_targets_follow_only_the_discharges_that_are_written() -> None:
     )
     assert not [a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE]
     assert dict(result.plan.window_socs)[window.start] == pytest.approx(80.0, abs=1.0)
+
+
+def test_the_plan_does_not_export_what_a_fixed_target_buys_back_below_the_minimum() -> None:
+    # 29 Oct: selling at about 7.1 kr when the aggregator's later Target SOC
+    # buys the energy back at 4.36 nets about 1.3 kr/kWh, below the 2 kr
+    # export minimum. The plan showed a 75-minute export (and its money) that
+    # the minimum then kept from being written.
+    series = _series([7.1, 7.1, 4.36, 3.0])
+    window = ExternalWindow(series.intervals[2].start, series.intervals[2].end, 90.0)
+    result = _plan(
+        series, lambda start, end: (0.5, 0.0),
+        usable_soc_percent=90.0, maximum_discharge_kw=10.0,
+        minimum_difference_sek_per_kwh=1.0, export_allowed=True,
+        export_minimum_difference_sek_per_kwh=2.0, cycle_cost_sek_per_kwh=0.3,
+        grid_import_cost_sek_per_kwh=0.65, external_windows=(window,),
+    )
+    assert "export" not in {slot.kind for slot in result.slots}
+    discharges = [a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE]
+    assert discharges
+    assert all(a.discharge_mode is PriceDischargeMode.SELF_CONSUMPTION for a in discharges)
+
+
+def test_the_plan_still_exports_when_the_buy_back_leaves_enough() -> None:
+    series = _series([9.0, 9.0, 4.36, 3.0])
+    window = ExternalWindow(series.intervals[2].start, series.intervals[2].end, 90.0)
+    result = _plan(
+        series, lambda start, end: (0.5, 0.0),
+        usable_soc_percent=90.0, maximum_discharge_kw=10.0,
+        minimum_difference_sek_per_kwh=1.0, export_allowed=True,
+        export_minimum_difference_sek_per_kwh=2.0, cycle_cost_sek_per_kwh=0.3,
+        grid_import_cost_sek_per_kwh=0.65, external_windows=(window,),
+    )
+    assert any(
+        a.discharge_mode is PriceDischargeMode.EXPORT for a in result.plan.actions
+    )

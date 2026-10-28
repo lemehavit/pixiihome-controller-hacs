@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.20 — 2026-10-28
+
+- Fix: the whole-day plan showed exports (and their money) that the export
+  minimum then kept from being written. On 29 Oct it showed a 17:00-18:15
+  export and 89 kr, while only two 15-minute house-load discharges were
+  written: the aggregator's 20-21 Target SOC buys the energy back at 4.36
+  kr, so selling at 7.1-7.35 nets only about 1.3-1.5 kr/kWh, below the
+  2 kr export minimum. A refill by a fixed aggregator Target SOC now
+  carries the same minimum-profit hurdle as the plan's own grid charges, so
+  the plan, its segments and its expected money match what is written.
+- Change: when the plan has no charge of its own after a discharge, the
+  aggregator Target SOC windows are now held (lowered) up to the cheapest
+  later aggregator refill in the horizon, not only up to the last
+  discharge. On 29 Oct only 18-19 was held, so the 20-21 window refilled
+  at 4.36 kr and the export did not pay; holding 20-21 lets the 22-23
+  window refill at 3.58 instead. Only when "Allow changing aggregator
+  schedules" is on.
+- Test: the planner settles an ended, unconfirmed own DELETE end to end.
+
 ## 0.5.19 — 2026-10-28
 
 - Fix: when the Gateway did not confirm the removal of one of our own price

@@ -247,8 +247,13 @@ def build_whole_day_plan(
         if index + 1 in resets:
             target, price = resets[index + 1]
             after = value[target]
+            # The refill is a grid charge like the plan's own: it carries the
+            # same minimum-profit hurdle, so the plan never counts on a
+            # discharge that the minimum would keep from being written.
             value = [
-                after + max(0, target - level) * step / eta * (price + gic)
+                after + max(0, target - level) * step * (
+                    (price + gic) / eta + eta * minimum_difference_sek_per_kwh
+                )
                 for level in range(levels + 1)
             ]
         updated = [infinity] * (levels + 1)

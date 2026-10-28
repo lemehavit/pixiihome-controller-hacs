@@ -883,3 +883,47 @@ async def test_a_passing_safety_refusal_is_tried_again_next_pass():
 
     assert first == 1 and len(calls) == 2
     assert controller.external_target_adjust_count == 1
+
+
+@pytest.mark.parametrize("cheap_later", [True, False])
+def test_without_an_own_recharge_targets_are_held_up_to_the_cheapest_refill(cheap_later):
+    # 29 Oct: after the 17-18 peak the aggregator refilled at 20-21 (4.36 kr)
+    # and again at 22-23 (3.58). Only 18-19 was held, so the export was
+    # valued against 4.36 and dropped. Hold up to the cheapest refill instead.
+    from custom_components.pixiihome_controller.control.price_optimization import (
+        ExternalWindow,
+        PriceDirection,
+        PriceInterval,
+        PricePlan,
+        PricePlanAction,
+        PriceSeries,
+    )
+
+    instance, _ = runtime()
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    base = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=3)
+    prices = [7.1, 6.1, 5.5, 4.36, 3.9, 3.58 if cheap_later else 4.9]
+    series = PriceSeries(tuple(
+        PriceInterval(base + timedelta(hours=h), base + timedelta(hours=h + 1), p)
+        for h, p in enumerate(prices)
+    ), "SEK/kWh", "prices", "fingerprint")
+    windows = tuple(
+        ExternalWindow(base + timedelta(hours=h), base + timedelta(hours=h + 1), 100.0)
+        for h in (1, 3, 5)
+    )
+    controller._external_windows = windows
+    controller._external_meta = tuple(  # type: ignore[assignment]
+        (external_schedule(w.start, service_no=300 + i), 90.0) for i, w in enumerate(windows)
+    )
+    discharge = PricePlanAction(
+        base, base + timedelta(minutes=75), PriceDirection.DISCHARGE, 10.0, "demandresponse",
+        {"pacref": -10000.0}, None, 7.1, 4.0, 3.1, 50.0, 10.0, 1.0,
+    )
+    controller._build_plan = lambda *a, **k: PricePlan(  # type: ignore[method-assign]
+        (discharge,), (), "fp", 50.0, 100.0, 10.0,
+    )
+
+    held = controller._with_adjustable_targets(series, {})
+
+    assert [w.adjustable for w in held] == ([True, True, False] if cheap_later
+                                           else [True, False, False])
