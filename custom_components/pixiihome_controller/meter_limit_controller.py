@@ -41,6 +41,7 @@ class MeterLimitLoadBalancer:
         self.lease: dict[str, Any] | None = None
         self.status = "disabled"
         self.reason: str | None = None
+        self._restore_failure_detail: str | None = None
         self.startup_read_error: str | None = None
         self.applied_limit_w: int | None = None
         self.writes = 0
@@ -298,24 +299,32 @@ class MeterLimitLoadBalancer:
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:  # noqa: BLE001 - keep the observer alive for recovery
+                    error_text = str(error)
                     reason = (
-                        str(error)
-                        if isinstance(error, ValueError)
-                        else str(error) or "meter_limitation_restore_failed"
+                        error_text
+                        if error_text in {
+                            "meter_limitation_recovery_conflict",
+                            "idle_phase_recovery_conflict",
+                        }
+                        else "meter_limitation_restore_failed"
                     )
+                    detail = error_text or reason
                     conflict_logged_by_deactivate = reason == "meter_limitation_recovery_conflict"
                     if (
-                        previous != ("recovery_required", reason)
+                        (previous != ("recovery_required", reason)
+                         or getattr(self, "_restore_failure_detail", None) != detail)
                         and not conflict_logged_by_deactivate
                     ):
                         log_activity(
                             self.runtime,
                             "load_balancing_observation",
                             "Load balancing restore needs recovery",
-                            cause=reason,
+                            cause=detail,
                         )
+                    self._restore_failure_detail = detail
                     self.status, self.reason = "recovery_required", reason
                     return
+                self._restore_failure_detail = None
                 restored = getattr(self.runtime, "_meter_limitation_restored", None)
                 if callable(restored) and self.lease is None:
                     restored()

@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.pixiihome_controller.runtime import RuntimeData
 
@@ -185,8 +186,7 @@ async def test_authority_off_persists_after_load_balancing_restore_failure(
         assert not notifications
 
 
-@pytest.mark.asyncio
-async def test_later_observer_restore_dismisses_only_resolved_cleanup(monkeypatch) -> None:
+def test_later_observer_restore_dismisses_only_resolved_cleanup(monkeypatch) -> None:
     from homeassistant.components import persistent_notification
 
     created: list[str] = []
@@ -215,6 +215,61 @@ async def test_later_observer_restore_dismisses_only_resolved_cleanup(monkeypatc
         "pixiihome_controller_GATEWAY_authority_cleanup",
     ]
     assert fake._authority_cleanup_problems == []
+
+    RuntimeData._update_authority_cleanup_notification(
+        fake, ["load_balancing Service 120 (read failed)", "price_1_ack_timeout"],
+        persisted=False,
+    )
+    RuntimeData._meter_limitation_restored(fake)
+    assert "price_1_ack_timeout" in created[-1]
+    assert "Service 120" not in created[-1]
+    assert "turned off in memory" in created[-1]
+    assert "could not be saved" in created[-1]
+
+
+@pytest.mark.asyncio
+async def test_missing_journal_warns_about_unrestored_service_120_before_error(monkeypatch) -> None:
+    from homeassistant.components import persistent_notification
+
+    events: list[str] = []
+    gate = SimpleNamespace(live_writes_enabled=True)
+
+    async def admin(_user_id):
+        return None
+
+    async def release():
+        return []
+
+    async def deactivate():
+        events.append("restore_attempt")
+        raise OSError("Gateway read failed")
+
+    def notify(_hass, message, **_kwargs):
+        assert gate.live_writes_enabled is False
+        assert "Service 120" in message
+        assert "Gateway read failed" in message
+        assert "turned off in memory" in message
+        assert "could not be saved" in message
+        events.append("notification")
+
+    def fail_closed(reason):
+        assert reason == "control_journal_unavailable"
+        gate.live_writes_enabled = False
+        events.append("fail_closed")
+
+    monkeypatch.setattr(persistent_notification, "async_create", notify)
+    fake = SimpleNamespace(
+        _require_admin=admin, production_control_enabled=lambda: True,
+        _async_release_owned_control=release,
+        meter_limit_load_balancer=SimpleNamespace(lease={"original": {}}, deactivate=deactivate),
+        _control_journal_lock=asyncio.Lock(), control_journal=None,
+        _fail_closed_control_state=fail_closed,
+        release_gate=gate, hass=object(), serial="GATEWAY",
+    )
+    with pytest.raises(HomeAssistantError, match="ControllerStore is unavailable"):
+        await RuntimeData.async_set_production_control_enabled(fake, False, None)
+    assert events == ["restore_attempt", "fail_closed", "notification"]
+    assert gate.live_writes_enabled is False
 
 
 @pytest.mark.asyncio
@@ -277,5 +332,7 @@ async def test_journal_save_failure_warns_about_service_120_and_keeps_original_e
     if reporting_error != "notification":
         assert "Service 120" in notifications[0]
         assert "Gateway read failed" in notifications[0]
+        assert "turned off in memory" in notifications[0]
+        assert "could not be saved" in notifications[0]
     if reporting_error != "activity":
         assert activity[-1][1]["cause"] == "load_balancing Service 120 (Gateway read failed)"
