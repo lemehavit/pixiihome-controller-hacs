@@ -41,6 +41,7 @@ class MeterLimitLoadBalancer:
         self.lease: dict[str, Any] | None = None
         self.status = "disabled"
         self.reason: str | None = None
+        self.startup_read_error: str | None = None
         self.applied_limit_w: int | None = None
         self.writes = 0
         self._lock = asyncio.Lock()
@@ -118,7 +119,8 @@ class MeterLimitLoadBalancer:
         await scheduler.client.write_meter_limitation_settings(record)
         self.writes += 1
 
-    async def _recover_saved_lease(self) -> None:
+    async def load_saved_lease(self) -> None:
+        """Read durable ownership without contacting or changing the Gateway."""
         saved = await self.store.async_load()
         if saved is None:
             self.lease = None
@@ -136,6 +138,18 @@ class MeterLimitLoadBalancer:
         ):
             raise ValueError("meter_limitation_journal_invalid")
         self.lease = lease
+        self.status, self.reason = "recovery_required", "meter_limitation_restore_pending"
+        log_activity(
+            self.runtime, "load_balancing_observation",
+            "Saved meter limitation requires restoration",
+            cause="A Service 120 lease remained after restart while control is off",
+        )
+
+    async def _recover_saved_lease(self) -> None:
+        await self.load_saved_lease()
+        if self.lease is None:
+            return
+        lease = self.lease
         current, _ = await self._read()
         original = self._record(lease["original"])
         owned = [self._record(item) for item in lease["owned"]]
@@ -273,7 +287,7 @@ class MeterLimitLoadBalancer:
             and self.runtime.production_control_enabled()
         )
         if not enabled:
-            if self.lease is not None:
+            if self.lease is not None or getattr(self.idle_support, "lease", None) is not None:
                 try:
                     await self.deactivate()
                 except asyncio.CancelledError:
@@ -292,7 +306,11 @@ class MeterLimitLoadBalancer:
                         cause=self.reason,
                     )
                     return
-            self.status, self.reason = "disabled", None
+            startup_read_error = getattr(self, "startup_read_error", None)
+            if startup_read_error is not None:
+                self.status, self.reason = "recovery_required", startup_read_error
+            else:
+                self.status, self.reason = "disabled", None
             return
         async with self._lock:
             try:
@@ -358,13 +376,21 @@ class MeterLimitLoadBalancer:
                         "recovery_required",
                         "meter_limitation_recovery_conflict",
                     )
+                    log_activity(
+                        self.runtime, "load_balancing_observation",
+                        "Saved meter limitation could not be restored",
+                        cause="Gateway Service 120 record no longer matches the saved lease",
+                    )
                     raise ValueError("meter_limitation_recovery_conflict")
                 await self._write(original)
             await self._save_lease(None)
             self.applied_limit_w = None
             self.status, self.reason = "disabled", None
-            log_activity(self.runtime, "load_balancing_observation",
-                         "Load balancing off: original meter limitation restored")
+            log_activity(
+                self.runtime, "load_balancing_observation",
+                "Load balancing off: original meter limitation restored",
+                cause="Control is off and the Gateway record matched the saved lease",
+            )
 
     async def stop(self) -> None:
         """Release the owned overlay during unload without touching another actor."""

@@ -14,6 +14,7 @@ from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 
+from .activity import log_activity
 from .aps_controller import AdaptivePeakShavingController
 from .battery_activity import BatteryActivityTracker
 from .const import (
@@ -541,6 +542,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as error:  # fail closed and expose the reason on the sensor
             runtime.meter_limit_load_balancer.status = "blocked"
             runtime.meter_limit_load_balancer.reason = str(error)
+    else:
+        controller = runtime.meter_limit_load_balancer
+        read_error: str | None = None
+        for load_lease in (controller.load_saved_lease, controller.idle_support.load_saved_lease):
+            try:
+                await load_lease()
+            except Exception as error:  # preserve visible recovery state for unsafe journals
+                reason = (
+                    str(error)
+                    if isinstance(error, ValueError)
+                    else "load_balancing_lease_read_failed"
+                )
+                read_error = read_error or reason
+                log_activity(
+                    runtime, "load_balancing_observation",
+                    "Saved load balancing lease needs recovery",
+                    cause=reason,
+                )
+        if read_error is not None:
+            controller.startup_read_error = read_error
+            controller.status, controller.reason = "recovery_required", read_error
     if runtime.controller_state.automatic_solar_charging_enabled:
         try:
             await runtime.solar_charging_controller.prepare()

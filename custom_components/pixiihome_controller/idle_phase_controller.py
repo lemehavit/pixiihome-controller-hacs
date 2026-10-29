@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers.storage import Store
 
+from .activity import log_activity
 from .control.load_balancing import finite
 from .control.phase_balancing import plan_phases
 from .control.phase_gateway import PhaseGateway
@@ -56,8 +57,8 @@ class IdlePhaseLoadBalancer:
             raise ValueError("idle_phase_journal_invalid")
         self.lease = lease
 
-    async def _recover(self) -> None:
-        assert self.gateway is not None
+    async def load_saved_lease(self) -> None:
+        """Set up the Gateway reader and load ownership without restoring it."""
         saved = await self.store.async_load()
         if saved is None:
             self.lease = None
@@ -67,15 +68,32 @@ class IdlePhaseLoadBalancer:
         self.lease = saved["lease"]
         if self.lease is None:
             return
+        scheduler = self.runtime.gateway_scheduler
+        if scheduler is None:
+            raise ValueError("native_meter_unavailable")
+        self.gateway = PhaseGateway(scheduler.client)
+        self.status, self.reason = "recovery_required", "idle_phase_restore_pending"
+        log_activity(
+            self.runtime, "load_balancing_observation",
+            "Saved phase support requires restoration",
+            cause="A Service 129 lease remained after restart while control is off",
+        )
+
+    async def _recover(self) -> None:
+        await self.load_saved_lease()
+        if self.lease is None:
+            return
         await self.release()
 
     async def prepare(self) -> None:
         async with self._lock:
-            scheduler = self.runtime.gateway_scheduler
-            if scheduler is None:
-                raise ValueError("native_meter_unavailable")
-            self.gateway = PhaseGateway(scheduler.client)
             await self._recover()
+            if self.gateway is None:
+                scheduler = self.runtime.gateway_scheduler
+                if scheduler is None:
+                    raise ValueError("native_meter_unavailable")
+                self.gateway = PhaseGateway(scheduler.client)
+            assert self.gateway is not None
             services = await self.gateway.read(100)
             settings = self.gateway.settings(await self.gateway.read(129))
             if (
@@ -238,6 +256,12 @@ class IdlePhaseLoadBalancer:
             and current != saved["original"]
             or services.get("used_list") not in (saved["priority"], saved["owned_priority"])
         ):
+            self.status, self.reason = "recovery_required", "idle_phase_recovery_conflict"
+            log_activity(
+                self.runtime, "load_balancing_observation",
+                "Saved phase support could not be restored",
+                cause="Gateway Service 129 settings or priority no longer match the saved lease",
+            )
             raise ValueError("idle_phase_recovery_conflict")
         if (await self.gateway.core()).get("srv_type") == 129:
             await self.gateway.switch(False)
@@ -248,12 +272,27 @@ class IdlePhaseLoadBalancer:
             else:
                 raise ValueError("idle_phase_recovery_pending")
         if current != saved["original"]:
+            current = self.gateway.settings(await self.gateway.read(129))
+            if current not in saved["owned"]:
+                raise ValueError("idle_phase_recovery_conflict")
             await self.gateway.save(saved["original"])
         if services.get("used_list") == saved["owned_priority"]:
+            services = await self.gateway.read(100)
+            current = self.gateway.settings(await self.gateway.read(129))
+            if (
+                services.get("used_list") != saved["owned_priority"]
+                or current not in saved["owned"] and current != saved["original"]
+            ):
+                raise ValueError("idle_phase_recovery_conflict")
             await self.gateway.priority(saved["priority"])
         await self._persist(None)
         self.targets = self.previous = None
         self.last_tick = None
+        log_activity(
+            self.runtime, "load_balancing_observation",
+            "Saved phase support restored",
+            cause="Gateway Service 129 still matched the saved lease",
+        )
 
     async def stop(self) -> None:
         async with self._lock:

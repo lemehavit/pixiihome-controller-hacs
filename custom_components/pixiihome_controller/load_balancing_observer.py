@@ -65,7 +65,11 @@ class LoadBalancingObserver:
             listener()
 
     def start(self) -> None:
-        if self.config.enabled and self._task is None:
+        controller = getattr(self.runtime, "meter_limit_load_balancer", None)
+        has_saved_lease = controller is not None and (
+            controller.lease is not None or controller.idle_support.lease is not None
+        )
+        if (self.config.enabled or has_saved_lease) and self._task is None:
             # This loop is deliberately long lived.  Register it as a background
             # task so Home Assistant does not wait for it while wrapping up the
             # startup phase.

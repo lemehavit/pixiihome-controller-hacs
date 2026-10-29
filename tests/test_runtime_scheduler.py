@@ -54,6 +54,7 @@ from custom_components.pixiihome_controller.scheduler.ownership import (
     SchedulerOwnershipRecord,
     SchedulerOwnershipStore,
 )
+from custom_components.pixiihome_controller.sensor import PixiiLoadBalancingSensor
 
 BOOTSTRAP_ID = "A" * 32
 
@@ -377,6 +378,12 @@ async def test_integration_setup_initializes_scheduler_without_scheduler_http(
         del runtime
 
     monkeypatch.setattr(integration_module.RuntimeData, "start", fake_start)
+    observer_starts: list[Any] = []
+    monkeypatch.setattr(
+        integration_module.LoadBalancingObserver,
+        "start",
+        lambda observer: observer_starts.append(observer),
+    )
     hass = _executor_hass()
     hass.data = {}
     forwarded: list[Any] = []
@@ -402,6 +409,11 @@ async def test_integration_setup_initializes_scheduler_without_scheduler_http(
     entry.async_on_unload = lambda callback: None
     entry.add_update_listener = lambda callback: callback
 
+    native_lease = {"original": {}, "owned": [{}]}
+    phase_lease = {"original": {}, "owned": [{}], "priority": [], "owned_priority": []}
+    MemoryStore.data["pixiihome_controller.GATEWAY.meter_limit_lease"] = {"lease": native_lease}
+    MemoryStore.data["pixiihome_controller.GATEWAY.idle_phase_lease"] = {"lease": phase_lease}
+
     assert await integration_module.async_setup_entry(hass, entry) is True
 
     assert len(initialized) == 1
@@ -409,6 +421,114 @@ async def test_integration_setup_initializes_scheduler_without_scheduler_http(
     assert len(hass.executor_jobs) == 1
     assert session.calls == 0
     assert forwarded
+    controller = initialized[0].meter_limit_load_balancer
+    assert controller.lease == native_lease
+    assert controller.idle_support.lease == phase_lease
+    assert controller.idle_support.gateway is not None
+    assert controller.writes == 0
+    assert observer_starts == [initialized[0].load_balancing_observer]
+    assert controller.status == "recovery_required"
+
+
+@pytest.mark.asyncio
+async def test_disabled_setup_observer_first_tick_restores_saved_native_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(integration_module, "remove_retired_entities", lambda *args: None)
+    monkeypatch.setattr(runtime_module, "async_get_clientsession", lambda _hass: NoHttpSession())
+    monkeypatch.setattr(
+        runtime_module,
+        "build_scheduler_ssl_context",
+        lambda **_kwargs: ssl.create_default_context(),
+    )
+
+    async def mqtt_ready(_hass: Any) -> bool:
+        return True
+
+    async def runtime_start(_runtime: Any) -> None:
+        return None
+
+    permits: asyncio.Queue[None] = asyncio.Queue()
+
+    async def gated_refresh(_observer: Any) -> None:
+        await permits.get()
+
+    monkeypatch.setattr(integration_module, "async_wait_for_mqtt_client", mqtt_ready)
+    monkeypatch.setattr(integration_module.RuntimeData, "start", runtime_start)
+    monkeypatch.setattr(integration_module.LoadBalancingObserver, "async_refresh", gated_refresh)
+    hass = _executor_hass()
+    hass.data = {}
+    background_tasks: list[asyncio.Task[Any]] = []
+
+    def create_background_task(coro: Any, _name: str) -> asyncio.Task[Any]:
+        task = asyncio.create_task(coro)
+        background_tasks.append(task)
+        return task
+
+    hass.async_create_background_task = create_background_task
+    hass.config_entries = SimpleNamespace(
+        async_forward_entry_setups=lambda _entry, _platforms: asyncio.sleep(0),
+        async_update_entry=lambda entry, *, data: setattr(entry, "data", data),
+    )
+    entry = _entry(options={
+        CONF_SCHEDULER_URL: "https://gateway.example",
+        CONF_SCHEDULER_BOOTSTRAP_ID: BOOTSTRAP_ID,
+        CONF_SCHEDULER_USERNAME: "operator",
+        CONF_SCHEDULER_PASSWORD: "password",
+    })
+    entry.async_on_unload = lambda _callback: None
+    entry.add_update_listener = lambda callback: callback
+    original = {
+        "enabled": 0, "exp_soft_enabled": 0, "exp_hard_enabled": 0,
+        "exp_soft_limit": 0, "exp_hard_limit": 0, "gen_soft_enabled": 0,
+        "gen_hard_enabled": 0, "gen_soft_limit": 0, "gen_hard_limit": 0,
+        "limit_per_phase": 0, "meter_id": 1,
+    }
+    owned = {**original, "enabled": 1, "exp_soft_enabled": 1, "exp_soft_limit": 6000}
+    native_key = "pixiihome_controller.GATEWAY.meter_limit_lease"
+    MemoryStore.data[native_key] = {"lease": {"original": original, "owned": [owned]}}
+
+    assert await integration_module.async_setup_entry(hass, entry)
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    observer = runtime.load_balancing_observer
+    controller = runtime.meter_limit_load_balancer
+    assert observer is not None and controller is not None
+    assert observer._task is not None
+    assert controller.lease is not None
+    assert MemoryStore.data[native_key]["lease"] is not None
+    assert controller.writes == 0
+    assert runtime.gateway_scheduler is not None
+    client = runtime.gateway_scheduler.client
+    current = dict(owned)
+    gateway_calls: list[str] = []
+
+    async def read_native(**_kwargs: Any) -> dict[str, int]:
+        gateway_calls.append("read")
+        return dict(current)
+
+    async def write_native(record: Any) -> None:
+        gateway_calls.append("write")
+        current.clear()
+        current.update(record)
+
+    monkeypatch.setattr(client, "read_load_balancing_status", read_native)
+    monkeypatch.setattr(client, "write_meter_limitation_settings", write_native)
+    updates: asyncio.Queue[None] = asyncio.Queue()
+    observer.add_listener(lambda: updates.put_nowait(None))
+    sensor = PixiiLoadBalancingSensor(runtime, "load_balancing_observation")
+    try:
+        permits.put_nowait(None)
+        await asyncio.wait_for(updates.get(), 1)
+        assert gateway_calls == ["read", "write"]
+        assert current == original
+        assert MemoryStore.data[native_key] == {"lease": None}
+        assert controller.lease is None
+        assert sensor.extra_state_attributes["control_status"] == "disabled"
+        assert sensor.extra_state_attributes["control_blocked_reason"] is None
+    finally:
+        for task in background_tasks:
+            task.cancel()
+        await asyncio.gather(*background_tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio
