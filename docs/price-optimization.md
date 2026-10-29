@@ -158,8 +158,10 @@ schedules instead of being refilled by each of them:
   instead (also verified). Uncertain results require recovery and are never
   retried.
 - A lowered target is restored to its original value when the plan no longer
-  needs it. Originals are kept in memory, so a Home Assistant restart forgets
-  them; check the scheduler view after a restart.
+  needs it. Originals are saved in the control journal
+  (`lowered_external_targets`) and read back after a Home Assistant restart,
+  so a target can still be restored. Saving is best effort; if the journal
+  cannot be written, check the scheduler view after a restart.
 - At most one aggregator schedule is changed per planning pass. If a window
   cannot be held, nothing after it is written.
 
