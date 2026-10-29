@@ -5,7 +5,7 @@ created: '2026-10-29'
 status: 'done'
 baseline_revision: '585a516a78d2a857df5913087c5dbdfcc6307897'
 review_loop_iteration: 0
-followup_review_recommended: true
+followup_review_recommended: false
 context: []
 warnings: []
 deferred: []
@@ -61,6 +61,11 @@ deferred: []
 
 ## Review Triage Log
 
+### 2026-10-29 — Follow-up review pass
+- verdicts: 1 finding — high 0, medium 1, low 0, false 0, maybe-false 0
+- findings:
+  - `[medium]` `[patch]` Ett annat återställningsfel än ägarkonflikt saknade verifiering av avstängd behörighet — `tests/test_authority_release.py` testar nu även `OSError`, sparad avstängning, stängd skrivgate, behållen lease och avisering.
+
 ### 2026-10-29 — Review pass
 - verdicts: 3 findings — high 1, medium 2, low 0, false 0, maybe-false 0
 - findings:
@@ -78,6 +83,12 @@ deferred: []
 ## Auto Run Result
 
 Status: done
+
+**Uppföljande granskning:** En mediumbrist i testtäckningen lappades med `OSError` för återställningsfelet. Inga fynd sköts upp eller avvisades. Patchade fynd i detta pass: high 0, medium 1, low 0. Ytterligare uppföljande granskning rekommenderas inte.
+
+**Uppföljande verifiering:** `pytest -q tests/test_authority_release.py tests/test_controller_coexistence.py` gav 17 godkända tester; `ruff check` på de fyra berörda kod- och testfilerna passerade; `pyright` gav 0 fel och 0 varningar. Alla kördes via `.venv/review-environment/Scripts/python.exe -m`.
+
+**Kvarvarande risk:** Testet granskar kandidaten till journalen men kör inte ett verkligt journalsparande följt av omstart; det är samma risk som antecknades i första granskningspasset.
 
 **Sammanfattning:** Fel vid återställning av lastbalanseringen redovisas som städproblem medan avstängd styrbehörighet sparas och skrivgaten stängs. Ett avstängt observatörsvarv visar `recovery_required`, behåller leasen och kan försöka igen efter fel.
 

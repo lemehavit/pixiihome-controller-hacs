@@ -98,9 +98,9 @@ async def test_authority_off_releases_owned_control_before_closing_the_gate(monk
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("restore_conflict", [False, True])
+@pytest.mark.parametrize("restore_error", [None, ValueError, OSError])
 async def test_authority_off_persists_after_load_balancing_restore_conflict(
-    monkeypatch, restore_conflict: bool,
+    monkeypatch, restore_error: type[Exception] | None,
 ) -> None:
     events: list[str] = []
     notifications: list[str] = []
@@ -114,8 +114,8 @@ async def test_authority_off_persists_after_load_balancing_restore_conflict(
 
     async def deactivate():
         events.append("restore_attempt")
-        if restore_conflict:
-            raise ValueError("meter_limitation_recovery_conflict")
+        if restore_error is not None:
+            raise restore_error("meter_limitation_recovery_conflict")
         fake.meter_limit_load_balancer.lease = None
 
     async def admin(user_id):
@@ -159,11 +159,15 @@ async def test_authority_off_persists_after_load_balancing_restore_conflict(
     assert len(saved) == 1
     assert saved[0].controller_state["production_control_authority"]["enabled"] is False
     assert gate.live_writes_enabled is False
-    if restore_conflict:
+    if restore_error is not None:
         assert fake.meter_limit_load_balancer.lease is lease
         assert len(notifications) == 1
         assert "load_balancing" in notifications[0]
-        assert "meter_limitation_recovery_conflict" in notifications[0]
+        assert (
+            "meter_limitation_recovery_conflict"
+            if restore_error is ValueError
+            else "meter_limitation_restore_failed"
+        ) in notifications[0]
     else:
         assert fake.meter_limit_load_balancer.lease is None
         assert not notifications
