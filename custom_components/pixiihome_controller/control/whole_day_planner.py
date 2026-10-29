@@ -303,13 +303,13 @@ def build_whole_day_plan(
     actions: list[PricePlanAction] = []
     baseline = planned = 0.0
     charged_energy = charged_cost = 0.0
-    margin_total = 0.0
     first_energy = level * step
     # The energy the battery really holds when only the written actions run: a
     # discharge kept back by the minimum profit stays in the battery. Lowered
     # aggregator targets follow this, never the unwritten trajectory, or the
     # aggregator's Target SOC would empty the battery for the plan.
     kept = first_energy
+    baseline_energy = first_energy
     window_socs: dict[datetime, float] = {}
     for index, item in enumerate(candidates):
         for window in windows:
@@ -318,24 +318,20 @@ def build_whole_day_plan(
             ):
                 window_socs[window.start] = kept / usable_capacity_kwh * 100
         delta = choice[index][level]
-        cost, battery = slot_cost(index, delta, decision=False)
+        # A filtered discharge can leave more energy than DP expected. A later
+        # charge must fit the room that remains in the actual battery.
+        candidate_delta = (
+            min(delta, max(0, idx_max - round(kept / step))) if delta > 0 else delta
+        )
+        _, battery = slot_cost(index, candidate_delta, decision=False)
         base_cost, _ = slot_cost(index, 0, decision=False)
         baseline += base_cost
-        planned += cost
         level += delta
-        if index + 1 in resets:
-            # The external Target SOC window that ends here sets the energy.
-            level = resets[index + 1][0]
         load, solar = flows[index]
-        soc = level * step / usable_capacity_kwh * 100
-        slots.append(WholeDaySlot(
-            item.start, item.end, item.price_sek_per_kwh, load, solar, battery, soc,
-            blocked[index],
-        ))
-        margin = base_cost - cost
-        margin_total += margin
+        projected_soc = min(levels * step, max(0.0, kept + candidate_delta * step))
+        projected_soc = projected_soc / usable_capacity_kwh * 100
         action = _action(
-            item, load, solar, battery, soc,
+            item, load, solar, battery, projected_soc,
             maximum_discharge_kw=maximum_discharge_kw,
             step_kw=step / (eta * item.duration_hours),
             reference=_basis(
@@ -348,20 +344,42 @@ def build_whole_day_plan(
             cycle_cost=cycle_cost_sek_per_kwh,
         )
         net = load - solar
-        if battery > max(0.0, -net) + 0.05:
-            grid_part = (battery - max(0.0, -net)) * item.duration_hours
-            charged_energy += grid_part
-            charged_cost += grid_part * item.price_sek_per_kwh
         written = action is not None and _meets_minimum(
             action, minimum_difference_sek_per_kwh, export_minimum_difference_sek_per_kwh
         )
-        if action is not None and written:
+        # Solar charging needs no schedule. A discharge, or a grid charge,
+        # only changes the battery if its schedule is actually written.
+        effective_delta = (
+            candidate_delta
+            if written or (candidate_delta > 0 and battery <= max(0.0, -net) + 0.05)
+            else 0
+        )
+        effective_cost, effective_battery = slot_cost(index, effective_delta, decision=False)
+        planned += effective_cost
+        if effective_battery > max(0.0, -net) + 0.05:
+            grid_part = (effective_battery - max(0.0, -net)) * item.duration_hours
+            charged_energy += grid_part
+            charged_cost += grid_part * item.price_sek_per_kwh
+        if written and action is not None:
             actions.append(action)
-        if delta > 0 or written:
-            kept = min(levels * step, max(0.0, kept + delta * step))
+        if effective_delta:
+            kept = min(levels * step, max(0.0, kept + effective_delta * step))
         if index + 1 in resets:
-            kept = level * step
-    margin_total += terminal_value * (level * step - first_energy)
+            # The fixed external window refills from the energy actually left.
+            target, refill_price = resets[index + 1]
+            target_energy = target * step
+            refill_cost = (refill_price + gic) / eta
+            planned += max(0.0, target_energy - kept) * refill_cost
+            baseline += max(0.0, target_energy - baseline_energy) * refill_cost
+            kept = target_energy
+            baseline_energy = target_energy
+            level = target
+        soc = kept / usable_capacity_kwh * 100
+        slots.append(WholeDaySlot(
+            item.start, item.end, item.price_sek_per_kwh, load, solar, effective_battery, soc,
+            blocked[index],
+        ))
+    margin_total = baseline - planned + terminal_value * (kept - baseline_energy)
     for window in windows:
         if window.adjustable:
             window_socs.setdefault(window.start, kept / usable_capacity_kwh * 100)

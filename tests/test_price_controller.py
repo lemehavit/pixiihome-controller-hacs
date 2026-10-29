@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -701,6 +702,46 @@ async def test_whole_day_planner_also_handles_a_held_aggregator_target():
     # The plan charges in the cheap hour the aggregator window covers.
     assert calls[0]["delete"] is True
     assert mutations.created
+
+
+@pytest.mark.asyncio
+async def test_whole_day_attributes_follow_filtered_discharge() -> None:
+    instance, mutations = runtime(schedule_writes=False)
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+    instance.hass.states.state.attributes = {
+        "unit_of_measurement": "SEK/kWh",
+        "prices": [
+            {
+                "start": (start + timedelta(hours=index)).isoformat(),
+                "end": (start + timedelta(hours=index + 1)).isoformat(),
+                "price": price,
+            }
+            for index, price in enumerate((1.1, 1.1, 0.8, 0.8))
+        ],
+    }
+    instance.battery = replace(instance.battery, usable_soc=80)
+    instance.energy_forecast = SimpleNamespace(
+        net_load_kw=lambda start, end, high=False: 1.0,
+        net_forecast=lambda start, end, high=False: (1.0, 0.0),
+    )
+    instance.operational_settings = instance.operational_settings.set(
+        "price_whole_day_planner", True
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    attributes = controller.attributes()
+    whole_day = attributes["whole_day_plan"]
+    assert attributes["planner_engine"] == "whole_day"
+    assert whole_day["action_count"] == 0
+    assert whole_day["segments"] == []
+    assert attributes["minimum_projected_usable_soc"] == pytest.approx(80.0)
+    assert attributes["maximum_projected_usable_soc"] == pytest.approx(80.0)
+    assert whole_day["cost_without_battery_sek"] == pytest.approx(3.8)
+    assert whole_day["planned_cost_sek"] == pytest.approx(3.8)
+    assert whole_day["expected_margin_sek"] == pytest.approx(0.0)
+    assert mutations.created == []
 
 
 @pytest.mark.asyncio

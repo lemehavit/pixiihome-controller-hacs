@@ -120,6 +120,23 @@ def test_known_target_soc_window_resets_energy_and_blocks_actions() -> None:
     assert len(truncated.slots) == 2
 
 
+def test_fixed_target_refill_cost_uses_remaining_energy() -> None:
+    series = _series([1.1, 1.1, 0.8, 0.8])
+    window = ExternalWindow(series.intervals[2].start, series.intervals[2].end, 90.0)
+    result = _plan(
+        series, lambda start, end: (1.0, 0.0),
+        usable_soc_percent=80.0, maximum_charge_kw=0.0,
+        maximum_discharge_kw=0.0, grid_import_cost_sek_per_kwh=0.0,
+        external_windows=(window,),
+    )
+    assert [slot.usable_soc_percent for slot in result.slots] == [80, 80, 90, 90]
+    assert result.plan.actions == ()
+    expected = 3.8 + 1.0 * 0.8 / 0.9 ** 0.5
+    assert result.baseline_cost_sek == pytest.approx(expected)
+    assert result.planned_cost_sek == pytest.approx(expected)
+    assert result.plan.expected_margin_sek == pytest.approx(0.0)
+
+
 def test_adjustable_target_soc_windows_let_a_discharge_stand() -> None:
     # An aggregator refills to 90 % every other hour. A fixed refill undoes
     # each discharge at a high price; a held (lowered) window keeps it.
@@ -274,6 +291,41 @@ def test_discharges_below_the_minimum_profit_are_not_written() -> None:
     )
     discharges = [a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE]
     assert discharges == []
+    assert result.plan.actions == ()
+    assert [slot.battery_kw for slot in result.slots] == [0.0] * 4
+    assert [slot.usable_soc_percent for slot in result.slots] == [80.0] * 4
+    assert result.baseline_cost_sek == pytest.approx(3.8)
+    assert result.planned_cost_sek == pytest.approx(result.baseline_cost_sek)
+    assert result.plan.expected_margin_sek == pytest.approx(0.0)
+
+
+def test_written_actions_and_reported_cost_share_the_same_trajectory() -> None:
+    series = _series([0.2, 0.2, 3.0, 3.0, 3.0, 3.0])
+    result = _plan(series, lambda start, end: (1.5, 0.0))
+    assert any(action.direction is PriceDirection.CHARGE for action in result.plan.actions)
+    assert any(action.direction is PriceDirection.DISCHARGE for action in result.plan.actions)
+    eta = 0.9 ** 0.5
+    energy = 1.0
+    expected_cost = 0.0
+    for slot in result.slots:
+        hours = (slot.end - slot.start).total_seconds() / 3600
+        grid = slot.load_kw - slot.solar_kw + slot.battery_kw
+        expected_cost += grid * hours * (
+            slot.price_sek_per_kwh + 0.5 if grid > 0 else slot.price_sek_per_kwh
+        )
+        energy += slot.battery_kw * hours * (eta if slot.battery_kw > 0 else 1 / eta)
+        assert slot.usable_soc_percent == pytest.approx(energy * 10, abs=0.01)
+    assert result.planned_cost_sek == pytest.approx(expected_cost)
+    terminal_value = (sum([0.2, 0.2, 3.0, 3.0, 3.0, 3.0]) / 6 + 0.5) * eta
+    expected_margin = result.baseline_cost_sek - expected_cost + terminal_value * (energy - 1.0)
+    assert expected_margin > 0
+    assert result.plan.expected_margin_sek == pytest.approx(expected_margin)
+    assert result.plan.minimum_projected_soc == pytest.approx(
+        min(10.0, *(slot.usable_soc_percent for slot in result.slots))
+    )
+    assert result.plan.maximum_projected_soc == pytest.approx(
+        max(10.0, *(slot.usable_soc_percent for slot in result.slots))
+    )
 
 
 def test_lowered_targets_follow_only_the_discharges_that_are_written() -> None:
@@ -292,6 +344,9 @@ def test_lowered_targets_follow_only_the_discharges_that_are_written() -> None:
     )
     assert not [a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE]
     assert dict(result.plan.window_socs)[window.start] == pytest.approx(80.0, abs=1.0)
+    assert all(slot.usable_soc_percent == pytest.approx(80.0) for slot in result.slots)
+    assert result.planned_cost_sek == pytest.approx(result.baseline_cost_sek)
+    assert result.plan.expected_margin_sek == pytest.approx(0.0)
 
 
 def test_the_plan_does_not_export_what_a_fixed_target_buys_back_below_the_minimum() -> None:
@@ -312,6 +367,26 @@ def test_the_plan_does_not_export_what_a_fixed_target_buys_back_below_the_minimu
     discharges = [a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE]
     assert discharges
     assert all(a.discharge_mode is PriceDischargeMode.SELF_CONSUMPTION for a in discharges)
+    assert result.slots[2].usable_soc_percent == pytest.approx(90.0)
+    refill_kwh = (90.0 - result.slots[1].usable_soc_percent) / 10
+    assert refill_kwh > 0
+    refill_cost = refill_kwh * (4.36 + 0.65) / 0.9 ** 0.5
+    slot_cost = sum(
+        (slot.load_kw - slot.solar_kw + slot.battery_kw)
+        * (slot.price_sek_per_kwh + 0.65)
+        + max(0.0, -slot.battery_kw) * 0.3
+        for slot in result.slots
+    )
+    expected_planned_cost = slot_cost + refill_cost
+    expected_baseline_cost = sum(0.5 * (price + 0.65) for price in [7.1, 7.1, 4.36, 3.0])
+    assert result.baseline_cost_sek == pytest.approx(expected_baseline_cost)
+    assert result.planned_cost_sek == pytest.approx(expected_planned_cost)
+    terminal_value = max(0.0, (sum([7.1, 7.1, 4.36, 3.0]) / 4 + 0.65) * 0.9 ** 0.5 - 0.3)
+    final_energy = result.slots[-1].usable_soc_percent / 10
+    expected_margin = expected_baseline_cost - expected_planned_cost + terminal_value * (
+        final_energy - 9.0
+    )
+    assert result.plan.expected_margin_sek == pytest.approx(expected_margin)
 
 
 def test_the_plan_still_exports_when_the_buy_back_leaves_enough() -> None:
