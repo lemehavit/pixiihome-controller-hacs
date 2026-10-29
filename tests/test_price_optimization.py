@@ -148,6 +148,32 @@ def test_charge_demand_does_not_cross_known_external_reset() -> None:
                    for a in result.actions)
 
 
+def test_pre_reset_charge_is_sized_only_for_its_own_peak() -> None:
+    window = ExternalWindow(_hour(2), _hour(3), 10.0)
+    result = plan(
+        greenely(.2, 3, 1, 9), initial_soc=10, charge_kw=5, discharge_kw=5,
+        windows=(window,),
+        net_load_kw=lambda start, _end: 1.0 if start == _hour(1) else 5.0,
+    )
+    before = [a for a in result.actions
+              if a.direction is PriceDirection.CHARGE and a.end <= window.start]
+    assert before
+    assert sum(a.power_kw * a.duration_seconds / 3600 for a in before) <= 1 / .9 + 1e-9
+
+
+def test_forecast_cap_above_power_headroom_does_not_set_limit_flag() -> None:
+    series = greenely(.2, 3)
+    uncapped = plan(series, initial_soc=10, charge_kw=.1, discharge_kw=5)
+    capped = plan(
+        series, initial_soc=10, charge_kw=.1, discharge_kw=5,
+        net_load_kw=lambda _start, _end: 5.0,
+    )
+    assert [a.power_kw for a in capped.actions if a.direction is PriceDirection.CHARGE] == [
+        a.power_kw for a in uncapped.actions if a.direction is PriceDirection.CHARGE
+    ]
+    assert not capped.charge_demand_limited
+
+
 def _prices_with_expensive_initial_basis(*prices: float, initial_basis: float = 3.0):
     return normalize_price_series(
         {"raw_today": [

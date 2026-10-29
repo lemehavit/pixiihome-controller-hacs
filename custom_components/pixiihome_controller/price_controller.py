@@ -121,6 +121,7 @@ class PriceOptimizationController:
         self._logged_charge_limit_fingerprint: str | None = None
         # The solar charging the whole-day plan last counted on (logged on change).
         self.solar_charging: SolarCharging | None = None
+        self._solar_charging_logged = False
         self.problem_since: datetime | None = None
         self.problem_notified = False
         # True while one planning pass runs. A passing non-problem status
@@ -278,6 +279,8 @@ class PriceOptimizationController:
                 "ready": whole_day.plan.ready,
                 "blockers": list(whole_day.plan.blockers),
                 "expected_margin_sek": round(whole_day.plan.expected_margin_sek, 2),
+                # Kompatibilitetsnamn: basen saknar egna prisåtgärder men
+                # inkluderar påfyllning från fasta externa SOC-mål.
                 "cost_without_battery_sek": round(whole_day.baseline_cost_sek, 2),
                 "planned_cost_sek": round(whole_day.planned_cost_sek, 2),
                 "action_count": len(merge_adjacent_actions(whole_day.plan.actions)),
@@ -1062,7 +1065,10 @@ class PriceOptimizationController:
             defer_until=defer_until,
             minimum_surplus_kw=float(settings.get("solar_export_start_threshold_kw")),
         )
-        if limit != self.solar_charging:
+        whole_day_enabled = bool(settings.get("price_whole_day_planner"))
+        if not whole_day_enabled:
+            self._solar_charging_logged = False
+        if limit != self.solar_charging or (whole_day_enabled and not self._solar_charging_logged):
             if not switch_on:
                 why = "automatic solar charging is switched off, so the surplus is exported"
             elif not authorized:
@@ -1081,13 +1087,15 @@ class PriceOptimizationController:
                     f"and {limit.maximum_soc_percent:.0f} % usable SOC, from a surplus "
                     f"of {limit.minimum_surplus_kw:.1f} kW"
                 )
-            log_activity(
-                self.runtime, PRICE_STATUS,
-                "Whole-day plan counts on solar charging "
-                + ("up to its limits" if limit.enabled else "not at all"),
-                f"Why: {why}. Charging beyond this needs a written price schedule "
-                "that earns the minimum profit.",
-            )
+            if whole_day_enabled:
+                log_activity(
+                    self.runtime, PRICE_STATUS,
+                    "Whole-day plan counts on solar charging "
+                    + ("up to its limits" if limit.enabled else "not at all"),
+                    f"Why: {why}. Charging beyond this needs a written price schedule "
+                    "that earns the minimum profit.",
+                )
+                self._solar_charging_logged = True
             self.solar_charging = limit
         return limit
 

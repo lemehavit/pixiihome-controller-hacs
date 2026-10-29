@@ -186,6 +186,13 @@ plans the whole price horizon together with solar. See
 
 ## Read the result and disable
 
+Dygnsplanens `cost_without_battery_sek` är jämförelsekostnaden utan
+prisoptimeringens egna åtgärder. Fasta externa Target SOC-mål fyller fortfarande
+batteriet i både jämförelsebanan och den planerade banan, och kostnaden för
+den påfyllningen ingår i båda. Namnet behålls för kompatibilitet. Om en
+föreslagen åtgärd filtreras bort spelas senare flöden upp mot faktisk beräknad
+SOC; dygnsplanens DP-val optimeras däremot inte om efter filtreringen.
+
 The next-charge/discharge sensors can describe a current or future interval.
 Read their `schedule_status`: `planned` is a proposal, `scheduled` is an owned
 interval reconciled at the last readback, and `unverified` needs after-checking.

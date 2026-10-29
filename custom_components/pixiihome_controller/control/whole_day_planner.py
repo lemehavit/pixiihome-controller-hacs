@@ -392,19 +392,24 @@ def build_whole_day_plan(
         delta = choice[index][level]
         # A filtered discharge can leave more energy than DP expected. A later
         # charge must fit the room that remains in the actual battery.
+        actual_level = round(kept / step)
         candidate_delta = (
-            min(delta, max(0, idx_max - round(kept / step))) if delta > 0 else delta
+            min(delta, max(0, idx_max - actual_level)) if delta > 0
+            else max(delta, idx_min - actual_level)
         )
         # A charge DP left to solar charging stays solar charging: it stops at
         # the solar SOC cap of the actual battery, never becoming a schedule.
         if delta > 0 and slot_cost(index, delta, decision=False)[1] <= (
             free_solar_kw(index, level * step) + 0.05
         ):
-            candidate_delta = min(candidate_delta, max(0, idx_sol - round(kept / step)))
+            solar_steps = floor(
+                free_solar_kw(index, kept) * eta * item.duration_hours / step + 1e-9
+            )
+            candidate_delta = min(candidate_delta, max(0, idx_sol - actual_level), solar_steps)
         elif delta > 0:
             # A written charge only buys up to the level DP planned: energy a
             # filtered discharge left in the battery needs no refill.
-            candidate_delta = min(candidate_delta, max(0, level + delta - round(kept / step)))
+            candidate_delta = min(candidate_delta, max(0, level + delta - actual_level))
         _, battery = slot_cost(index, candidate_delta, decision=False)
         base_cost, _ = slot_cost(index, 0, decision=False)
         baseline += base_cost
@@ -434,7 +439,7 @@ def build_whole_day_plan(
         # any other charge, only changes the battery if its schedule is written.
         effective_delta = (
             candidate_delta
-            if written or (candidate_delta > 0 and battery <= free + 0.05)
+            if written or (candidate_delta > 0 and free > 0 and battery <= free + 1e-9)
             else 0
         )
         effective_cost, effective_battery = slot_cost(index, effective_delta, decision=False)

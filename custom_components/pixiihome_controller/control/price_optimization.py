@@ -377,6 +377,17 @@ def build_price_plan(
         for item in candidates
     ]
     segment = [sum(1 for window in resets if window.end <= item.start) for item in candidates]
+    # Later profitable use stops at a known reset. Blocked intervals cannot
+    # supply a peak, and one reverse pass avoids a suffix scan per candidate.
+    later_peak: list[float | None] = [None] * len(candidates)
+    peak: float | None = None
+    for position in range(len(candidates) - 1, -1, -1):
+        if position + 1 < len(candidates) and segment[position + 1] != segment[position]:
+            peak = None
+        later_peak[position] = peak
+        if not blocked[position]:
+            price_at_position = candidates[position].price_sek_per_kwh
+            peak = price_at_position if peak is None else max(peak, price_at_position)
     refill_price = [_mean_price(series, window.start, window.end) for window in resets]
     window_socs: dict[datetime, float] = {}
     active_segment: int | None = None
@@ -444,6 +455,7 @@ def build_price_plan(
             and charge_mode is not None
         ):
             power = min(maximum_charge_kw, headroom / (hours * charge_efficiency))
+            unrestricted_power = power
             if net_load_kw is not None:
                 needed_stored_energy = 0.0
                 covered_stored_energy = 0.0
@@ -458,13 +470,9 @@ def build_price_plan(
                         break
                     if blocked[future_index]:
                         continue
-                    later_peak = max(
-                        (candidates[j].price_sek_per_kwh
-                         for j in range(future_index + 1, len(candidates))
-                         if segment[j] == active_segment and not blocked[j]),
-                        default=future.price_sek_per_kwh,
-                    )
-                    if future.price_sek_per_kwh < later_peak - 1e-9:
+                    future_later_peak = later_peak[future_index]
+                    if (future_later_peak is not None
+                            and future.price_sek_per_kwh < future_later_peak - 1e-9):
                         continue
                     future_mode, _ = _qualifying_discharge(
                         price, future.price_sek_per_kwh,
@@ -514,9 +522,9 @@ def build_price_plan(
                 if forecast_known:
                     remaining_headroom = max(0.0, needed_stored_energy - covered_stored_energy)
                     demand_power = remaining_headroom / (hours * charge_efficiency)
-                    if demand_power < power - 1e-9:
-                        charge_demand_limited = True
                     power = min(power, demand_power)
+                    if unrestricted_power >= 0.05 and power < unrestricted_power - 1e-9:
+                        charge_demand_limited = True
             if power < 0.05:
                 continue
             added_energy = power * hours * charge_efficiency

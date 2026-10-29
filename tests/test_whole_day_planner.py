@@ -301,6 +301,28 @@ def test_discharges_below_the_minimum_profit_are_not_written() -> None:
     assert result.plan.expected_margin_sek == pytest.approx(0.0)
 
 
+def test_later_discharge_uses_energy_retained_after_filtered_discharge(monkeypatch) -> None:
+    from custom_components.pixiihome_controller.control import whole_day_planner as module
+
+    series = _series([9.0, 9.0, 1.0])
+    original = module._meets_minimum
+    monkeypatch.setattr(
+        module, "_meets_minimum",
+        lambda action, minimum, export_minimum: (
+            action.start != series.intervals[0].start
+            and original(action, minimum, export_minimum)
+        ),
+    )
+    result = _plan(
+        series, lambda _start, _end: (5.0, 0.0),
+        usable_soc_percent=90.0, grid_import_cost_sek_per_kwh=0.0,
+    )
+    assert result.slots[0].battery_kw == 0
+    assert result.slots[1].battery_kw < 0
+    assert all(slot.usable_soc_percent >= 10.0 - 1e-9 for slot in result.slots)
+    assert all(action.start != series.intervals[0].start for action in result.plan.actions)
+
+
 def test_written_actions_and_reported_cost_share_the_same_trajectory() -> None:
     series = _series([0.2, 0.2, 3.0, 3.0, 3.0, 3.0])
     result = _plan(series, lambda start, end: (1.5, 0.0))
@@ -448,6 +470,28 @@ def test_solar_charging_counts_only_up_to_its_maximum_power() -> None:
     assert any(slot.battery_kw > 0.5 for slot in result.slots)
     assert all(slot.battery_kw <= 1.0 + 1e-9 for slot in result.slots)
     assert result.plan.actions == ()
+
+
+def test_tiny_unwritten_charge_without_sun_does_not_increase_soc() -> None:
+    result = _plan(
+        _series([0.1, 3.0]), lambda _start, _end: (1.0, 0.0),
+        usable_capacity_kwh=1.0, usable_soc_percent=10.0,
+        maximum_charge_kw=0.04, levels=100,
+    )
+    assert result.plan.actions == ()
+    assert all(slot.battery_kw == 0 for slot in result.slots)
+    assert all(slot.usable_soc_percent == pytest.approx(10.0) for slot in result.slots)
+
+
+def test_automatic_solar_never_uses_more_than_actual_surplus() -> None:
+    result = _plan(
+        _series([1.0] * 3), lambda _start, _end: (1.0, 1.5),
+        usable_soc_percent=50.0,
+        solar_charging=SolarCharging(True, 10.0, 90.0, minimum_surplus_kw=0.4),
+    )
+    solar = [slot for slot in result.slots if slot.performed_by == "automatic_solar_charging"]
+    assert solar
+    assert all(0 < slot.battery_kw <= slot.solar_kw - slot.load_kw + 1e-9 for slot in solar)
 
 
 def test_smart_deferral_exports_the_expensive_sun_before_the_deadline() -> None:

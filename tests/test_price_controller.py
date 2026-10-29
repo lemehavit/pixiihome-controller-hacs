@@ -893,6 +893,76 @@ async def test_whole_day_solar_segment_shows_automatic_solar_charging(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_whole_day_solar_uses_lower_battery_charge_limit() -> None:
+    instance, mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=True)
+    instance.battery = replace(instance.battery, charge_power_limit_w=1_000)
+    instance.operational_settings = instance.operational_settings.set(
+        "solar_max_charge_power_kw", 5.0
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert controller.planner_engine == "whole_day"
+    assert controller.solar_charging is not None
+    assert controller.solar_charging.maximum_kw == pytest.approx(1.0)
+    assert controller.whole_day is not None
+    assert any(slot.battery_kw > 0 for slot in controller.whole_day.slots)
+    assert all(slot.battery_kw <= 1.0 + 1e-9 for slot in controller.whole_day.slots)
+    assert mutations.created == []
+
+
+@pytest.mark.asyncio
+async def test_standard_mode_does_not_log_whole_day_solar_assumption(monkeypatch) -> None:
+    import custom_components.pixiihome_controller.price_controller as module
+
+    instance, mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=True)
+    instance.operational_settings = instance.operational_settings.set(
+        "price_whole_day_planner", False
+    )
+    logged: list[str] = []
+    monkeypatch.setattr(
+        module, "log_activity", lambda _runtime, _key, message, *_args: logged.append(message)
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert controller.planner_engine == "standard"
+    assert not any(message.startswith("Whole-day plan counts on solar charging")
+                   for message in logged)
+    assert mutations.created == []
+
+
+@pytest.mark.asyncio
+async def test_enabling_whole_day_logs_existing_solar_assumption(monkeypatch) -> None:
+    import custom_components.pixiihome_controller.price_controller as module
+
+    instance, mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=True)
+    instance.operational_settings = instance.operational_settings.set(
+        "price_whole_day_planner", False
+    )
+    logged: list[str] = []
+    monkeypatch.setattr(
+        module, "log_activity", lambda _runtime, _key, message, *_args: logged.append(message)
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+    instance.operational_settings = instance.operational_settings.set(
+        "price_whole_day_planner", True
+    )
+    await controller.tick()
+
+    assert controller.planner_engine == "whole_day"
+    assert logged.count("Whole-day plan counts on solar charging up to its limits") == 1
+    assert mutations.created == []
+
+
+@pytest.mark.asyncio
 async def test_whole_day_plan_follows_smart_solar_deferral() -> None:
     instance, mutations = runtime(schedule_writes=False)
     _sunny_flat_day(instance, solar_charging=True)
@@ -1520,6 +1590,30 @@ def test_standard_plan_logs_forecast_charge_limit_without_gateway_calls(monkeypa
     assert len(cap_entries) == 1
     assert "Energy already stored above minimum SOC is counted only" in cap_entries[0][1]
     assert "where its price basis qualifies" in cap_entries[0][1]
+    assert mutations.created == []
+    assert mutations.deleted == []
+
+
+def test_standard_plan_does_not_log_an_inactive_forecast_limit(monkeypatch):
+    from custom_components.pixiihome_controller import price_controller as module
+    from custom_components.pixiihome_controller.control.price_optimization import (
+        normalize_price_series,
+    )
+
+    _, instance, mutations, _, _ = _binding_runtime(monkeypatch)
+    instance.energy_forecast = SimpleNamespace(
+        net_load_kw=lambda _start, _end, high=False: 100.0,
+        net_forecast=lambda _start, _end, high=False: (100.0, 0.0),
+    )
+    logged = []
+    monkeypatch.setattr(module, "log_activity", lambda *_args: logged.append(_args[2:]))
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    series = normalize_price_series(instance.hass.states.state.attributes, "SEK/kWh")
+
+    result = controller._build_plan(series, controller._validated_limits())
+
+    assert not result.charge_demand_limited
+    assert not any("forecast profitable use" in message for message, _reason in logged)
     assert mutations.created == []
     assert mutations.deleted == []
 

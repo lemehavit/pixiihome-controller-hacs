@@ -2,6 +2,10 @@
 
 ## 0.5.22 — 2026-10-29
 
+- F7b: Dygnsplanens omspelning begränsar automatisk solladdning till verkligt
+  överskott och urladdning till faktisk energi över minsta SOC. Standardplanens
+  framtida pristoppar beräknas per segment och laddgränsen loggas bara när
+  laddbeslutet ändras. Jämförelsekostnadens externa påfyllning förtydligas.
 - F4: Ett eget schema som snart ska börja raderas inte medan det fortfarande
   kan behövas för planens styrning.
 - F7: Dygnsplanens SOC och ekonomi räknas från de åtgärder som faktiskt skrivs.
