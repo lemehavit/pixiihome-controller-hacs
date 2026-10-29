@@ -1014,7 +1014,20 @@ class PriceOptimizationController:
         battery = self.runtime.battery
         state = self.runtime.controller_state
         switch_on = bool(state.automatic_solar_charging_enabled)
-        authorized = bool(policy.enabled) and "automatic" in policy.allowed_operation_classes
+        authorized = (
+            bool(policy.enabled)
+            and "automatic" in policy.allowed_operation_classes
+            and policy.max_duration_seconds > 0
+        )
+        # The same run-time holds that stop the solar controller (solar_controller.py).
+        calibrating = getattr(self.runtime, "battery_calibration_active", None)
+        hold: str | None = None
+        if calibrating is not None and calibrating():
+            hold = "battery calibration is running, so the solar controller waits"
+        elif state.adaptive_peak_shaving_enabled:
+            hold = "adaptive peak shaving is on, which blocks automatic solar charging"
+        elif not self.runtime.production_control_enabled():
+            hold = "production control is disabled, so the solar controller is blocked"
         charge_limit_kw = (
             max(0.0, battery.charge_power_limit_w / 1000)
             if battery.charge_power_limit_w is not None else 0.0
@@ -1035,7 +1048,7 @@ class PriceOptimizationController:
             )
             defer_until = decision.deadline
         limit = SolarCharging(
-            enabled=switch_on and authorized,
+            enabled=switch_on and authorized and hold is None,
             maximum_kw=min(
                 float(settings.get("solar_max_charge_power_kw")),
                 charge_limit_kw,
@@ -1053,6 +1066,8 @@ class PriceOptimizationController:
                 why = "automatic solar charging is switched off, so the surplus is exported"
             elif not authorized:
                 why = "the automation policy does not allow automatic control"
+            elif hold is not None:
+                why = hold
             elif defer_until is not None:
                 why = (
                     "smart solar charging exports now; no solar charging is counted before "

@@ -5,10 +5,17 @@ created: '2026-10-29'
 status: done
 baseline_revision: cbe6fd8df646e964d3de70fcc436847075a51aad
 review_loop_iteration: 0
-followup_review_recommended: true
+followup_review_recommended: false
 context: []
 warnings: [oversized]
-deferred: []
+deferred:
+  - summary: >-
+      En redan publicerad dygnsplan ligger kvar i attributen när priscontrollern stannar (batterikalibrering, avstängd styrbehörighet och andra blockeringar), med solsegment märkta automatic_solar_charging.
+    evidence: |-
+      Sond 2026-10-29: en tick med sol och sedan en tick med battery_calibration_active=True eller production_control_enabled=False. Efteråt är whole_day kvar och segments visar fortfarande kind=solar, performed_by=automatic_solar_charging. _tick_locked returnerar före _build_plan (price_controller.py:641-660, prepare rad 381) och nollställer aldrig self.whole_day eller self.plan. Detta fanns före F5 och gäller alla blockeringsorsaker, men inga scheman skrivs medan controllern står still.
+    location: >-
+      custom_components/pixiihome_controller/price_controller.py:632-660
+    severity: medium
 ---
 
 <intent-contract>
@@ -75,6 +82,21 @@ deferred: []
   - `[false]` `[reject]` SOC-taket i `controllers.py` jämförs bara mot `solar_max_soc_percent`. — Den levande regulatorn är `solar_controller.py:348`, som använder `min(setting, policy)`. Diffen följer den.
   - `[false]` `[reject]` "Varje flöde" skulle kunna betyda även last-, sol- och exportflöden. — Attributets segment innehåller bara batteriflöden, och vart och ett har nu `performed_by`. Tomgångsintervall är inget flöde.
 
+### 2026-10-29 — Review pass (uppföljning, BLOCK från BMA-33)
+- verdicts: 11 findings — high 0, medium 2, low 4, false 4, maybe-false 1
+- findings:
+  - `[low]` `[patch]` (verification-gap) Starttröskeln `solar_export_start_threshold_kw` saknade test på controllernivå. Om `minimum_surplus_kw` togs bort i `_solar_charging` gick alla tester ändå igenom. — Lade till `test_whole_day_plan_counts_no_solar_charging_below_the_start_threshold` (överskott 0,5 kW, tröskel 1,0 kW). Den faller när argumentet byts mot `0.0`.
+  - `[medium]` `[patch]` (verification-gap, other) `_solar_charging` bortsåg från adaptiv toppkapning (APS). Runtime tillåter APS på medan solladdning är på (`runtime.py:1127-1139`), och då räknade planen med solladdning som solregulatorn blockerar (`solar_controller.py:287-290`). — Samma rotorsak som BMA-33:s fynd nedan. `_solar_charging` har nu samma körtidsspärrar som solregulatorn: kalibrering, APS och styrbehörighet. Dessutom räknas `policy.max_duration_seconds <= 0` som ej behörig. Testet `test_whole_day_plan_counts_no_solar_charging_while_adaptive_peak_shaving_is_on` visar inga segment, SOC 50 % och en loggrad.
+  - `[medium]` `[patch]` (extern granskning BMA-33) `price_controller.py:1038`: `SolarCharging.enabled` bortsåg från batterikalibrering, APS och avstängd styrbehörighet. — Grupperat med raden ovan, samma patch. Kalibrering och avstängd styrbehörighet stoppar redan priscontrollern innan någon plan byggs (`price_controller.py:641-645`, `381-382`). Spärren testas därför direkt på controllerns `_solar_charging` i `test_solar_limit_is_off_while_the_solar_controller_is_held[calibration|production_control]`. Alla tre testerna faller utan patchen. En kvarliggande gammal plan i attributen under sådana stopp fanns före F5 och är uppskjuten (se `deferred`).
+  - `[low]` `[reject]` (intent-alignment) Ekonomin (`expected_margin_sek`, `planned_cost_sek`) har ingen egen assertion. — Den räknas per intervall från samma `battery_kw` som SOC-testerna kontrollerar. Ett eget test ger ingen ny väg, och ingen fel utdata är påvisad.
+  - `[low]` `[reject]` (intent-alignment) Smart uppskjutning approximeras via privata `_smart_deferring` och testas med en stub. — Approximationen är avsiktlig och dokumenterad i Design Notes. Ett namnbyte fångas redan av `test_whole_day_plan_follows_smart_solar_deferral`.
+  - `[false]` `[reject]` (intent-alignment) `price_schedule`-märkningen kontrolleras inte mot en verklig skrivning. — Planerartestet visar att en motsvarande åtgärd finns i `plan.actions`. Skrivvägen är oförändrad av F5 och testas på andra ställen. Ingen fel utdata.
+  - `[false]` `[reject]` (intent-alignment) Ett blandat intervall får en enda etikett. — Det är ett designval. Det skrivna schemat utför hela flödet i intervallet, och etiketten säger just vem som utför det.
+  - `[low]` `[reject]` (intent-alignment) `kind == "grid_charge"` betyder nu "utöver den fria solandelen". — Det är avsiktligt enligt avsikten ("skriven nätladdning"), och inget annat än `_segments` läser fältet.
+  - `[maybe-false]` `[reject]` (intent-alignment) Invarianten utan begränsning jämförs bara mot koden efter F5. — Det som skulle avgöra saken är en jämförelse mot planen från före F5. Klämman `elif delta > 0` ändrar bara skrivna laddningar efter en filtrerad urladdning, där F5 medvetet rättade ett olönsamt schema. Om fyndet stämmer är det `low`.
+  - `[low]` `[reject]` (intent-alignment) Begränsningen loggas även i skuggläge när dygnsplaneraren är av. — Skuggplanen publiceras också då i `whole_day_plan`, så loggraden beskriver rätt plan. Det blir bara en rad per ändring.
+  - `[false]` `[reject]` (intent-alignment) Teständringar i `_blocked_notice_runtime` ligger utanför avsikten. — De kommer från senare commits som slogs ihop in i grenen (F3b/F2c), inte från F5. Diffens intervall `cf14af7^..HEAD` tog med dem.
+
 ## Design Notes
 
 Ekonomin (nätflöde = net + batteri) är densamma oavsett vem som laddar. Det som skiljer är vinstkravet och om ett schema måste skrivas. Fri sol i AC-kW för nivå L: `min(room_kw[k], max(0, idx_sol − L)·step/(eta·h))`. I DP blir kostnaden `econ[delta] + hurdle·max(0, laddad_AC − fri_sol·h)`. Det är billigt per nivå och kräver ingen ny tabell. Smart uppskjutning modelleras som att intervall i dag med pris ≥ `charge_price + solar_smart_min_advantage` före `deadline` inte får solladdning, eftersom regulatorn då exporterar. Antagande: bara när regulatorn just nu skjuter upp (`_smart_deferring`).
@@ -122,3 +144,32 @@ Status: done
 - Energistegen kan ge en laddning strax över solens effektgräns. Den skrivs då som ett litet schema, samma mönster som vid överskottsgränsen före F5.
 - Uppskjutningen läses via det privata attributet `_smart_deferring`. Ett namnbyte fångas nu av ett test.
 - Planen bortser från starttröskelns hysteres (stopptröskeln), så den är något försiktig när solladdningen redan är igång.
+
+### Uppföljningspass 2026-10-29 (BLOCK från BMA-33)
+
+**Sammanfattning:** Planerarens solladdningsgräns `_solar_charging` har nu samma körtidsspärrar som solregulatorn (`solar_controller.py:283-293`). Under batterikalibrering, adaptiv toppkapning eller avstängd styrbehörighet räknar planen inte med någon solladdning. Detsamma gäller när policyns `max_duration_seconds` är 0. Orsaken loggas med `log_activity`.
+
+**Ändrade filer:**
+- `custom_components/pixiihome_controller/price_controller.py` — `_solar_charging`: spärrarna, villkoret för `max_duration_seconds` och loggorsaken.
+- `tests/test_price_controller.py` — APS via hela ticken, kalibrering och styrbehörighet via `_solar_charging`, och starttröskeln på controllernivå.
+
+**Granskning:**
+- 11 fynd.
+- **Patchat:** 2 poster, en medium (APS, grupperad med BMA-33:s fynd) och en low (tröskeltest). Ingen high.
+- **Uppskjutet:** 1 fynd. En gammal plan ligger kvar i attributen när controllern stannar. Det fanns före F5 (medium).
+- **Avvisat:** 7 fynd, med orsaker i triageloggen.
+
+**Uppföljande granskning:** rekommenderas inte (`false`). Det här är ett uppföljningspass, och ingen high patchades.
+
+**Verifiering:**
+- `pytest tests/test_whole_day_planner.py tests/test_price_controller.py` gav 103 godkända.
+- Utan patchen i `price_controller.py` faller de tre spärrtesterna.
+- Med `minimum_surplus_kw=0.0` faller tröskeltestet.
+- `ruff check` på de fyra filerna passerade.
+- `pyright` på de två kodfilerna gav 0 fel.
+- `git diff --check` passerade.
+- Inga live-anrop.
+
+**Kvarvarande risk:**
+- Den kvarliggande gamla planen under stopp (se `deferred`).
+- Spärrarna för kalibrering och styrbehörighet nås i dag inte via ticken, eftersom priscontrollern stannar före dem. De speglar solregulatorn för framtida anropare.

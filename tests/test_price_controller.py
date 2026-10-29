@@ -799,6 +799,70 @@ async def test_whole_day_plan_counts_no_solar_charging_when_it_is_switched_off(
 
 
 @pytest.mark.asyncio
+async def test_whole_day_plan_counts_no_solar_charging_while_adaptive_peak_shaving_is_on(
+    monkeypatch,
+) -> None:
+    instance, mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=True)
+    # The runtime lets peak shaving be switched on while solar charging is on.
+    instance.controller_state = replace(
+        instance.controller_state, adaptive_peak_shaving_enabled=True
+    )
+    import custom_components.pixiihome_controller.price_controller as module
+
+    logged: list[str] = []
+    monkeypatch.setattr(
+        module, "log_activity", lambda _runtime, _key, message, *_args: logged.append(message)
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    attributes = controller.attributes()
+    assert attributes["planner_engine"] == "whole_day"
+    assert attributes["whole_day_plan"]["segments"] == []
+    assert attributes["maximum_projected_usable_soc"] == pytest.approx(50.0)
+    assert "Whole-day plan counts on solar charging not at all" in logged
+    assert mutations.created == []
+
+
+@pytest.mark.parametrize("hold", ["calibration", "production_control"])
+def test_solar_limit_is_off_while_the_solar_controller_is_held(hold: str) -> None:
+    # The price controller itself stops on these holds, so no tick builds a plan;
+    # the limit still mirrors the solar controller for any caller.
+    instance, _mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=True)
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    assert controller._solar_charging(instance._automation_policy()).enabled is True
+    if hold == "calibration":
+        instance.battery_calibration_active = lambda: True
+    else:
+        instance.production_control_enabled = lambda: False
+
+    assert controller._solar_charging(instance._automation_policy()).enabled is False
+
+
+@pytest.mark.asyncio
+async def test_whole_day_plan_counts_no_solar_charging_below_the_start_threshold() -> None:
+    instance, mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=True)
+    # 0.5 kW surplus, below the default 1.0 kW start threshold.
+    instance.energy_forecast = SimpleNamespace(
+        net_load_kw=lambda start, end, high=False: -0.5,
+        net_forecast=lambda start, end, high=False: (0.0, 0.5),
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    attributes = controller.attributes()
+    assert attributes["planner_engine"] == "whole_day"
+    assert attributes["whole_day_plan"]["segments"] == []
+    assert attributes["maximum_projected_usable_soc"] == pytest.approx(50.0)
+    assert mutations.created == []
+
+
+@pytest.mark.asyncio
 async def test_whole_day_solar_segment_shows_automatic_solar_charging(monkeypatch) -> None:
     instance, mutations = runtime(schedule_writes=False)
     _sunny_flat_day(instance, solar_charging=True)
