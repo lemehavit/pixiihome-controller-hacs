@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -16,6 +17,7 @@ from custom_components.pixiihome_controller.control.price_optimization import (
     merge_adjacent_actions,
 )
 from custom_components.pixiihome_controller.control.whole_day_planner import (
+    SolarCharging,
     build_whole_day_plan,
 )
 
@@ -402,3 +404,171 @@ def test_the_plan_still_exports_when_the_buy_back_leaves_enough() -> None:
     assert any(
         a.discharge_mode is PriceDischargeMode.EXPORT for a in result.plan.actions
     )
+
+
+# CAP-F5: the plan only counts on solar charging that something carries out.
+
+
+def _sunny(start: datetime, end: datetime) -> tuple[float, float]:
+    return (0.0, 3.0)
+
+
+def test_solar_charging_off_leaves_the_surplus_unused() -> None:
+    result = _plan(
+        _series([1.0] * 6), _sunny, usable_soc_percent=50.0,
+        solar_charging=SolarCharging(False, 10.0, 90.0),
+    )
+    assert all(slot.usable_soc_percent == pytest.approx(50.0) for slot in result.slots)
+    assert all(slot.kind == "idle" for slot in result.slots)
+    assert all(slot.performed_by == "none" for slot in result.slots)
+    assert result.plan.actions == ()
+    assert result.plan.maximum_projected_soc == pytest.approx(50.0)
+
+
+def test_solar_charging_stops_at_its_own_soc_cap() -> None:
+    result = _plan(
+        _series([1.0] * 6), _sunny, usable_soc_percent=50.0,
+        solar_charging=SolarCharging(True, 10.0, 80.0),
+    )
+    assert result.plan.maximum_projected_soc == pytest.approx(80.0)
+    assert result.slots[-1].usable_soc_percent == pytest.approx(80.0)
+    charging = [slot for slot in result.slots if slot.battery_kw > 0.05]
+    assert charging
+    assert all(slot.kind == "solar" for slot in charging)
+    assert all(slot.performed_by == "automatic_solar_charging" for slot in charging)
+    assert charging[0].as_dict()["performed_by"] == "automatic_solar_charging"
+    assert result.plan.actions == ()
+
+
+def test_solar_charging_counts_only_up_to_its_maximum_power() -> None:
+    result = _plan(
+        _series([1.0] * 6), _sunny, usable_soc_percent=50.0,
+        solar_charging=SolarCharging(True, 1.0, 90.0),
+    )
+    assert any(slot.battery_kw > 0.5 for slot in result.slots)
+    assert all(slot.battery_kw <= 1.0 + 1e-9 for slot in result.slots)
+    assert result.plan.actions == ()
+
+
+def test_smart_deferral_exports_the_expensive_sun_before_the_deadline() -> None:
+    series = _series([1.5, 1.5, 1.0, 1.0])
+    limit = SolarCharging(True, 1.0, 80.0)
+    # A minimum profit high enough that no written charge pays here; no losses,
+    # so whole energy steps match the 1 kW solar limit exactly.
+    normal = _plan(
+        series, _sunny, usable_soc_percent=50.0, minimum_difference_sek_per_kwh=1.0,
+        round_trip_efficiency_percent=100.0,
+        solar_charging=limit,
+    )
+    # Without deferral the cheap hours are not enough: the sun is used early too.
+    assert normal.slots[0].battery_kw + normal.slots[1].battery_kw > 0.05
+    # Deferring: charge price 1.0 + minimum advantage 0.2.
+    deferring = replace(limit, defer_from_price=1.2, defer_until=series.intervals[3].end)
+    result = _plan(
+        series, _sunny, usable_soc_percent=50.0, minimum_difference_sek_per_kwh=1.0,
+        round_trip_efficiency_percent=100.0,
+        solar_charging=deferring,
+    )
+    assert result.slots[0].battery_kw == pytest.approx(0.0)
+    assert result.slots[1].battery_kw == pytest.approx(0.0)
+    assert result.slots[2].performed_by == "automatic_solar_charging"
+    assert result.plan.actions == ()
+
+
+def test_profitable_charge_from_the_surplus_is_written_when_solar_charging_is_off() -> None:
+    def forecast(start: datetime, end: datetime) -> tuple[float, float]:
+        return (0.0, 3.0) if start == NOW + timedelta(hours=1) else (2.0, 0.0)
+
+    result = _plan(
+        _series([0.1, 3.0]), forecast, solar_charging=SolarCharging(False, 10.0, 90.0),
+    )
+    first = result.slots[0]
+    assert first.battery_kw > 0.05
+    assert first.kind == "grid_charge"
+    assert first.performed_by == "price_schedule"
+    charge = [a for a in result.plan.actions if a.direction is PriceDirection.CHARGE]
+    assert len(charge) == 1 and charge[0].service == "demandresponse"
+    assert charge[0].start == first.start
+    assert result.slots[1].performed_by == "price_schedule"
+
+
+def test_without_a_solar_limit_the_plan_counts_the_whole_surplus() -> None:
+    prices = [1.5, 1.4, 0.3, 0.2, 1.3, 1.2, 2.5, 2.5]
+
+    def forecast(start: datetime, end: datetime) -> tuple[float, float]:
+        hour = int((start - NOW).total_seconds() // 3600) - 1
+        return (1.0, 5.0 if hour < 6 else 0.0)
+
+    unlimited = _plan(_series(prices), forecast, maximum_charge_kw=4.0)
+    explicit = _plan(_series(prices), forecast, maximum_charge_kw=4.0, solar_charging=None)
+    loose = _plan(
+        _series(prices), forecast, maximum_charge_kw=4.0,
+        solar_charging=SolarCharging(True, 10.0, 100.0),
+    )
+    assert explicit == unlimited
+    assert loose.plan == unlimited.plan
+    assert [s.battery_kw for s in loose.slots] == [s.battery_kw for s in unlimited.slots]
+    solar = [slot for slot in unlimited.slots if slot.kind == "solar"]
+    assert solar and all(slot.performed_by == "automatic_solar_charging" for slot in solar)
+
+
+def test_solar_charge_after_a_filtered_discharge_stops_at_the_solar_cap() -> None:
+    # The minimum profit keeps the 1.10 discharges from being written, so the
+    # battery stays at the 80 % solar cap. The refill DP left to the sun must
+    # not turn into a written charge schedule.
+    def forecast(start: datetime, end: datetime) -> tuple[float, float]:
+        hour = int((start - NOW).total_seconds() // 3600) - 1
+        return (1.0, 0.0) if hour < 2 else (0.0, 3.0)
+
+    series = _series([1.10, 1.10, 0.80, 0.80])
+    result = _plan(
+        series, forecast, usable_soc_percent=80.0,
+        solar_charging=SolarCharging(True, 10.0, 80.0),
+    )
+    third = result.slots[2]
+    assert third.battery_kw == pytest.approx(0.0)
+    assert third.usable_soc_percent == pytest.approx(80.0)
+    assert all(
+        action.start != series.intervals[2].start
+        for action in result.plan.actions
+        if action.direction is PriceDirection.CHARGE
+    )
+
+
+def test_written_charge_after_a_filtered_discharge_refills_only_what_was_used() -> None:
+    # DP plans 30 -> 15 % at 0.8, 15 -> 10 % at 1.1 and a refill to 38 % in
+    # the sunny last hour (partly beyond the 1 kW solar limit, so written).
+    # The 0.8 discharge is below the minimum profit and stays unwritten; the
+    # written charge must then stop at DP's 38 %, not also refill the 15 %
+    # that was never discharged.
+    def forecast(start: datetime, end: datetime) -> tuple[float, float]:
+        hour = int((start - NOW).total_seconds() // 3600) - 1
+        return [(2.0, 0.0), (0.5, 0.0), (0.5, 0.0), (0.0, 3.0)][hour]
+
+    series = _series([0.8, 1.1, 0.1, 0.3])
+    result = _plan(
+        series, forecast, usable_soc_percent=30.0,
+        solar_charging=SolarCharging(True, 1.0, 80.0),
+    )
+    assert result.slots[0].performed_by == "none"
+    assert result.slots[1].usable_soc_percent == pytest.approx(25.0)
+    last = result.slots[-1]
+    assert last.performed_by == "price_schedule"
+    assert last.usable_soc_percent == pytest.approx(38.0)
+    charge = [a for a in result.plan.actions if a.direction is PriceDirection.CHARGE]
+    assert len(charge) == 1 and charge[0].power_kw == pytest.approx(1.4)
+
+
+def test_surplus_below_the_start_threshold_is_not_solar_charged() -> None:
+    result = _plan(
+        _series([1.0] * 6), lambda start, end: (0.0, 0.5), usable_soc_percent=50.0,
+        solar_charging=SolarCharging(True, 10.0, 90.0, minimum_surplus_kw=1.0),
+    )
+    assert all(slot.battery_kw == pytest.approx(0.0) for slot in result.slots)
+    assert all(slot.usable_soc_percent == pytest.approx(50.0) for slot in result.slots)
+    assert result.plan.actions == ()
+    started = _plan(
+        _series([1.0] * 6), lambda start, end: (0.0, 0.5), usable_soc_percent=50.0,
+        solar_charging=SolarCharging(True, 10.0, 90.0, minimum_surplus_kw=0.4),
+    )
+    assert any(slot.performed_by == "automatic_solar_charging" for slot in started.slots)

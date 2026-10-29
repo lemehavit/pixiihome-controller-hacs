@@ -42,6 +42,37 @@ from .price_optimization import (
 
 ENERGY_LEVELS = 100
 
+PERFORMED_BY_SOLAR = "automatic_solar_charging"
+PERFORMED_BY_PRICE = "price_schedule"
+PERFORMED_BY_EXTERNAL = "external_schedule"
+PERFORMED_BY_NONE = "none"
+
+
+@dataclass(frozen=True, slots=True)
+class SolarCharging:
+    """What automatic solar charging really does, without any schedule.
+
+    Only charging inside these limits is free and needs no written action.
+    While smart solar charging defers, intervals before ``defer_until`` priced
+    at ``defer_from_price`` or more get no solar charging (it exports then).
+    Solar charging never starts on a surplus below ``minimum_surplus_kw``.
+    """
+
+    enabled: bool
+    maximum_kw: float
+    maximum_soc_percent: float
+    defer_from_price: float | None = None
+    defer_until: datetime | None = None
+    minimum_surplus_kw: float = 0.0
+
+    def defers(self, item: PriceInterval) -> bool:
+        return (
+            self.defer_from_price is not None
+            and self.defer_until is not None
+            and item.start < self.defer_until
+            and item.price_sek_per_kwh >= self.defer_from_price
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class WholeDaySlot:
@@ -55,14 +86,18 @@ class WholeDaySlot:
     battery_kw: float
     usable_soc_percent: float
     blocked: bool
+    # Solar charging that runs without a schedule in this interval (AC kW).
+    free_solar_kw: float
+    # Who carries the flow out: automatic_solar_charging, price_schedule,
+    # external_schedule or none.
+    performed_by: str
 
     @property
     def kind(self) -> str:
-        surplus = max(0.0, self.solar_kw - self.load_kw)
         if self.blocked:
             return "external"
         if self.battery_kw > 0.05:
-            return "solar" if self.battery_kw <= surplus + 0.05 else "grid_charge"
+            return "solar" if self.battery_kw <= self.free_solar_kw + 0.05 else "grid_charge"
         if self.battery_kw < -0.05:
             return (
                 "self_consumption"
@@ -81,6 +116,7 @@ class WholeDaySlot:
             "battery_kw": round(self.battery_kw, 2),
             "soc": round(self.usable_soc_percent, 1),
             "kind": self.kind,
+            "performed_by": self.performed_by,
         }
 
 
@@ -114,8 +150,14 @@ def build_whole_day_plan(
     end_before: datetime | None = None,
     external_windows: Sequence[ExternalWindow] = (),
     levels: int = ENERGY_LEVELS,
+    solar_charging: SolarCharging | None = None,
 ) -> WholeDayResult:
-    """Plan the cheapest battery trajectory; ``forecast`` gives (load_kw, solar_kw)."""
+    """Plan the cheapest battery trajectory; ``forecast`` gives (load_kw, solar_kw).
+
+    ``solar_charging`` limits the solar charging counted on without a schedule;
+    ``None`` counts the whole surplus. Charging beyond it is a written grid
+    charge that must earn the minimum profit.
+    """
     if now.tzinfo is None:
         raise ValueError("price_plan_now_naive")
     if not 0 <= minimum_soc_percent < maximum_soc_percent <= 100:
@@ -163,6 +205,32 @@ def build_whole_day_plan(
     idx_max = min(levels, max(0, floor(maximum_soc_percent / 100 * levels + 1e-9)))
     start_index = min(levels, max(0, round(usable_soc_percent / 100 * levels)))
     export_extra = max(0.0, export_minimum_difference_sek_per_kwh - minimum_difference_sek_per_kwh)
+    # Solar charging that runs on its own, per interval (AC kW), up to idx_sol.
+    solar_room: list[float] = []
+    for index, item in enumerate(candidates):
+        load, solar = flows[index]
+        surplus = max(0.0, solar - load)
+        if solar_charging is None:
+            solar_room.append(surplus)
+        elif (
+            not solar_charging.enabled
+            or solar_charging.defers(item)
+            or surplus < solar_charging.minimum_surplus_kw
+        ):
+            solar_room.append(0.0)
+        else:
+            solar_room.append(min(surplus, max(0.0, solar_charging.maximum_kw)))
+    idx_sol = levels if solar_charging is None else min(levels, max(0, floor(
+        solar_charging.maximum_soc_percent / 100 * levels + 1e-9
+    )))
+
+    def free_solar_kw(index: int, energy: float) -> float:
+        """Solar charging (AC kW) that needs no schedule from stored ``energy``."""
+        room = solar_room[index]
+        if solar_charging is None or room <= 0:
+            return room
+        headroom = max(0.0, idx_sol * step - energy)
+        return min(room, headroom / (eta * candidates[index].duration_hours))
 
     count = len(candidates)
     blocked = [
@@ -213,19 +281,16 @@ def build_whole_day_plan(
         cost = grid * hours * (price + gic) if grid > 0 else grid * hours * price
         if battery < 0:
             cost += -battery * hours * cycle_cost_sek_per_kwh
-        if decision:
-            if battery > 0:
-                cost += max(0.0, battery - max(0.0, -net)) * hours * rt * (
-                    minimum_difference_sek_per_kwh
-                )
-            elif battery < 0:
-                cost += max(0.0, -battery - max(0.0, net)) * hours * export_extra
+        # A charge's minimum-profit hurdle depends on the stored energy (the
+        # solar SOC cap), so the DP adds it per level.
+        if decision and battery < 0:
+            cost += max(0.0, -battery - max(0.0, net)) * hours * export_extra
         return cost, battery
 
-    moves: list[list[tuple[int, float]]] = []
+    moves: list[list[tuple[int, float, float]]] = []
     for index, item in enumerate(candidates):
         if blocked[index]:
-            moves.append([(0, 0.0)])
+            moves.append([(0, 0.0, 0.0)])
             continue
         hours = item.duration_hours
         load, solar = flows[index]
@@ -235,7 +300,7 @@ def build_whole_day_plan(
             discharge_kw = min(discharge_kw, max(0.0, load - solar))
         down = floor(discharge_kw * hours / eta / step + 1e-9)
         moves.append([
-            (delta, slot_cost(index, delta, decision=True)[0]) for delta in range(-down, up + 1)
+            (delta, *slot_cost(index, delta, decision=True)) for delta in range(-down, up + 1)
         ])
 
     infinity = float("inf")
@@ -257,12 +322,14 @@ def build_whole_day_plan(
                 for level in range(levels + 1)
             ]
         updated = [infinity] * (levels + 1)
+        hours = candidates[index].duration_hours
         for level in range(levels + 1):
             ceiling = max(level, idx_max)
             floor_level = min(level, idx_min)
+            free = free_solar_kw(index, level * step)
             best = infinity
             best_delta = 0
-            for delta, cost in moves[index]:
+            for delta, cost, battery in moves[index]:
                 nxt = level + delta
                 if nxt < 0 or nxt > levels:
                     continue
@@ -270,6 +337,12 @@ def build_whole_day_plan(
                     continue
                 if delta < 0 and nxt < floor_level:
                     continue
+                if battery > 0:
+                    # Charging beyond the solar charging that runs on its own
+                    # is a written grid charge: it must earn the minimum profit.
+                    cost += max(0.0, battery - free) * hours * rt * (
+                        minimum_difference_sek_per_kwh
+                    )
                 total = cost + value[nxt]
                 if total < best - 1e-12:
                     best, best_delta = total, delta
@@ -285,8 +358,7 @@ def build_whole_day_plan(
     for index in range(count):
         delta = choice[index][probe]
         _, battery = slot_cost(index, delta, decision=False)
-        load, solar = flows[index]
-        grid_charge.append(battery > max(0.0, solar - load) + 0.05)
+        grid_charge.append(battery > free_solar_kw(index, probe * step) + 0.05)
         probe += delta
         if index + 1 in resets:
             probe = resets[index + 1][0]
@@ -323,15 +395,27 @@ def build_whole_day_plan(
         candidate_delta = (
             min(delta, max(0, idx_max - round(kept / step))) if delta > 0 else delta
         )
+        # A charge DP left to solar charging stays solar charging: it stops at
+        # the solar SOC cap of the actual battery, never becoming a schedule.
+        if delta > 0 and slot_cost(index, delta, decision=False)[1] <= (
+            free_solar_kw(index, level * step) + 0.05
+        ):
+            candidate_delta = min(candidate_delta, max(0, idx_sol - round(kept / step)))
+        elif delta > 0:
+            # A written charge only buys up to the level DP planned: energy a
+            # filtered discharge left in the battery needs no refill.
+            candidate_delta = min(candidate_delta, max(0, level + delta - round(kept / step)))
         _, battery = slot_cost(index, candidate_delta, decision=False)
         base_cost, _ = slot_cost(index, 0, decision=False)
         baseline += base_cost
         level += delta
         load, solar = flows[index]
+        free = free_solar_kw(index, kept)
         projected_soc = min(levels * step, max(0.0, kept + candidate_delta * step))
         projected_soc = projected_soc / usable_capacity_kwh * 100
         action = _action(
             item, load, solar, battery, projected_soc,
+            free_solar_kw=free,
             maximum_discharge_kw=maximum_discharge_kw,
             step_kw=step / (eta * item.duration_hours),
             reference=_basis(
@@ -343,21 +427,20 @@ def build_whole_day_plan(
             grid_import_cost=gic,
             cycle_cost=cycle_cost_sek_per_kwh,
         )
-        net = load - solar
         written = action is not None and _meets_minimum(
             action, minimum_difference_sek_per_kwh, export_minimum_difference_sek_per_kwh
         )
-        # Solar charging needs no schedule. A discharge, or a grid charge,
-        # only changes the battery if its schedule is actually written.
+        # Solar charging within its limits needs no schedule. A discharge, or
+        # any other charge, only changes the battery if its schedule is written.
         effective_delta = (
             candidate_delta
-            if written or (candidate_delta > 0 and battery <= max(0.0, -net) + 0.05)
+            if written or (candidate_delta > 0 and battery <= free + 0.05)
             else 0
         )
         effective_cost, effective_battery = slot_cost(index, effective_delta, decision=False)
         planned += effective_cost
-        if effective_battery > max(0.0, -net) + 0.05:
-            grid_part = (effective_battery - max(0.0, -net)) * item.duration_hours
+        if effective_battery > free + 0.05:
+            grid_part = (effective_battery - free) * item.duration_hours
             charged_energy += grid_part
             charged_cost += grid_part * item.price_sek_per_kwh
         if written and action is not None:
@@ -375,9 +458,17 @@ def build_whole_day_plan(
             baseline_energy = target_energy
             level = target
         soc = kept / usable_capacity_kwh * 100
+        if blocked[index]:
+            performed_by = PERFORMED_BY_EXTERNAL
+        elif not effective_delta:
+            performed_by = PERFORMED_BY_NONE
+        elif written:
+            performed_by = PERFORMED_BY_PRICE
+        else:
+            performed_by = PERFORMED_BY_SOLAR
         slots.append(WholeDaySlot(
             item.start, item.end, item.price_sek_per_kwh, load, solar, effective_battery, soc,
-            blocked[index],
+            blocked[index], free, performed_by,
         ))
     margin_total = baseline - planned + terminal_value * (kept - baseline_energy)
     for window in windows:
@@ -405,6 +496,7 @@ def _action(
     battery: float,
     soc: float,
     *,
+    free_solar_kw: float | None = None,
     maximum_discharge_kw: float,
     step_kw: float,
     reference: float,
@@ -418,12 +510,15 @@ def _action(
     battery. Per interval, though, a charge only spends and a discharge only
     saves, so both are shown as one cycle on the discharge: what it saves
     minus what its energy cost (``reference``, after losses and cycle cost).
-    A charge shows no profit of its own.
+    A charge shows no profit of its own. Only charging beyond the solar
+    charging that runs on its own (``free_solar_kw``, the whole surplus when
+    not given) needs a schedule.
     """
     net = load - solar
     hours = item.duration_hours
     price = item.price_sek_per_kwh
-    if battery > max(0.0, -net) + 0.05:
+    free = max(0.0, -net) if free_solar_kw is None else free_solar_kw
+    if battery > free + 0.05:
         power = round(battery, 1)
         if power < 0.1:
             return None
@@ -496,4 +591,13 @@ def _blocked(series: PriceSeries, blocker: str, soc: float) -> WholeDayResult:
     return WholeDayResult(plan, (), 0.0, 0.0)
 
 
-__all__ = ["WholeDayResult", "WholeDaySlot", "build_whole_day_plan"]
+__all__ = [
+    "PERFORMED_BY_EXTERNAL",
+    "PERFORMED_BY_NONE",
+    "PERFORMED_BY_PRICE",
+    "PERFORMED_BY_SOLAR",
+    "SolarCharging",
+    "WholeDayResult",
+    "WholeDaySlot",
+    "build_whole_day_plan",
+]

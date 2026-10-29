@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers.event import async_track_state_change_event
 
-from .activity import log_activity
+from .activity import clock, log_activity
 from .activity import span as time_span
 from .control.price_optimization import (
     CONF_PRICE_OPTIMIZATION,
@@ -27,7 +27,7 @@ from .control.price_optimization import (
     merge_adjacent_actions,
     normalize_price_series,
 )
-from .control.whole_day_planner import WholeDayResult, build_whole_day_plan
+from .control.whole_day_planner import SolarCharging, WholeDayResult, build_whole_day_plan
 from .price_guard import PriceSocGuard
 from .protocol.scheduler_readback import parse_scheduler_starttime
 from .reasons import reason_text
@@ -119,6 +119,8 @@ class PriceOptimizationController:
         self.planner_engine = "standard"
         self._logged_plan: tuple[object, ...] | None = None
         self._logged_charge_limit_fingerprint: str | None = None
+        # The solar charging the whole-day plan last counted on (logged on change).
+        self.solar_charging: SolarCharging | None = None
         self.problem_since: datetime | None = None
         self.problem_notified = False
         # True while one planning pass runs. A passing non-problem status
@@ -964,12 +966,14 @@ class PriceOptimizationController:
         plan = standard
         self.whole_day = None
         if forecast is not None:
+            solar_charging = self._solar_charging(policy)
             try:
                 self.whole_day = build_whole_day_plan(
                     series,
                     **arguments,
                     external_windows=windows,
                     forecast=lambda start, end: forecast.net_forecast(start, end, high=high),
+                    solar_charging=solar_charging,
                 )
             except ValueError:
                 self.whole_day = None
@@ -1003,6 +1007,73 @@ class PriceOptimizationController:
         return replace(
             plan, actions=merge_adjacent_actions(plan.actions, policy.max_duration_seconds)
         )
+
+    def _solar_charging(self, policy: Any) -> SolarCharging:
+        """The solar charging that runs without a schedule, as the solar controller does it."""
+        settings = self.runtime.operational_settings
+        battery = self.runtime.battery
+        state = self.runtime.controller_state
+        switch_on = bool(state.automatic_solar_charging_enabled)
+        authorized = bool(policy.enabled) and "automatic" in policy.allowed_operation_classes
+        charge_limit_kw = (
+            max(0.0, battery.charge_power_limit_w / 1000)
+            if battery.charge_power_limit_w is not None else 0.0
+        )
+        defer_from: float | None = None
+        defer_until: datetime | None = None
+        solar = getattr(self.runtime, "solar_charging_controller", None)
+        decision = getattr(solar, "smart_decision", None)
+        if (
+            bool(getattr(solar, "_smart_deferring", False))
+            and decision is not None
+            and decision.defer
+            and decision.charge_price is not None
+            and decision.deadline is not None
+        ):
+            defer_from = decision.charge_price + float(
+                settings.get("solar_smart_min_advantage_sek_per_kwh")
+            )
+            defer_until = decision.deadline
+        limit = SolarCharging(
+            enabled=switch_on and authorized,
+            maximum_kw=min(
+                float(settings.get("solar_max_charge_power_kw")),
+                charge_limit_kw,
+                float(policy.max_power_kw),
+            ),
+            maximum_soc_percent=min(
+                float(settings.get("solar_max_soc_percent")), float(policy.soc_max_percent)
+            ),
+            defer_from_price=defer_from,
+            defer_until=defer_until,
+            minimum_surplus_kw=float(settings.get("solar_export_start_threshold_kw")),
+        )
+        if limit != self.solar_charging:
+            if not switch_on:
+                why = "automatic solar charging is switched off, so the surplus is exported"
+            elif not authorized:
+                why = "the automation policy does not allow automatic control"
+            elif defer_until is not None:
+                why = (
+                    "smart solar charging exports now; no solar charging is counted before "
+                    f"{clock(defer_until)} in intervals priced at {defer_from or 0:.2f} "
+                    "kr/kWh or more"
+                )
+            else:
+                why = (
+                    f"automatic solar charging charges up to {limit.maximum_kw:.1f} kW "
+                    f"and {limit.maximum_soc_percent:.0f} % usable SOC, from a surplus "
+                    f"of {limit.minimum_surplus_kw:.1f} kW"
+                )
+            log_activity(
+                self.runtime, PRICE_STATUS,
+                "Whole-day plan counts on solar charging "
+                + ("up to its limits" if limit.enabled else "not at all"),
+                f"Why: {why}. Charging beyond this needs a written price schedule "
+                "that earns the minimum profit.",
+            )
+            self.solar_charging = limit
+        return limit
 
     def _binding_windows(
         self,
@@ -1955,7 +2026,12 @@ def _segments(result: WholeDayResult) -> list[dict[str, object]]:
     segments: list[dict[str, object]] = []
     for slot in result.slots:
         kind = slot.kind
-        if segments and segments[-1]["kind"] == kind and segments[-1]["end"] == slot.start:
+        if (
+            segments
+            and segments[-1]["kind"] == kind
+            and segments[-1]["performed_by"] == slot.performed_by
+            and segments[-1]["end"] == slot.start
+        ):
             last = segments[-1]
             last["end"] = slot.end
             last["energy_kwh"] = float(last["energy_kwh"]) + slot.battery_kw * (  # type: ignore[arg-type]
@@ -1967,6 +2043,7 @@ def _segments(result: WholeDayResult) -> list[dict[str, object]]:
             "start": slot.start,
             "end": slot.end,
             "kind": kind,
+            "performed_by": slot.performed_by,
             "energy_kwh": slot.battery_kw * (slot.end - slot.start).total_seconds() / 3600,
             "end_soc": round(slot.usable_soc_percent, 1),
         })

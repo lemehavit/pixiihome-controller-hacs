@@ -19,6 +19,7 @@ from custom_components.pixiihome_controller.control.settings import (
     ControllerState,
     OperationalSettings,
 )
+from custom_components.pixiihome_controller.control.smart_solar import SmartSolarDecision
 from custom_components.pixiihome_controller.price_controller import (
     PRICE_OWNER,
     PriceOptimizationController,
@@ -741,6 +742,130 @@ async def test_whole_day_attributes_follow_filtered_discharge() -> None:
     assert whole_day["cost_without_battery_sek"] == pytest.approx(3.8)
     assert whole_day["planned_cost_sek"] == pytest.approx(3.8)
     assert whole_day["expected_margin_sek"] == pytest.approx(0.0)
+    assert mutations.created == []
+
+
+def _sunny_flat_day(instance, *, solar_charging: bool) -> None:
+    """Flat prices, 3 kW sun and no load: only solar charging may fill the battery."""
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+    instance.hass.states.state.attributes = {
+        "unit_of_measurement": "SEK/kWh",
+        "prices": [
+            {
+                "start": (start + timedelta(hours=index)).isoformat(),
+                "end": (start + timedelta(hours=index + 1)).isoformat(),
+                "price": 1.0,
+            }
+            for index in range(4)
+        ],
+    }
+    instance.energy_forecast = SimpleNamespace(
+        net_load_kw=lambda start, end, high=False: -3.0,
+        net_forecast=lambda start, end, high=False: (0.0, 3.0),
+    )
+    instance.controller_state = ControllerState(
+        automatic_price_optimization_enabled=True,
+        automatic_solar_charging_enabled=solar_charging,
+    )
+    settings = instance.operational_settings.set("price_whole_day_planner", True)
+    settings = settings.set("price_grid_import_cost_sek_per_kwh", 0.5)
+    instance.operational_settings = settings.set("solar_max_soc_percent", 80.0)
+
+
+@pytest.mark.asyncio
+async def test_whole_day_plan_counts_no_solar_charging_when_it_is_switched_off(
+    monkeypatch,
+) -> None:
+    instance, mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=False)
+    import custom_components.pixiihome_controller.price_controller as module
+
+    logged: list[str] = []
+    monkeypatch.setattr(
+        module, "log_activity", lambda _runtime, _key, message, *_args: logged.append(message)
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    attributes = controller.attributes()
+    assert attributes["planner_engine"] == "whole_day"
+    assert attributes["whole_day_plan"]["segments"] == []
+    assert attributes["whole_day_plan"]["action_count"] == 0
+    assert attributes["minimum_projected_usable_soc"] == pytest.approx(50.0)
+    assert attributes["maximum_projected_usable_soc"] == pytest.approx(50.0)
+    assert "Whole-day plan counts on solar charging not at all" in logged
+    assert mutations.created == []
+
+
+@pytest.mark.asyncio
+async def test_whole_day_solar_segment_shows_automatic_solar_charging(monkeypatch) -> None:
+    instance, mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=True)
+    import custom_components.pixiihome_controller.price_controller as module
+
+    logged: list[str] = []
+    monkeypatch.setattr(
+        module, "log_activity", lambda _runtime, _key, message, *_args: logged.append(message)
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+    await controller.tick()
+
+    attributes = controller.attributes()
+    segments = attributes["whole_day_plan"]["segments"]
+    assert attributes["planner_engine"] == "whole_day"
+    assert attributes["maximum_projected_usable_soc"] == pytest.approx(80.0)
+    assert segments and all(
+        segment["kind"] == "solar"
+        and segment["performed_by"] == "automatic_solar_charging"
+        for segment in segments
+    )
+    assert segments[-1]["end_soc"] == pytest.approx(80.0)
+    # Logged once, when the limit was first set, not on every pass.
+    assert logged.count("Whole-day plan counts on solar charging up to its limits") == 1
+    assert mutations.created == []
+
+
+@pytest.mark.asyncio
+async def test_whole_day_plan_follows_smart_solar_deferral() -> None:
+    instance, mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=True)
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+    instance.hass.states.state.attributes["prices"] = [
+        {
+            "start": (start + timedelta(hours=index)).isoformat(),
+            "end": (start + timedelta(hours=index + 1)).isoformat(),
+            "price": price,
+        }
+        for index, price in enumerate((1.5, 1.5, 1.1, 1.1))
+    ]
+    # 1 kW solar charging: the two cheap hours alone cannot reach the 80 % cap.
+    # No losses, so whole energy steps match the 1 kW limit exactly.
+    settings = instance.operational_settings.set("solar_max_charge_power_kw", 1.0)
+    settings = settings.set("price_round_trip_efficiency_percent", 100.0)
+    # A minimum profit no written charge reaches here: only the sun charges.
+    instance.operational_settings = settings.set("price_min_difference_sek_per_kwh", 1.0)
+    # Charging later at 1.0 plus the 0.2 minimum advantage: export at 1.2 or more.
+    instance.solar_charging_controller = SimpleNamespace(
+        _smart_deferring=True,
+        smart_decision=SmartSolarDecision(
+            True, "export_now_charge_later", charge_price=1.0,
+            deadline=start + timedelta(hours=4),
+        ),
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert controller.whole_day is not None
+    slots = controller.whole_day.slots
+    assert [slot.performed_by for slot in slots[2:]] == ["automatic_solar_charging"] * 2
+    assert all(slot.battery_kw == pytest.approx(0.0) for slot in slots[:2])
+    segments = controller.attributes()["whole_day_plan"]["segments"]
+    assert [segment["performed_by"] for segment in segments] == ["automatic_solar_charging"]
+    assert segments[0]["start"] == slots[2].start.isoformat()
     assert mutations.created == []
 
 
