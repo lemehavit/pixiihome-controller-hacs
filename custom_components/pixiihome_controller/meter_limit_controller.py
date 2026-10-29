@@ -110,7 +110,9 @@ class MeterLimitLoadBalancer:
         if scheduler is None:
             raise ValueError("native_meter_unavailable")
         values = await scheduler.client.read_load_balancing_status(meter_limitation=True)
-        return self._record(values), values
+        record = self._record(values)
+        self.startup_read_error = None
+        return record, values
 
     async def _write(self, record: Mapping[str, int | float]) -> None:
         scheduler = self.runtime.gateway_scheduler
@@ -119,7 +121,7 @@ class MeterLimitLoadBalancer:
         await scheduler.client.write_meter_limitation_settings(record)
         self.writes += 1
 
-    async def load_saved_lease(self) -> None:
+    async def load_saved_lease(self, *, control_off: bool = False) -> None:
         """Read durable ownership without contacting or changing the Gateway."""
         saved = await self.store.async_load()
         if saved is None:
@@ -139,11 +141,12 @@ class MeterLimitLoadBalancer:
             raise ValueError("meter_limitation_journal_invalid")
         self.lease = lease
         self.status, self.reason = "recovery_required", "meter_limitation_restore_pending"
-        log_activity(
-            self.runtime, "load_balancing_observation",
-            "Saved meter limitation requires restoration",
-            cause="A Service 120 lease remained after restart while control is off",
-        )
+        if control_off:
+            log_activity(
+                self.runtime, "load_balancing_observation",
+                "Saved meter limitation requires restoration",
+                cause="A Service 120 lease remained after restart while control is off",
+            )
 
     async def _recover_saved_lease(self) -> None:
         await self.load_saved_lease()
@@ -187,6 +190,7 @@ class MeterLimitLoadBalancer:
                 await observer.async_refresh()
             self._target_record(current)
             await self.idle_support.prepare()
+            self.startup_read_error = None
             self.status, self.reason = "ready", None
 
     def _soft_limit_w(self, ranges: Mapping[str, Any]) -> int:

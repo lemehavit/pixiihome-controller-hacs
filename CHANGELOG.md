@@ -10,6 +10,9 @@
 
 ## 0.5.21 — 2026-10-29
 
+- F3b: Granskningsuppföljning för säker leaseåterställning, korrekt policyloggning
+  och kontroll av orsaken i prisoptimeringens loggbok.
+
 - F2/F2b: Avstängd styrbehörighet släpper mätarbegränsningen även när
   styruppdateringar blockeras, med säker hantering av misslyckade försök.
 - F10: Nedstängning stoppar kommunikationen även om ett tidigare steg misslyckas.

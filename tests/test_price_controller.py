@@ -1213,7 +1213,9 @@ def _blocked_notice_runtime(monkeypatch, hours: int = 1):
     )
     events: list[dict] = []
     instance.hass.bus = SimpleNamespace(
-        async_fire=lambda event, data, context=None: events.append(data)
+        async_fire=lambda event, data, context=None: events.append(
+            {**data, "_event": event, "_context": context}
+        )
     )
     created: list[str] = []
     dismissed: list[str] = []
@@ -1264,6 +1266,16 @@ async def test_late_block_over_several_passes_notifies_once_and_logs_once(
     assert caplog.text.count("Price optimization blocked") == 1
     stopped = [m for m in _messages(events) if "has been stopped for over 1 h" in m]
     assert len(stopped) == 1
+    stopped_events = [
+        event for event in events
+        if "has been stopped for over 1 h" in event.get("message", "")
+    ]
+    assert len(stopped_events) == 1
+    stopped_index = events.index(stopped_events[0])
+    cause = events[stopped_index - 1]
+    assert cause["_event"] == "pixiihome_controller_cause"
+    assert "every planning pass has been blocked" in cause["message"]
+    assert cause["_context"] is stopped_events[0]["_context"]
 
     # Recovery: a pass that ends active/ready resets the timer.
     block(False)
