@@ -197,6 +197,7 @@ class RuntimeData:
     load_balancing_observer: LoadBalancingObserver | None = field(init=False, default=None)
     meter_limit_load_balancer: MeterLimitLoadBalancer | None = field(init=False, default=None)
     _authority_cleanup_problems: list[str] = field(init=False, default_factory=list)
+    _authority_cleanup_persisted: bool = field(init=False, default=True)
     solar_charging_controller: SolarChargingController | None = field(init=False, default=None)
     adaptive_peak_shaving_controller: AdaptivePeakShavingController | None = field(
         init=False, default=None
@@ -693,6 +694,11 @@ class RuntimeData:
         async with self._control_journal_lock:
             journal = self.control_journal
             if journal is None:
+                self._fail_closed_control_state("control_journal_unavailable")
+                if cleanup_problems:
+                    RuntimeData._update_authority_cleanup_notification(
+                        self, cleanup_problems, persisted=False
+                    )
                 raise HomeAssistantError("ControllerStore is unavailable")
             authority = ProductionControlAuthority(
                 enabled=enabled,
@@ -716,7 +722,7 @@ class RuntimeData:
                 if cleanup_problems:
                     try:
                         RuntimeData._update_authority_cleanup_notification(
-                            self, cleanup_problems
+                            self, cleanup_problems, persisted=False
                         )
                     except Exception:  # noqa: BLE001 - keep the original journal error
                         pass
@@ -751,18 +757,26 @@ class RuntimeData:
         if not enabled:
             RuntimeData._update_authority_cleanup_notification(self, cleanup_problems)
 
-    def _update_authority_cleanup_notification(self, problems: list[str]) -> None:
+    def _update_authority_cleanup_notification(
+        self, problems: list[str], *, persisted: bool = True
+    ) -> None:
         """Keep the warning aligned with unresolved integration-owned effects."""
         from homeassistant.components import persistent_notification
 
         previous = getattr(self, "_authority_cleanup_problems", [])
         self._authority_cleanup_problems = list(problems)
+        self._authority_cleanup_persisted = persisted
         notification_id = f"pixiihome_controller_{self.serial}_authority_cleanup"
         if problems:
             persistent_notification.async_create(
                 self.hass,
-                "Production control authority was turned off, but these "
-                "integration-owned Pixii effects could not be removed and may "
+                (
+                    "Production control authority was turned off, but these "
+                    if persisted
+                    else "Production control authority was turned off in memory, "
+                    "but the change could not be saved; these "
+                )
+                + "integration-owned Pixii effects could not be removed and may "
                 "still run: " + ", ".join(problems),
                 title="Pixii: cleanup incomplete",
                 notification_id=notification_id,
@@ -777,7 +791,8 @@ class RuntimeData:
             RuntimeData._update_authority_cleanup_notification(
                 self,
                 [problem for problem in problems
-                 if not problem.startswith("load_balancing Service 120 (")]
+                 if not problem.startswith("load_balancing Service 120 (")],
+                persisted=getattr(self, "_authority_cleanup_persisted", True),
             )
 
     async def _async_release_owned_control(self) -> list[str]:

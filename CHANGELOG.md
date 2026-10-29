@@ -10,6 +10,8 @@
 
 ## 0.5.21 — 2026-10-29
 
+- F2c: Stabil sensororsak vid återställningsfel och tydlig varning när tjänst 120
+  kvarstår utan sparad avstängning av styrbehörigheten.
 - F3b: Granskningsuppföljning för säker leaseåterställning, korrekt policyloggning
   och kontroll av orsaken i prisoptimeringens loggbok.
 

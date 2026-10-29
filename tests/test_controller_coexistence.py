@@ -562,7 +562,7 @@ async def test_disabled_load_balancing_logs_only_changed_restore_failures_and_re
 
     await controller.tick()
     assert controller.status == "recovery_required"
-    assert controller.reason == "temporary gateway read failure"
+    assert controller.reason == "meter_limitation_restore_failed"
     assert controller.lease is not None
     assert "write" not in events
 
@@ -592,7 +592,16 @@ async def test_disabled_load_balancing_logs_only_changed_restore_failures_and_re
 
 
 @pytest.mark.asyncio
-async def test_observer_survives_restore_failure_and_sensor_shows_recovery():
+@pytest.mark.parametrize(
+    ("restore_error", "expected_cause"),
+    [
+        pytest.param(OSError("read failed"), "read failed", id="unexpected-error"),
+        pytest.param(ValueError(""), "meter_limitation_restore_failed", id="empty-value-error"),
+    ],
+)
+async def test_observer_survives_restore_failure_and_sensor_shows_recovery(
+    monkeypatch, restore_error: Exception, expected_cause: str,
+):
     runtime = SimpleNamespace(
         serial="234301002683",
         controller_state=SimpleNamespace(load_balancing_enabled=False),
@@ -606,12 +615,17 @@ async def test_observer_survives_restore_failure_and_sensor_shows_recovery():
     controller.writes = 0
     controller.idle_support = SimpleNamespace(attributes=lambda: {})
     attempts = 0
+    activity: list[dict] = []
+    monkeypatch.setattr(
+        meter_limit_module, "log_activity",
+        lambda *args, **kwargs: activity.append(kwargs),
+    )
 
     async def deactivate():
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise OSError("temporary restore read failure")
+            raise restore_error
         controller.lease = None
 
     controller.deactivate = deactivate
@@ -647,8 +661,9 @@ async def test_observer_survives_restore_failure_and_sensor_shows_recovery():
         assert sensor.extra_state_attributes["control_status"] == "recovery_required"
         assert (
             sensor.extra_state_attributes["control_blocked_reason"]
-            == "temporary restore read failure"
+            == "meter_limitation_restore_failed"
         )
+        assert activity[0]["cause"] == expected_cause
         assert controller.lease is not None
 
         permits.put_nowait(None)
@@ -661,6 +676,37 @@ async def test_observer_survives_restore_failure_and_sensor_shows_recovery():
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.asyncio
+async def test_restore_logs_each_distinct_unexpected_error_once(monkeypatch):
+    runtime = SimpleNamespace(
+        controller_state=SimpleNamespace(load_balancing_enabled=False),
+        production_control_enabled=lambda: False,
+    )
+    controller = object.__new__(MeterLimitLoadBalancer)
+    controller.runtime = runtime
+    controller.lease = {"original": {}, "owned": [{}]}
+    controller.status, controller.reason = "active", None
+    controller.idle_support = SimpleNamespace(lease=None)
+    details = iter(("read failed", "write failed", "write failed"))
+    causes: list[str] = []
+
+    async def deactivate():
+        raise OSError(next(details))
+
+    controller.deactivate = deactivate
+    monkeypatch.setattr(
+        meter_limit_module, "log_activity",
+        lambda *args, **kwargs: causes.append(kwargs["cause"]),
+    )
+
+    for _ in range(3):
+        await controller.tick()
+        assert (controller.status, controller.reason) == (
+            "recovery_required", "meter_limitation_restore_failed"
+        )
+    assert causes == ["read failed", "write failed"]
 
 
 @pytest.mark.asyncio
