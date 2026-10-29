@@ -445,7 +445,12 @@ def build_price_plan(
         ):
             power = min(maximum_charge_kw, headroom / (hours * charge_efficiency))
             if net_load_kw is not None:
-                future_delivery = 0.0
+                needed_stored_energy = 0.0
+                covered_stored_energy = 0.0
+                existing_energy = available
+                existing_charged_energy = (
+                    min(available, charged_energy) if closing is not None else 0.0
+                )
                 forecast_known = True
                 for future_index in range(index + 1, len(candidates)):
                     future = candidates[future_index]
@@ -470,19 +475,44 @@ def build_price_plan(
                         export_allowed=export_allowed,
                         export_minimum_profit=export_minimum_difference_sek_per_kwh,
                     )
+                    delivery = 0.0
                     if future_mode is PriceDischargeMode.EXPORT:
-                        future_delivery += maximum_discharge_kw * future.duration_hours
+                        delivery = maximum_discharge_kw * future.duration_hours
                     elif future_mode is PriceDischargeMode.SELF_CONSUMPTION:
                         demand = net_load_kw(future.start, future.end)
                         if demand is None or not isfinite(demand):
                             forecast_known = False
                             break
-                        future_delivery += (
+                        delivery = (
                             min(maximum_discharge_kw, max(0.0, demand)) * future.duration_hours
                         )
+                    stored_need = delivery / discharge_efficiency
+                    needed_stored_energy += stored_need
+                    existing_basis = acquisition_price
+                    if closing is not None:
+                        existing_basis = (
+                            charged_price if existing_charged_energy > 1e-6 else stored_price
+                        )
+                    existing_mode, _ = _qualifying_discharge(
+                        existing_basis, future.price_sek_per_kwh,
+                        efficiency=round_trip_efficiency_percent / 100,
+                        grid_cost=grid_import_cost_sek_per_kwh,
+                        cycle_cost=cycle_cost_sek_per_kwh,
+                        minimum_profit=minimum_difference_sek_per_kwh,
+                        export_allowed=export_allowed,
+                        export_minimum_profit=export_minimum_difference_sek_per_kwh,
+                    )
+                    if existing_mode is future_mode and existing_mode is not None:
+                        covered = min(
+                            stored_need, existing_energy,
+                            existing_charged_energy if existing_charged_energy > 1e-6
+                            else existing_energy,
+                        )
+                        covered_stored_energy += covered
+                        existing_energy -= covered
+                        existing_charged_energy = max(0.0, existing_charged_energy - covered)
                 if forecast_known:
-                    needed_stored_energy = future_delivery / discharge_efficiency
-                    remaining_headroom = max(0.0, needed_stored_energy - available)
+                    remaining_headroom = max(0.0, needed_stored_energy - covered_stored_energy)
                     demand_power = remaining_headroom / (hours * charge_efficiency)
                     if demand_power < power - 1e-9:
                         charge_demand_limited = True

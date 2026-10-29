@@ -148,6 +148,53 @@ def test_charge_demand_does_not_cross_known_external_reset() -> None:
                    for a in result.actions)
 
 
+def _prices_with_expensive_initial_basis(*prices: float, initial_basis: float = 3.0):
+    return normalize_price_series(
+        {"raw_today": [
+            {"start": _hour(index), "end": _hour(index + 1), "value": price}
+            for index, price in enumerate((initial_basis, *prices), start=-1)
+        ]},
+        "SEK/kWh",
+    )
+
+
+def test_expensive_existing_energy_does_not_crowd_out_cheap_profitable_charge() -> None:
+    result = plan(
+        _prices_with_expensive_initial_basis(.2, .2, 3), initial_soc=50,
+        charge_kw=5, discharge_kw=5,
+        net_load_kw=lambda start, _end: 2.0 if start == _hour(2) else 0.0,
+    )
+    assert 0 < _charged_kwh(result) <= 2 / .9 + 1e-9
+    assert any(action.direction is PriceDirection.DISCHARGE for action in result.actions)
+    assert result.expected_margin_sek > 0
+
+
+def test_expensive_energy_before_reset_does_not_crowd_out_cheap_charge() -> None:
+    window = ExternalWindow(_hour(3), _hour(4), 10.0)
+    result = plan(
+        _prices_with_expensive_initial_basis(.2, .2, 3, 3), initial_soc=50,
+        charge_kw=5, discharge_kw=5, windows=(window,),
+        net_load_kw=lambda start, _end: 2.0 if start == _hour(2) else 0.0,
+    )
+    assert 0 < _charged_kwh(result) <= 2 / .9 + 1e-9
+    assert any(action.direction is PriceDirection.DISCHARGE and action.end <= window.start
+               for action in result.actions)
+    assert result.expected_margin_sek > 0
+
+
+def test_self_consumption_energy_does_not_crowd_out_profitable_export_charge() -> None:
+    result = plan(
+        _prices_with_expensive_initial_basis(.2, 3, initial_basis=2.2),
+        initial_soc=70, export_allowed=True, export_delta=1.0,
+        charge_kw=5, discharge_kw=5,
+        net_load_kw=lambda _start, _end: 0.0,
+    )
+    assert _charged_kwh(result) > 0
+    assert any(action.discharge_mode is PriceDischargeMode.EXPORT
+               for action in result.actions)
+    assert result.expected_margin_sek > 0
+
+
 def test_greenely_source_is_normalized_from_stockholm_to_utc() -> None:
     series = greenely(1.0, 2.0)
 

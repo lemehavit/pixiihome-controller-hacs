@@ -1518,7 +1518,8 @@ def test_standard_plan_logs_forecast_charge_limit_without_gateway_calls(monkeypa
         if "forecast profitable use" in message
     ]
     assert len(cap_entries) == 1
-    assert "Energy already stored" in cap_entries[0][1]
+    assert "Energy already stored above minimum SOC is counted only" in cap_entries[0][1]
+    assert "where its price basis qualifies" in cap_entries[0][1]
     assert mutations.created == []
     assert mutations.deleted == []
 

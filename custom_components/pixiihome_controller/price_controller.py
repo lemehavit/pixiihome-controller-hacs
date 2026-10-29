@@ -999,7 +999,8 @@ class PriceOptimizationController:
                     "Standard price plan limited charging to forecast profitable use",
                     "Why: forecast net load and export policy leave less profitable "
                     "future use in this planning segment than the battery could charge. "
-                    "Energy already stored above minimum SOC is counted first.",
+                    "Energy already stored above minimum SOC is counted only "
+                    "where its price basis qualifies.",
                 )
             self._logged_charge_limit_fingerprint = (
                 standard.fingerprint if standard.charge_demand_limited else None
