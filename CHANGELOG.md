@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.22 — 2026-10-29
+
+- F4: Ett eget schema som snart ska börja raderas inte medan det fortfarande
+  kan behövas för planens styrning.
+- F7: Dygnsplanens SOC och ekonomi räknas från de åtgärder som faktiskt skrivs.
+- F6: Standardplaneraren köper bara energi som kan användas lönsamt.
+- F5: Dygnsplanen räknar bara med solladdning som någon faktiskt utför.
+
 ## 0.5.21 — 2026-10-29
 
 - F2/F2b: Avstängd styrbehörighet släpper mätarbegränsningen även när
