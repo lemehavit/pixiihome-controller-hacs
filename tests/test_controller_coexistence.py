@@ -661,3 +661,130 @@ async def test_observer_survives_restore_failure_and_sensor_shows_recovery():
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.asyncio
+async def test_later_native_read_clears_startup_error(monkeypatch):
+    original = {
+        "enabled": 0, "exp_soft_enabled": 0, "exp_hard_enabled": 0,
+        "exp_soft_limit": 0, "exp_hard_limit": 0, "gen_soft_enabled": 0,
+        "gen_hard_enabled": 0, "gen_soft_limit": 0, "gen_hard_limit": 0,
+        "limit_per_phase": 0, "meter_id": 1,
+    }
+    runtime, _reads, _writes, _activity = _restarted_controller(monkeypatch, original)
+    controller = MeterLimitLoadBalancer(runtime)
+    controller.startup_read_error = "temporary gateway read failure"
+    original.pop("meter_id")
+    with pytest.raises(ValueError, match="meter_limitation_settings_incomplete"):
+        await controller._read()
+    assert controller.startup_read_error == "temporary gateway read failure"
+    original["meter_id"] = 1
+    await controller._read()
+    assert controller.startup_read_error is None
+    await controller.tick()
+    assert (controller.status, controller.reason) == ("disabled", None)
+
+
+@pytest.mark.asyncio
+async def test_phase_lease_releases_after_gateway_appears(monkeypatch):
+    runtime, _reads, _writes, _activity = _restarted_controller(monkeypatch, {})
+    original = dict.fromkeys(PHASE_FIELDS, 0)
+    owned = {**original, "act_enabled": 1, "duration": 15}
+    priority = [102, 101]
+    key = "pixiihome_controller.GATEWAY.idle_phase_lease"
+    LeaseStore.data[key] = {"lease": {
+        "original": original, "owned": [original, owned],
+        "priority": priority, "owned_priority": [*priority, 129],
+    }}
+    phase = PhaseGateway()
+    phase.record = dict(owned)
+    phase.priority_list = [*priority, 129]
+    monkeypatch.setattr(idle_phase_module, "PhaseGateway", lambda _client: phase)
+    controller = IdlePhaseLoadBalancer(runtime)
+    runtime.gateway_scheduler = None
+    with pytest.raises(ValueError, match="native_meter_unavailable"):
+        await controller.load_saved_lease()
+    assert controller.lease is not None and controller.gateway is None
+    runtime.gateway_scheduler = SimpleNamespace(client=object())
+    await controller.release()
+    assert controller.lease is None
+    assert LeaseStore.data[key] == {"lease": None}
+    assert phase.record == original
+
+
+@pytest.mark.asyncio
+async def test_prepare_load_does_not_log_control_off(monkeypatch):
+    runtime, _reads, _writes, activity = _restarted_controller(monkeypatch, {})
+    original = dict.fromkeys(PHASE_FIELDS, 0)
+    LeaseStore.data["pixiihome_controller.GATEWAY.meter_limit_lease"] = {"lease": {
+        "original": original, "owned": [original],
+    }}
+    controller = MeterLimitLoadBalancer(runtime)
+    await controller.load_saved_lease()
+    assert not any("after restart while control is off" in str(item) for item in activity)
+    await controller.load_saved_lease(control_off=True)
+    assert any("after restart while control is off" in str(item) for item in activity)
+
+
+@pytest.mark.asyncio
+async def test_phase_release_accepts_original_on_second_read(monkeypatch):
+    runtime, _reads, _writes, _activity = _restarted_controller(monkeypatch, {})
+    original = dict.fromkeys(PHASE_FIELDS, 0)
+    owned = {**original, "act_enabled": 1, "duration": 15}
+    phase = PhaseGateway()
+    phase.record = dict(owned)
+    phase.priority_list = [102, 101]
+    reads = 0
+    first_read = phase.read
+    async def read(service):
+        nonlocal reads
+        if service == 129:
+            reads += 1
+            if reads == 2:
+                phase.record = dict(original)
+        return await first_read(service)
+    phase.read = read
+    controller = IdlePhaseLoadBalancer(runtime)
+    controller.gateway = phase
+    controller.lease = {"original": original, "owned": [original, owned],
+                        "priority": [102, 101], "owned_priority": [102, 101, 129]}
+    await controller.release()
+    assert reads == 2
+    assert controller.lease is None
+    assert phase.record == original
+
+
+def test_non_policy_plan_error_does_not_log_policy_block(monkeypatch):
+    controller, _state, activity = _policy_controller(
+        monkeypatch, _report_policy(), soc=50, grid_w=4000,
+    )
+    def invalid(*args, **kwargs):
+        raise ValueError("phase_data_invalid")
+    monkeypatch.setattr(idle_phase_module, "plan_phases", invalid)
+    with pytest.raises(ValueError, match="phase_data_invalid"):
+        controller._plan()
+    assert activity == []
+    assert controller.policy_note is None
+
+
+@pytest.mark.asyncio
+async def test_native_service_clears_previous_policy_note(monkeypatch):
+    controller, _state, _activity = _policy_controller(
+        monkeypatch, _report_policy(), soc=90, grid_w=3000,
+    )
+    controller.policy_note = ("clipped", "power limited")
+    controller.gateway.service = 102
+    await controller.tick()
+    assert controller.policy_note is None
+    assert controller.status == "standby_native_mode_active"
+
+
+def test_native_capacity_error_is_not_labeled_as_policy_block(monkeypatch):
+    controller, _state, activity = _policy_controller(
+        monkeypatch, _report_policy(), soc=50, grid_w=4000,
+    )
+    controller.runtime.load_balancing_observer.snapshot["battery_discharge_capacity_dc_w"] = 0
+    with pytest.raises(ValueError, match="insufficient_capacity"):
+        controller._plan()
+    assert activity == []
+    assert controller.policy_note is None

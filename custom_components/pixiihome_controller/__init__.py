@@ -545,7 +545,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     else:
         controller = runtime.meter_limit_load_balancer
         read_error: str | None = None
-        for load_lease in (controller.load_saved_lease, controller.idle_support.load_saved_lease):
+        for load_lease in (
+            lambda: controller.load_saved_lease(control_off=True),
+            controller.idle_support.load_saved_lease,
+        ):
             try:
                 await load_lease()
             except Exception as error:  # preserve visible recovery state for unsafe journals
@@ -560,8 +563,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "Saved load balancing lease needs recovery",
                     cause=reason,
                 )
+        controller.startup_read_error = read_error
         if read_error is not None:
-            controller.startup_read_error = read_error
             controller.status, controller.reason = "recovery_required", read_error
     if runtime.controller_state.automatic_solar_charging_enabled:
         try:

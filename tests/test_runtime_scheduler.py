@@ -386,6 +386,9 @@ async def test_integration_setup_initializes_scheduler_without_scheduler_http(
     )
     hass = _executor_hass()
     hass.data = {}
+    activity: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    monkeypatch.setattr(meter_limit_module, "log_activity",
+                        lambda *args, **kwargs: activity.append((args, kwargs)))
     forwarded: list[Any] = []
 
     async def forward_entry_setups(entry: Any, platforms: Any) -> None:
@@ -428,6 +431,10 @@ async def test_integration_setup_initializes_scheduler_without_scheduler_http(
     assert controller.writes == 0
     assert observer_starts == [initialized[0].load_balancing_observer]
     assert controller.status == "recovery_required"
+    assert any(
+        "after restart while control is off" in item[1].get("cause", "")
+        for item in activity
+    )
 
 
 @pytest.mark.asyncio
