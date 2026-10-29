@@ -48,6 +48,7 @@ async def test_authority_off_releases_owned_control_before_closing_the_gate(monk
     events: list[str] = []
     gate = SimpleNamespace(live_writes_enabled=True, blocked_reasons=set())
     notifications: list[str] = []
+    saved: list[object] = []
 
     async def release():
         events.append(f"release_gate_open={gate.live_writes_enabled}")
@@ -58,9 +59,13 @@ async def test_authority_off_releases_owned_control_before_closing_the_gate(monk
 
     async def save(candidate):
         events.append("persist")
+        saved.append(candidate)
 
     journal = SimpleNamespace(
-        controller_state={}, with_product_state=lambda controller_state: journal,
+        controller_state={},
+        with_product_state=lambda controller_state: SimpleNamespace(
+            controller_state=controller_state,
+        ),
     )
     fake = SimpleNamespace(
         _require_admin=admin,
@@ -87,4 +92,78 @@ async def test_authority_off_releases_owned_control_before_closing_the_gate(monk
 
     assert events == ["release_gate_open=True", "persist"]
     assert gate.live_writes_enabled is False
+    assert len(saved) == 1
+    assert saved[0].controller_state["production_control_authority"]["enabled"] is False
     assert notifications and "price_1_ack_timeout" in notifications[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restore_conflict", [False, True])
+async def test_authority_off_persists_after_load_balancing_restore_conflict(
+    monkeypatch, restore_conflict: bool,
+) -> None:
+    events: list[str] = []
+    notifications: list[str] = []
+    saved: list[object] = []
+    gate = SimpleNamespace(live_writes_enabled=True, blocked_reasons=set())
+    lease = {"original": {}, "owned": [{}]}
+
+    async def release():
+        events.append("release")
+        return []
+
+    async def deactivate():
+        events.append("restore_attempt")
+        if restore_conflict:
+            raise ValueError("meter_limitation_recovery_conflict")
+        fake.meter_limit_load_balancer.lease = None
+
+    async def admin(user_id):
+        return None
+
+    async def save(candidate):
+        events.append("persist")
+        saved.append(candidate)
+
+    journal = SimpleNamespace(
+        controller_state={},
+        with_product_state=lambda controller_state: SimpleNamespace(
+            controller_state=controller_state,
+        ),
+    )
+    fake = SimpleNamespace(
+        _require_admin=admin,
+        production_control_enabled=lambda: True,
+        _async_release_owned_control=release,
+        meter_limit_load_balancer=SimpleNamespace(lease=lease, deactivate=deactivate),
+        _control_journal_lock=asyncio.Lock(),
+        control_journal=journal,
+        production_authority=SimpleNamespace(revision=1),
+        _save_control_journal_verified=save,
+        controller_state=None,
+        release_gate=gate,
+        hass=object(),
+        serial="234301002683",
+    )
+    from homeassistant.components import persistent_notification
+
+    monkeypatch.setattr(
+        persistent_notification, "async_create",
+        lambda hass, message, **kwargs: notifications.append(message),
+    )
+
+    await RuntimeData.async_set_production_control_enabled(fake, False, None)  # type: ignore[arg-type]
+
+    assert events == ["release", "restore_attempt", "persist"]
+    assert fake.production_authority.enabled is False
+    assert len(saved) == 1
+    assert saved[0].controller_state["production_control_authority"]["enabled"] is False
+    assert gate.live_writes_enabled is False
+    if restore_conflict:
+        assert fake.meter_limit_load_balancer.lease is lease
+        assert len(notifications) == 1
+        assert "load_balancing" in notifications[0]
+        assert "meter_limitation_recovery_conflict" in notifications[0]
+    else:
+        assert fake.meter_limit_load_balancer.lease is None
+        assert not notifications

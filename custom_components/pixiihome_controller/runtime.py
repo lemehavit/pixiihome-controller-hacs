@@ -682,8 +682,13 @@ class RuntimeData:
         ):
             try:
                 await self.meter_limit_load_balancer.deactivate()
-            except ValueError as error:
-                raise HomeAssistantError(str(error)) from error
+            except Exception as error:  # noqa: BLE001 - persist authority off despite cleanup failure
+                reason = (
+                    str(error)
+                    if isinstance(error, ValueError)
+                    else "meter_limitation_restore_failed"
+                )
+                cleanup_problems.append(f"load_balancing ({reason})")
         async with self._control_journal_lock:
             journal = self.control_journal
             if journal is None:
@@ -725,6 +730,8 @@ class RuntimeData:
                 "Control authority turned off"
                 + (f"; could not remove: {', '.join(cleanup_problems)}" if cleanup_problems
                    else "; integration-owned schedules and leases were removed first"),
+                cause="Administrator disabled production control; "
+                + ("cleanup needs recovery" if cleanup_problems else "cleanup completed"),
             )
         if cleanup_problems:
             from homeassistant.components import persistent_notification

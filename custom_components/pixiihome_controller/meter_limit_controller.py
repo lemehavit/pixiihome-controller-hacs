@@ -274,8 +274,25 @@ class MeterLimitLoadBalancer:
         )
         if not enabled:
             if self.lease is not None:
-                await self.deactivate()
-            self.status = "disabled"
+                try:
+                    await self.deactivate()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:  # noqa: BLE001 - keep the observer alive for recovery
+                    self.status = "recovery_required"
+                    self.reason = (
+                        str(error)
+                        if isinstance(error, ValueError)
+                        else "meter_limitation_restore_failed"
+                    )
+                    log_activity(
+                        self.runtime,
+                        "load_balancing_observation",
+                        "Load balancing restore needs recovery",
+                        cause=self.reason,
+                    )
+                    return
+            self.status, self.reason = "disabled", None
             return
         async with self._lock:
             try:

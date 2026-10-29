@@ -14,7 +14,9 @@ from custom_components.pixiihome_controller.control.load_balancing import (
 from custom_components.pixiihome_controller.control.phase_gateway import PHASE_FIELDS
 from custom_components.pixiihome_controller.control.policy import AutomationPolicy
 from custom_components.pixiihome_controller.idle_phase_controller import IdlePhaseLoadBalancer
+from custom_components.pixiihome_controller.load_balancing_observer import LoadBalancingObserver
 from custom_components.pixiihome_controller.meter_limit_controller import MeterLimitLoadBalancer
+from custom_components.pixiihome_controller.sensor import PixiiLoadBalancingSensor
 
 from .test_price_controller import policy
 
@@ -107,3 +109,151 @@ def test_gateway_minimum_cannot_raise_the_site_fuse_limit():
     ))
     with pytest.raises(ValueError, match="meter_limitation_limit_outside_gateway_range"):
         controller._soft_limit_w({"exp_soft_limit__min": 50_000})
+
+
+@pytest.mark.asyncio
+async def test_disabled_load_balancing_retries_conflict_then_restores_owned_record():
+    controller = object.__new__(MeterLimitLoadBalancer)
+    controller.runtime = SimpleNamespace(
+        controller_state=SimpleNamespace(load_balancing_enabled=False),
+        production_control_enabled=lambda: False,
+    )
+    controller._lock = asyncio.Lock()
+    controller.status, controller.reason = "active", None
+    controller.applied_limit_w = 6000
+    controller.writes = 0
+    original = {
+        "enabled": 0, "exp_soft_enabled": 0, "exp_hard_enabled": 0,
+        "exp_soft_limit": 0, "exp_hard_limit": 0,
+        "gen_soft_enabled": 0, "gen_hard_enabled": 0,
+        "gen_soft_limit": 0, "gen_hard_limit": 0,
+        "limit_per_phase": 0, "meter_id": 1,
+    }
+    owned = {**original, "enabled": 1, "exp_soft_enabled": 1, "exp_soft_limit": 6000}
+    external = {**owned, "exp_soft_limit": 5000}
+    controller.lease = {"original": original, "owned": [owned]}
+    events: list[str] = []
+    current = external
+    read_fails = True
+
+    async def stop_idle():
+        events.append("stop_idle")
+
+    async def read():
+        nonlocal read_fails
+        events.append("read")
+        if read_fails:
+            read_fails = False
+            raise OSError("temporary gateway read failure")
+        return current, {}
+
+    async def write(record):
+        nonlocal current
+        events.append("write")
+        current = dict(record)
+
+    async def save_lease(lease):
+        events.append("save_lease")
+        controller.lease = lease
+
+    controller.idle_support = SimpleNamespace(stop=stop_idle, attributes=lambda: {})
+    controller._read = read
+    controller._write = write
+    controller._save_lease = save_lease
+
+    await controller.tick()
+    assert controller.status == "recovery_required"
+    assert controller.reason == "meter_limitation_restore_failed"
+    assert controller.lease is not None
+    assert "write" not in events
+
+    for _ in range(2):
+        await controller.tick()
+        assert controller.attributes()["control_status"] == "recovery_required"
+        assert (
+            controller.attributes()["control_blocked_reason"]
+            == "meter_limitation_recovery_conflict"
+        )
+        assert controller.lease is not None
+        assert "write" not in events
+
+    current = owned
+    await controller.tick()
+
+    assert current == original
+    assert controller.lease is None
+    assert controller.status == "disabled"
+    assert controller.reason is None
+    assert events[-4:] == ["stop_idle", "read", "write", "save_lease"]
+
+
+@pytest.mark.asyncio
+async def test_observer_survives_restore_failure_and_sensor_shows_recovery():
+    runtime = SimpleNamespace(
+        serial="234301002683",
+        controller_state=SimpleNamespace(load_balancing_enabled=False),
+        production_control_enabled=lambda: False,
+    )
+    controller = object.__new__(MeterLimitLoadBalancer)
+    controller.runtime = runtime
+    controller.lease = {"original": {}, "owned": [{}]}
+    controller.status, controller.reason = "active", None
+    controller.applied_limit_w = None
+    controller.writes = 0
+    controller.idle_support = SimpleNamespace(attributes=lambda: {})
+    attempts = 0
+
+    async def deactivate():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("temporary restore read failure")
+        controller.lease = None
+
+    controller.deactivate = deactivate
+    runtime.meter_limit_load_balancer = controller
+    observer = object.__new__(LoadBalancingObserver)
+    observer.runtime = runtime
+    observer.config = SimpleNamespace(
+        poll_seconds=0, source="pixii", fuses=(20, 20, 20), margin_a=2, min_soc=20,
+    )
+    observer.status = "observing"
+    observer.snapshot = {}
+    observer.phase_service_available = False
+    observer.meter_limitation_available = False
+    observer.meter_limitation_capability = {}
+    observer.general_service_settings_available = False
+    observer.general_service_settings = {}
+    observer._listeners = []
+    runtime.load_balancing_observer = observer
+    permits: asyncio.Queue[None] = asyncio.Queue()
+    updates: asyncio.Queue[None] = asyncio.Queue()
+
+    async def refresh():
+        await permits.get()
+
+    observer.async_refresh = refresh
+    observer.add_listener(lambda: updates.put_nowait(None))
+    sensor = PixiiLoadBalancingSensor(runtime, "load_balancing_observation")
+    task = asyncio.create_task(observer._run())
+    try:
+        permits.put_nowait(None)
+        await asyncio.wait_for(updates.get(), 1)
+        assert not task.done()
+        assert sensor.extra_state_attributes["control_status"] == "recovery_required"
+        assert (
+            sensor.extra_state_attributes["control_blocked_reason"]
+            == "meter_limitation_restore_failed"
+        )
+        assert controller.lease is not None
+
+        permits.put_nowait(None)
+        await asyncio.wait_for(updates.get(), 1)
+        assert not task.done()
+        assert attempts == 2
+        assert sensor.extra_state_attributes["control_status"] == "disabled"
+        assert sensor.extra_state_attributes["control_blocked_reason"] is None
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
