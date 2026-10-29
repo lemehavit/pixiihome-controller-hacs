@@ -523,6 +523,94 @@ async def test_known_running_target_soc_allows_writes_only_after_its_end():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("second_read", "expected_target", "expected_log"),
+    [
+        (20, 20.0, "changed from 90 % to 20 %"),
+        (90, 90.0, None),
+        (OSError("Gateway unavailable"), None, "unreadable (OSError: Gateway unavailable)"),
+        (float("nan"), None, "unreadable (non-finite reference)"),
+        (float("inf"), None, "unreadable (non-finite reference)"),
+    ],
+)
+async def test_external_target_is_read_again_for_the_same_schedule(
+    monkeypatch, second_read, expected_target, expected_log
+):
+    from dataclasses import replace
+
+    import custom_components.pixiihome_controller.price_controller as module
+
+    instance, _ = runtime()
+    instance.battery = replace(instance.battery, effective_min_soc=0, effective_max_soc=100)
+    schedule = external_schedule(datetime.now(UTC) + timedelta(hours=2))
+    instance.scheduler_manager.normalized_schedules = [schedule]
+    reads = []
+    responses = iter((90, second_read))
+
+    async def read_target(service_no):
+        reads.append(service_no)
+        value = next(responses)
+        if isinstance(value, Exception):
+            raise value
+        return {"reference": value}
+
+    instance.gateway_scheduler = SimpleNamespace(
+        client=SimpleNamespace(read_target_soc=read_target)
+    )
+    logged = []
+    monkeypatch.setattr(
+        module, "log_activity",
+        lambda _runtime, _key, message, cause=None: logged.append((message, cause)),
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller._load_external_windows(())
+    assert controller._external_windows[0].target_usable_soc_percent == 90.0
+    assert controller._external_meta[0][1] == 90.0
+
+    await controller._load_external_windows(())
+
+    assert reads == [schedule.service_no, schedule.service_no]
+    window = controller._external_windows[0]
+    assert window.target_usable_soc_percent == expected_target
+    assert window.known is (expected_target is not None)
+    assert controller._external_meta[0][1] == expected_target
+    if expected_log is None:
+        assert logged == []
+    else:
+        assert len(logged) == 1
+        assert expected_log in logged[0][0]
+        assert logged[0][1] is not None and "Why:" in logged[0][1]
+
+
+@pytest.mark.asyncio
+async def test_next_planning_pass_uses_changed_target_for_same_schedule():
+    instance, _ = runtime(schedule_writes=False)
+    schedule, _ = _aggregator_day(instance, adjust=False)
+    reads = []
+    targets = iter((90, 20))
+
+    async def read_target(service_no):
+        reads.append(service_no)
+        return {"reference": next(targets)}
+
+    instance.gateway_scheduler.client.read_target_soc = read_target
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+    assert controller.status == "preview"
+    assert controller._external_windows[0].target_usable_soc_percent == 90.0
+    first_fingerprint = controller.plan.fingerprint
+
+    await controller.tick()
+
+    assert controller.status == "preview"
+    assert reads == [schedule.service_no, schedule.service_no]
+    assert controller._external_windows[0].target_usable_soc_percent == 20.0
+    assert controller.plan.fingerprint != first_fingerprint
+
+
+@pytest.mark.asyncio
 async def test_running_service_without_a_matching_schedule_still_blocks_writes():
     instance, mutations = runtime()
     later = datetime.now(UTC).replace(microsecond=0) + timedelta(hours=6)

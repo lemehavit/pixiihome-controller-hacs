@@ -85,6 +85,7 @@ class PriceOptimizationController:
         self.current_service: int | None = None
         self._source_fingerprint: str | None = None
         self._external_windows: tuple[ExternalWindow, ...] = ()
+        # Last successful reads are used only to detect changes, never to plan.
         self._target_cache: dict[tuple[int, int, int, int], float] = {}
         # Foreign Target SOC schedules aligned with ``_external_windows``.
         self._external_meta: tuple[tuple[Any, float | None], ...] = ()
@@ -1225,18 +1226,48 @@ class PriceOptimizationController:
                 key = (schedule.sch_index, schedule.service_no,
                        schedule.start_epoch, schedule.duration_seconds)
                 keys.add(key)
-                reference = self._target_cache.get(key)
-                if reference is None:
-                    try:
-                        value = float(
-                            (await gateway.client.read_target_soc(schedule.service_no))[
-                                "reference"
-                            ]
+                previous = self._target_cache.get(key)
+                try:
+                    value = float(
+                        (await gateway.client.read_target_soc(schedule.service_no))[
+                            "reference"
+                        ]
+                    )
+                    failure = None if isfinite(value) else "non-finite reference"
+                except Exception as error:  # noqa: BLE001 - unreadable means unknown energy
+                    failure = f"{type(error).__name__}: {error}"
+                    value = float("nan")
+                if failure is None:
+                    reference = value
+                    self._target_cache[key] = value
+                    if previous is not None and previous != value:
+                        when = time_span(
+                            datetime.fromtimestamp(schedule.start_epoch, UTC),
+                            datetime.fromtimestamp(schedule.end_epoch, UTC),
                         )
-                    except Exception:  # noqa: BLE001 - unreadable means unknown energy
-                        value = float("nan")
-                    if isfinite(value):
-                        reference = self._target_cache[key] = value
+                        log_activity(
+                            self.runtime, PRICE_STATUS,
+                            f"Aggregator Target SOC {when} changed from {previous:g} % "
+                            f"to {value:g} %; the price plan uses the new target",
+                            "Who: aggregator via the Gateway. Why: the Gateway returned "
+                            "a different Target SOC for the same schedule; the price "
+                            "plan uses the latest reading.",
+                        )
+                else:
+                    self._target_cache.pop(key, None)
+                    if previous is not None:
+                        when = time_span(
+                            datetime.fromtimestamp(schedule.start_epoch, UTC),
+                            datetime.fromtimestamp(schedule.end_epoch, UTC),
+                        )
+                        log_activity(
+                            self.runtime, PRICE_STATUS,
+                            f"Aggregator Target SOC {when} is unreadable ({failure}); "
+                            "the price plan treats its resulting energy as unknown",
+                            "Who: price optimization. Why: the current Gateway Target "
+                            f"SOC read failed ({failure}); planning stops at the start "
+                            "of this window instead of using an earlier target.",
+                        )
                 if reference is not None:
                     target = min(
                         100.0,
