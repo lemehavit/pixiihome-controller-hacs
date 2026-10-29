@@ -1292,6 +1292,36 @@ def _binding_runtime(monkeypatch):
     return clock, instance, mutations, events, charge_start
 
 
+def test_standard_plan_logs_forecast_charge_limit_without_gateway_calls(monkeypatch):
+    from custom_components.pixiihome_controller import price_controller as module
+    from custom_components.pixiihome_controller.control.price_optimization import (
+        normalize_price_series,
+    )
+
+    _, instance, mutations, _, _ = _binding_runtime(monkeypatch)
+    instance.energy_forecast = SimpleNamespace(
+        net_load_kw=lambda _start, _end, high=False: 0.0,
+        net_forecast=lambda _start, _end, high=False: (0.0, 0.0),
+    )
+    logged = []
+    monkeypatch.setattr(module, "log_activity", lambda *_args: logged.append(_args[2:]))
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    series = normalize_price_series(instance.hass.states.state.attributes, "SEK/kWh")
+
+    result = controller._build_plan(series, controller._validated_limits())
+    controller._build_plan(series, controller._validated_limits())
+
+    assert result.charge_demand_limited
+    cap_entries = [
+        (message, reason) for message, reason in logged
+        if "forecast profitable use" in message
+    ]
+    assert len(cap_entries) == 1
+    assert "Energy already stored" in cap_entries[0][1]
+    assert mutations.created == []
+    assert mutations.deleted == []
+
+
 def _owned(m_id: int, service: str, start: datetime, values: dict):
     from custom_components.pixiihome_controller.scheduler.ownership import (
         OwnershipLifecycle,

@@ -31,6 +31,7 @@ def plan(
     series, *, export_allowed=False, export_delta=1.0, grid_import_cost=0.0,
     initial_soc=50, charge_kw=2, discharge_kw=2,
     minimum_profit=0.5, cycle_cost=0.0, end_before=None, windows=(),
+    net_load_kw=None,
 ):
     return build_price_plan(
         series,
@@ -51,7 +52,100 @@ def plan(
         grid_import_cost_sek_per_kwh=grid_import_cost,
         end_before=end_before,
         external_windows=windows,
+        net_load_kw=net_load_kw,
     )
+
+
+def _charged_kwh(result):
+    return sum(
+        action.power_kw * action.duration_seconds / 3600
+        for action in result.actions if action.direction is PriceDirection.CHARGE
+    )
+
+
+def test_charge_requires_profitable_forecast_use_when_export_is_off() -> None:
+    result = plan(
+        greenely(.2, .2, 3), initial_soc=10, charge_kw=5, discharge_kw=5,
+        grid_import_cost=.5, net_load_kw=lambda _start, _end: 0.0,
+    )
+    assert _charged_kwh(result) == 0
+    assert result.charge_demand_limited
+
+
+def test_charge_covers_only_small_profitable_net_load() -> None:
+    result = plan(
+        greenely(.2, .2, 3), initial_soc=10, charge_kw=5, discharge_kw=5,
+        grid_import_cost=.5,
+        net_load_kw=lambda start, _end: .1 if start == _hour(2) else 0.0,
+    )
+    assert 0 < _charged_kwh(result) <= .1 / .9 + 1e-9
+    discharge = [a for a in result.actions if a.direction is PriceDirection.DISCHARGE]
+    assert discharge
+    delivered = sum(a.expected_margin_sek / a.net_profit_sek_per_kwh for a in discharge)
+    assert delivered == pytest.approx(.1)
+
+
+def test_existing_stored_energy_covers_forecast_before_new_charge() -> None:
+    result = plan(
+        greenely(.2, .2, 3), initial_soc=30, charge_kw=5, discharge_kw=5,
+        grid_import_cost=.5, net_load_kw=lambda _start, _end: 1.0,
+    )
+    assert _charged_kwh(result) == 0
+
+
+def test_negative_net_load_in_peak_does_not_justify_charge() -> None:
+    result = plan(
+        greenely(.2, .2, 3), initial_soc=10, charge_kw=5, discharge_kw=5,
+        grid_import_cost=.5, net_load_kw=lambda _start, _end: -2.0,
+    )
+    assert _charged_kwh(result) == 0
+
+
+@pytest.mark.parametrize("forecast", [None, float("nan")])
+def test_unknown_forecast_keeps_headroom_charge_behavior(forecast) -> None:
+    result = plan(
+        greenely(.2, .2, 3), initial_soc=10, charge_kw=5, discharge_kw=5,
+        grid_import_cost=.5, net_load_kw=lambda _start, _end: forecast,
+    )
+    assert _charged_kwh(result) > 5
+    assert not result.charge_demand_limited
+
+
+def test_absent_forecast_keeps_headroom_charge_behavior() -> None:
+    result = plan(
+        greenely(.2, .2, 3), initial_soc=10, charge_kw=5, discharge_kw=5,
+        grid_import_cost=.5,
+    )
+    assert _charged_kwh(result) > 5
+    assert not result.charge_demand_limited
+
+
+def test_load_before_a_later_peak_that_planner_will_wait_for_does_not_fund_charge() -> None:
+    result = plan(
+        greenely(.2, 2, 3), initial_soc=10, charge_kw=5, discharge_kw=5,
+        net_load_kw=lambda start, _end: 5.0 if start == _hour(1) else 0.0,
+    )
+    assert _charged_kwh(result) == 0
+
+
+def test_export_can_justify_charge_with_zero_household_load() -> None:
+    result = plan(
+        greenely(.2, .2, 3), initial_soc=10, charge_kw=5, discharge_kw=5,
+        grid_import_cost=.5, export_allowed=True, export_delta=.5,
+        net_load_kw=lambda _start, _end: 0.0,
+    )
+    assert _charged_kwh(result) > 0
+    assert any(a.discharge_mode is PriceDischargeMode.EXPORT for a in result.actions)
+
+
+def test_charge_demand_does_not_cross_known_external_reset() -> None:
+    window = ExternalWindow(_hour(2), _hour(3), 10.0)
+    result = plan(
+        greenely(.2, .2, 1, 3), initial_soc=10, charge_kw=5, discharge_kw=5,
+        windows=(window,), net_load_kw=lambda _start, _end: 5.0,
+    )
+    assert not any(a.direction is PriceDirection.CHARGE and a.end <= window.start
+                   for a in result.actions)
 
 
 def test_greenely_source_is_normalized_from_stockholm_to_utc() -> None:

@@ -118,6 +118,7 @@ class PriceOptimizationController:
         self.standard_plan_margin_sek: float | None = None
         self.planner_engine = "standard"
         self._logged_plan: tuple[object, ...] | None = None
+        self._logged_charge_limit_fingerprint: str | None = None
         self.problem_since: datetime | None = None
         self.problem_notified = False
         # True while one planning pass runs. A passing non-problem status
@@ -979,10 +980,25 @@ class PriceOptimizationController:
         ):
             plan = self.whole_day.plan
             self.planner_engine = "whole_day"
+            self._logged_charge_limit_fingerprint = None
         else:
             self.planner_engine = (
                 "standard_whole_day_unavailable"
                 if bool(settings.get("price_whole_day_planner")) else "standard"
+            )
+            if (
+                standard.charge_demand_limited
+                and standard.fingerprint != self._logged_charge_limit_fingerprint
+            ):
+                log_activity(
+                    self.runtime, PRICE_STATUS,
+                    "Standard price plan limited charging to forecast profitable use",
+                    "Why: forecast net load and export policy leave less profitable "
+                    "future use in this planning segment than the battery could charge. "
+                    "Energy already stored above minimum SOC is counted first.",
+                )
+            self._logged_charge_limit_fingerprint = (
+                standard.fingerprint if standard.charge_demand_limited else None
             )
         return replace(
             plan, actions=merge_adjacent_actions(plan.actions, policy.max_duration_seconds)

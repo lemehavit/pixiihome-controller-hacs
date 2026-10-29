@@ -196,6 +196,7 @@ class PricePlan:
     expected_margin_sek: float
     # Planned usable SOC at the start of each adjustable external window.
     window_socs: tuple[tuple[datetime, float], ...] = ()
+    charge_demand_limited: bool = False
 
     @property
     def ready(self) -> bool:
@@ -382,6 +383,7 @@ def build_price_plan(
     closing: float | None = None
     stored_price = acquisition_price
     charged_energy = charged_price = 0.0
+    charge_demand_limited = False
 
     for index, item in enumerate(candidates):
         if segment[index] != active_segment:
@@ -442,6 +444,49 @@ def build_price_plan(
             and charge_mode is not None
         ):
             power = min(maximum_charge_kw, headroom / (hours * charge_efficiency))
+            if net_load_kw is not None:
+                future_delivery = 0.0
+                forecast_known = True
+                for future_index in range(index + 1, len(candidates)):
+                    future = candidates[future_index]
+                    if segment[future_index] != active_segment:
+                        break
+                    if blocked[future_index]:
+                        continue
+                    later_peak = max(
+                        (candidates[j].price_sek_per_kwh
+                         for j in range(future_index + 1, len(candidates))
+                         if segment[j] == active_segment and not blocked[j]),
+                        default=future.price_sek_per_kwh,
+                    )
+                    if future.price_sek_per_kwh < later_peak - 1e-9:
+                        continue
+                    future_mode, _ = _qualifying_discharge(
+                        price, future.price_sek_per_kwh,
+                        efficiency=round_trip_efficiency_percent / 100,
+                        grid_cost=grid_import_cost_sek_per_kwh,
+                        cycle_cost=cycle_cost_sek_per_kwh,
+                        minimum_profit=minimum_difference_sek_per_kwh,
+                        export_allowed=export_allowed,
+                        export_minimum_profit=export_minimum_difference_sek_per_kwh,
+                    )
+                    if future_mode is PriceDischargeMode.EXPORT:
+                        future_delivery += maximum_discharge_kw * future.duration_hours
+                    elif future_mode is PriceDischargeMode.SELF_CONSUMPTION:
+                        demand = net_load_kw(future.start, future.end)
+                        if demand is None or not isfinite(demand):
+                            forecast_known = False
+                            break
+                        future_delivery += (
+                            min(maximum_discharge_kw, max(0.0, demand)) * future.duration_hours
+                        )
+                if forecast_known:
+                    needed_stored_energy = future_delivery / discharge_efficiency
+                    remaining_headroom = max(0.0, needed_stored_energy - available)
+                    demand_power = remaining_headroom / (hours * charge_efficiency)
+                    if demand_power < power - 1e-9:
+                        charge_demand_limited = True
+                    power = min(power, demand_power)
             if power < 0.05:
                 continue
             added_energy = power * hours * charge_efficiency
@@ -567,7 +612,7 @@ def build_price_plan(
         window_socs.setdefault(window.start, energy / usable_capacity_kwh * 100)
     return PricePlan(
         tuple(actions), (), fingerprint, min_soc, max_soc, expected_margin,
-        tuple(sorted(window_socs.items())),
+        tuple(sorted(window_socs.items())), charge_demand_limited,
     )
 
 
