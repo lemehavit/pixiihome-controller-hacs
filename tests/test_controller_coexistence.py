@@ -506,11 +506,16 @@ def test_gateway_minimum_cannot_raise_the_site_fuse_limit():
 
 
 @pytest.mark.asyncio
-async def test_disabled_load_balancing_retries_conflict_then_restores_owned_record():
+async def test_disabled_load_balancing_logs_only_changed_restore_failures_and_recovers(monkeypatch):
+    activity = []
+    restored = []
+    monkeypatch.setattr(meter_limit_module, "log_activity",
+                        lambda *args, **kwargs: activity.append((args, kwargs)))
     controller = object.__new__(MeterLimitLoadBalancer)
     controller.runtime = SimpleNamespace(
         controller_state=SimpleNamespace(load_balancing_enabled=False),
         production_control_enabled=lambda: False,
+        _meter_limitation_restored=lambda: restored.append(True),
     )
     controller._lock = asyncio.Lock()
     controller.status, controller.reason = "active", None
@@ -557,7 +562,7 @@ async def test_disabled_load_balancing_retries_conflict_then_restores_owned_reco
 
     await controller.tick()
     assert controller.status == "recovery_required"
-    assert controller.reason == "meter_limitation_restore_failed"
+    assert controller.reason == "temporary gateway read failure"
     assert controller.lease is not None
     assert "write" not in events
 
@@ -570,6 +575,10 @@ async def test_disabled_load_balancing_retries_conflict_then_restores_owned_reco
         )
         assert controller.lease is not None
         assert "write" not in events
+    assert len(activity) == 2
+    assert all(entry[0][2] == "Load balancing restore needs recovery" for entry in activity)
+    assert activity[0][1]["cause"] == "temporary gateway read failure"
+    assert "meter_limitation_recovery_conflict" in activity[1][1]["cause"]
 
     current = owned
     await controller.tick()
@@ -578,6 +587,7 @@ async def test_disabled_load_balancing_retries_conflict_then_restores_owned_reco
     assert controller.lease is None
     assert controller.status == "disabled"
     assert controller.reason is None
+    assert restored == [True]
     assert events[-4:] == ["stop_idle", "read", "write", "save_lease"]
 
 
@@ -637,7 +647,7 @@ async def test_observer_survives_restore_failure_and_sensor_shows_recovery():
         assert sensor.extra_state_attributes["control_status"] == "recovery_required"
         assert (
             sensor.extra_state_attributes["control_blocked_reason"]
-            == "meter_limitation_restore_failed"
+            == "temporary restore read failure"
         )
         assert controller.lease is not None
 

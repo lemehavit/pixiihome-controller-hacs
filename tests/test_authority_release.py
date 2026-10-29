@@ -99,11 +99,14 @@ async def test_authority_off_releases_owned_control_before_closing_the_gate(monk
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("restore_error", [None, ValueError, OSError])
-async def test_authority_off_persists_after_load_balancing_restore_conflict(
+async def test_authority_off_persists_after_load_balancing_restore_failure(
     monkeypatch, restore_error: type[Exception] | None,
 ) -> None:
+    from custom_components.pixiihome_controller import runtime as runtime_module
+
     events: list[str] = []
     notifications: list[str] = []
+    activity: list[dict] = []
     saved: list[object] = []
     gate = SimpleNamespace(live_writes_enabled=True, blocked_reasons=set())
     lease = {"original": {}, "owned": [{}]}
@@ -115,7 +118,10 @@ async def test_authority_off_persists_after_load_balancing_restore_conflict(
     async def deactivate():
         events.append("restore_attempt")
         if restore_error is not None:
-            raise restore_error("meter_limitation_recovery_conflict")
+            raise restore_error(
+                "meter_limitation_recovery_conflict"
+                if restore_error is ValueError else "Gateway read failed"
+            )
         fake.meter_limit_load_balancer.lease = None
 
     async def admin(user_id):
@@ -151,6 +157,8 @@ async def test_authority_off_persists_after_load_balancing_restore_conflict(
         persistent_notification, "async_create",
         lambda hass, message, **kwargs: notifications.append(message),
     )
+    monkeypatch.setattr(runtime_module, "log_activity",
+                        lambda *args, **kwargs: activity.append(kwargs))
 
     await RuntimeData.async_set_production_control_enabled(fake, False, None)  # type: ignore[arg-type]
 
@@ -166,8 +174,108 @@ async def test_authority_off_persists_after_load_balancing_restore_conflict(
         assert (
             "meter_limitation_recovery_conflict"
             if restore_error is ValueError
-            else "meter_limitation_restore_failed"
+            else "Gateway read failed"
         ) in notifications[0]
+        assert (
+            "meter_limitation_recovery_conflict"
+            if restore_error is ValueError else "Gateway read failed"
+        ) in activity[-1]["cause"]
     else:
         assert fake.meter_limit_load_balancer.lease is None
         assert not notifications
+
+
+@pytest.mark.asyncio
+async def test_later_observer_restore_dismisses_only_resolved_cleanup(monkeypatch) -> None:
+    from homeassistant.components import persistent_notification
+
+    created: list[str] = []
+    dismissed: list[str] = []
+    monkeypatch.setattr(persistent_notification, "async_create",
+                        lambda _hass, message, **_kwargs: created.append(message))
+    monkeypatch.setattr(persistent_notification, "async_dismiss",
+                        lambda _hass, notification_id: dismissed.append(notification_id))
+    fake = SimpleNamespace(hass=object(), serial="GATEWAY")
+    RuntimeData._update_authority_cleanup_notification(
+        fake, ["load_balancing Service 120 (read failed)", "price_1_ack_timeout"]
+    )
+    RuntimeData._meter_limitation_restored(fake)
+    assert "price_1_ack_timeout" in created[-1]
+    assert "Service 120" not in created[-1]
+    assert dismissed == []
+    RuntimeData._update_authority_cleanup_notification(fake, [])
+    assert dismissed == ["pixiihome_controller_GATEWAY_authority_cleanup"]
+
+    RuntimeData._update_authority_cleanup_notification(
+        fake, ["load_balancing Service 120 (read failed)"]
+    )
+    RuntimeData._meter_limitation_restored(fake)
+    assert dismissed == [
+        "pixiihome_controller_GATEWAY_authority_cleanup",
+        "pixiihome_controller_GATEWAY_authority_cleanup",
+    ]
+    assert fake._authority_cleanup_problems == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reporting_error", [None, "notification", "activity"])
+async def test_journal_save_failure_warns_about_service_120_and_keeps_original_error(
+    monkeypatch, reporting_error,
+) -> None:
+    from homeassistant.components import persistent_notification
+
+    from custom_components.pixiihome_controller import runtime as runtime_module
+
+    notifications: list[str] = []
+    activity: list[tuple[tuple, dict]] = []
+    def notify(_hass, message, **_kwargs):
+        if reporting_error == "notification":
+            raise OSError("notification unavailable")
+        notifications.append(message)
+
+    def record_activity(*args, **kwargs):
+        if reporting_error == "activity":
+            raise OSError("activity unavailable")
+        activity.append((args, kwargs))
+
+    monkeypatch.setattr(persistent_notification, "async_create", notify)
+    monkeypatch.setattr(runtime_module, "log_activity", record_activity)
+    gate = SimpleNamespace(live_writes_enabled=True, blocked_reasons=set())
+    save_error = OSError("journal disk full")
+
+    async def admin(_user_id):
+        return None
+
+    async def release():
+        return []
+
+    async def deactivate():
+        raise OSError("Gateway read failed")
+
+    async def save(_candidate):
+        raise save_error
+
+    def fail_closed(_reason):
+        gate.live_writes_enabled = False
+
+    fake = SimpleNamespace(
+        _require_admin=admin, production_control_enabled=lambda: True,
+        _async_release_owned_control=release,
+        meter_limit_load_balancer=SimpleNamespace(lease={"original": {}}, deactivate=deactivate),
+        _control_journal_lock=asyncio.Lock(),
+        control_journal=SimpleNamespace(
+            controller_state={}, with_product_state=lambda **_kwargs: object()
+        ),
+        production_authority=SimpleNamespace(revision=1),
+        _save_control_journal_verified=save, _fail_closed_control_state=fail_closed,
+        controller_state=None, release_gate=gate, hass=object(), serial="GATEWAY",
+    )
+    with pytest.raises(OSError) as caught:
+        await RuntimeData.async_set_production_control_enabled(fake, False, None)
+    assert caught.value is save_error
+    assert gate.live_writes_enabled is False
+    if reporting_error != "notification":
+        assert "Service 120" in notifications[0]
+        assert "Gateway read failed" in notifications[0]
+    if reporting_error != "activity":
+        assert activity[-1][1]["cause"] == "load_balancing Service 120 (Gateway read failed)"

@@ -288,24 +288,33 @@ class MeterLimitLoadBalancer:
         )
         if not enabled:
             if self.lease is not None or getattr(self.idle_support, "lease", None) is not None:
+                previous = (self.status, self.reason)
                 try:
                     await self.deactivate()
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:  # noqa: BLE001 - keep the observer alive for recovery
-                    self.status = "recovery_required"
-                    self.reason = (
+                    reason = (
                         str(error)
                         if isinstance(error, ValueError)
-                        else "meter_limitation_restore_failed"
+                        else str(error) or "meter_limitation_restore_failed"
                     )
-                    log_activity(
-                        self.runtime,
-                        "load_balancing_observation",
-                        "Load balancing restore needs recovery",
-                        cause=self.reason,
-                    )
+                    conflict_logged_by_deactivate = reason == "meter_limitation_recovery_conflict"
+                    if (
+                        previous != ("recovery_required", reason)
+                        and not conflict_logged_by_deactivate
+                    ):
+                        log_activity(
+                            self.runtime,
+                            "load_balancing_observation",
+                            "Load balancing restore needs recovery",
+                            cause=reason,
+                        )
+                    self.status, self.reason = "recovery_required", reason
                     return
+                restored = getattr(self.runtime, "_meter_limitation_restored", None)
+                if callable(restored) and self.lease is None:
+                    restored()
             startup_read_error = getattr(self, "startup_read_error", None)
             if startup_read_error is not None:
                 self.status, self.reason = "recovery_required", startup_read_error
@@ -372,15 +381,20 @@ class MeterLimitLoadBalancer:
             owned = [self._record(item) for item in self.lease["owned"]]
             if current != original:
                 if current not in owned:
+                    changed = (self.status, self.reason) != (
+                        "recovery_required", "meter_limitation_recovery_conflict"
+                    )
                     self.status, self.reason = (
                         "recovery_required",
                         "meter_limitation_recovery_conflict",
                     )
-                    log_activity(
-                        self.runtime, "load_balancing_observation",
-                        "Saved meter limitation could not be restored",
-                        cause="Gateway Service 120 record no longer matches the saved lease",
-                    )
+                    if changed:
+                        log_activity(
+                            self.runtime, "load_balancing_observation",
+                            "Load balancing restore needs recovery",
+                            cause="meter_limitation_recovery_conflict: Gateway Service 120 "
+                            "record no longer matches the saved lease",
+                        )
                     raise ValueError("meter_limitation_recovery_conflict")
                 await self._write(original)
             await self._save_lease(None)

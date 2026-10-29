@@ -196,6 +196,7 @@ class RuntimeData:
     last_controller_decision: ControllerDecision | None = field(init=False, default=None)
     load_balancing_observer: LoadBalancingObserver | None = field(init=False, default=None)
     meter_limit_load_balancer: MeterLimitLoadBalancer | None = field(init=False, default=None)
+    _authority_cleanup_problems: list[str] = field(init=False, default_factory=list)
     solar_charging_controller: SolarChargingController | None = field(init=False, default=None)
     adaptive_peak_shaving_controller: AdaptivePeakShavingController | None = field(
         init=False, default=None
@@ -687,12 +688,8 @@ class RuntimeData:
             try:
                 await self.meter_limit_load_balancer.deactivate()
             except Exception as error:  # noqa: BLE001 - persist authority off despite cleanup failure
-                reason = (
-                    str(error)
-                    if isinstance(error, ValueError)
-                    else "meter_limitation_restore_failed"
-                )
-                cleanup_problems.append(f"load_balancing ({reason})")
+                reason = str(error) or "meter_limitation_restore_failed"
+                cleanup_problems.append(f"load_balancing Service 120 ({reason})")
         async with self._control_journal_lock:
             journal = self.control_journal
             if journal is None:
@@ -716,6 +713,22 @@ class RuntimeData:
                 await self._save_control_journal_verified(candidate)
             except Exception:
                 self._fail_closed_control_state("control_journal_persistence_failed")
+                if cleanup_problems:
+                    try:
+                        RuntimeData._update_authority_cleanup_notification(
+                            self, cleanup_problems
+                        )
+                    except Exception:  # noqa: BLE001 - keep the original journal error
+                        pass
+                    try:
+                        log_activity(
+                            self, "price_optimization_status",
+                            "Control authority closed after journal save failed; "
+                            "cleanup needs recovery",
+                            cause=", ".join(cleanup_problems),
+                        )
+                    except Exception:  # noqa: BLE001 - keep the original journal error
+                        pass
                 raise
             self.control_journal = candidate
             self.production_authority = authority
@@ -727,26 +740,44 @@ class RuntimeData:
                 else {"production_control_disabled", "state_changing_control_not_live_validated"}
             )
         if not enabled:
-            from .activity import log_activity
-
             log_activity(
                 self, "price_optimization_status",
                 "Control authority turned off"
                 + (f"; could not remove: {', '.join(cleanup_problems)}" if cleanup_problems
                    else "; integration-owned schedules and leases were removed first"),
                 cause="Administrator disabled production control; "
-                + ("cleanup needs recovery" if cleanup_problems else "cleanup completed"),
+                + (", ".join(cleanup_problems) if cleanup_problems else "cleanup completed"),
             )
-        if cleanup_problems:
-            from homeassistant.components import persistent_notification
+        if not enabled:
+            RuntimeData._update_authority_cleanup_notification(self, cleanup_problems)
 
+    def _update_authority_cleanup_notification(self, problems: list[str]) -> None:
+        """Keep the warning aligned with unresolved integration-owned effects."""
+        from homeassistant.components import persistent_notification
+
+        previous = getattr(self, "_authority_cleanup_problems", [])
+        self._authority_cleanup_problems = list(problems)
+        notification_id = f"pixiihome_controller_{self.serial}_authority_cleanup"
+        if problems:
             persistent_notification.async_create(
                 self.hass,
                 "Production control authority was turned off, but these "
                 "integration-owned Pixii effects could not be removed and may "
-                "still run: " + ", ".join(cleanup_problems),
+                "still run: " + ", ".join(problems),
                 title="Pixii: cleanup incomplete",
-                notification_id=f"pixiihome_controller_{self.serial}_authority_cleanup",
+                notification_id=notification_id,
+            )
+        elif previous:
+            persistent_notification.async_dismiss(self.hass, notification_id)
+
+    def _meter_limitation_restored(self) -> None:
+        """Refresh a cleanup warning after the disabled observer restores Service 120."""
+        problems = getattr(self, "_authority_cleanup_problems", [])
+        if any(problem.startswith("load_balancing Service 120 (") for problem in problems):
+            RuntimeData._update_authority_cleanup_notification(
+                self,
+                [problem for problem in problems
+                 if not problem.startswith("load_balancing Service 120 (")]
             )
 
     async def _async_release_owned_control(self) -> list[str]:
