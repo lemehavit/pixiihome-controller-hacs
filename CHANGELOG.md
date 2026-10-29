@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.21 — 2026-10-29
+
+- F2/F2b: Avstängd styrbehörighet släpper mätarbegränsningen även när
+  styruppdateringar blockeras, med säker hantering av misslyckade försök.
+- F10: Nedstängning stoppar kommunikationen även om ett tidigare steg misslyckas.
+- F3: Kvarvarande tjänst 120 och fasstöd städas upp efter omstart när styrning är av.
+- F8: Varningen för stillastående prisoptimering följer den faktiska stopptiden.
+- F9: Ändrade aggregatormål läses om innan prisplaneringen fortsätter.
+- F1: Fasstödet följer automationspolicyns gränser.
+- D1: Dokumentationen för prisoptimering och energiprognos har uppdaterats.
+
 ## 0.5.20 — 2026-10-28
 
 - Fix: the whole-day plan showed exports (and their money) that the export
