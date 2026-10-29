@@ -8,7 +8,7 @@ from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from math import ceil, isfinite
+from math import ceil, isfinite, sqrt
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers.event import async_track_state_change_event
@@ -124,6 +124,11 @@ class PriceOptimizationController:
         # inside the pass must not restart the problem timer; the status the
         # pass ends with decides.
         self._in_tick = False
+        # Own verified schedules that start within the minimum lead time. The
+        # planners cannot plan them again, so they are kept as fixed windows.
+        self._binding_ids: frozenset[int] = frozenset()
+        # Binding schedules already logged as kept (logged once per id).
+        self._kept_logged: set[int] = set()
 
     @property
     def config(self) -> PriceOptimizationConfig:
@@ -941,14 +946,18 @@ class PriceOptimizationController:
             grid_import_cost_sek_per_kwh=limits["grid_import_cost"],
             end_before=end_before,
         )
+        net_load_kw = (
+            None if forecast is None
+            else lambda start, end: forecast.net_load_kw(start, end, high=high)
+        )
+        # Own schedules about to start are fixed: plan around them and count
+        # on their energy instead of removing them just before they run.
+        windows = (*windows, *self._binding_windows(arguments, limits, net_load_kw))
         standard = build_price_plan(
             series,
             **arguments,
             external_windows=windows,
-            net_load_kw=(
-                None if forecast is None
-                else lambda start, end: forecast.net_load_kw(start, end, high=high)
-            ),
+            net_load_kw=net_load_kw,
         )
         self.standard_plan_margin_sek = standard.expected_margin_sek
         plan = standard
@@ -978,6 +987,75 @@ class PriceOptimizationController:
         return replace(
             plan, actions=merge_adjacent_actions(plan.actions, policy.max_duration_seconds)
         )
+
+    def _binding_windows(
+        self,
+        arguments: Mapping[str, Any],
+        limits: Mapping[str, float],
+        net_load_kw: Callable[[datetime, datetime], float | None] | None,
+    ) -> tuple[ExternalWindow, ...]:
+        """Fixed windows for own verified schedules starting within the lead time.
+
+        Their expected resulting usable SOC is chained from the current SOC and
+        each schedule's own energy. An unreadable power gives a window with
+        unknown energy, so planning ends at its start. The ids are kept in
+        ``self._binding_ids`` so the same schedules are never removed.
+        """
+        now: datetime = arguments["now"]
+        lead = now + timedelta(minutes=int(arguments["minimum_lead_minutes"]))
+        capacity = float(arguments["usable_capacity_kwh"])
+        minimum = float(arguments["minimum_soc_percent"])
+        maximum = float(arguments["maximum_soc_percent"])
+        efficiency = sqrt(limits["efficiency"] / 100)
+        # A schedule cannot move more power than the battery and limits allow now.
+        charge_cap = float(arguments["maximum_charge_kw"])
+        discharge_cap = float(arguments["maximum_discharge_kw"])
+        binding: list[tuple[datetime, int, SchedulerOwnershipRecord]] = []
+        for record in self._price_records():
+            start = _record_start(record)
+            duration = record.intended_state.get("duration")
+            if (
+                start is None or type(duration) is not int or duration <= 0
+                or not now < start <= lead
+            ):
+                continue
+            binding.append((start, duration, record))
+        binding.sort(key=lambda item: (item[0], item[2].m_id))
+        self._binding_ids = frozenset(record.m_id for _, _, record in binding)
+        soc: float | None = float(arguments["usable_soc_percent"])
+        windows: list[ExternalWindow] = []
+        for start, duration, record in binding:
+            end = start + timedelta(seconds=duration)
+            hours = duration / 3600
+            values = record.intended_state.get("values", {})
+            values = values if isinstance(values, Mapping) else {}
+            charge_kw: float | None = None
+            delivered_kwh: float | None = None
+            if record.service == "demandresponse":
+                pacref = _finite_number(values.get("pacref"))
+                if pacref is not None and pacref >= 0:
+                    charge_kw = min(charge_cap, pacref / 1000)
+                elif pacref is not None:
+                    delivered_kwh = min(discharge_cap, -pacref / 1000) * hours
+            elif record.service == "peakshaving":
+                power = _finite_number(values.get("discharge_max"))
+                if power is not None and power >= 0:
+                    delivered_kw = min(discharge_cap, power / 1000)
+                    demand = None if net_load_kw is None else net_load_kw(start, end)
+                    if demand is not None and isfinite(demand):
+                        delivered_kw = min(delivered_kw, max(0.0, demand))
+                    delivered_kwh = delivered_kw * hours
+            if soc is not None and charge_kw is not None:
+                ceiling = max(maximum, soc)
+                soc = min(ceiling, soc + charge_kw * hours * efficiency / capacity * 100)
+            elif soc is not None and delivered_kwh is not None:
+                floor = min(minimum, soc)
+                soc = max(floor, soc - delivered_kwh / efficiency / capacity * 100)
+            else:
+                # Unknown energy: this and every later window end the plan.
+                soc = None
+            windows.append(ExternalWindow(start, end, soc))
+        return tuple(windows)
 
     def _validated_limits(self) -> dict[str, float]:
         settings = self.runtime.operational_settings
@@ -1577,12 +1655,27 @@ class PriceOptimizationController:
             return False
         desired = {_action_key(action): action for action in actions}
         existing = {_record_key(record): record for record in self._price_records()}
+        self._kept_logged &= {record.m_id for record in existing.values()}
         now = datetime.now(UTC)
         for key, record in tuple(existing.items()):
             if key in desired:
                 continue
             start = _record_start(record)
             if start is None or start <= now:
+                continue
+            if record.m_id in self._binding_ids:
+                if record.m_id not in self._kept_logged:
+                    self._kept_logged.add(record.m_id)
+                    lead = self.config.minimum_lead_minutes
+                    log_activity(
+                        self.runtime, PRICE_STATUS,
+                        f"Kept {_describe(record)}: it starts within {lead} min",
+                        "Who: price optimization. Why: its own schedule starts within "
+                        f"the minimum lead time ({lead} min), so it is no longer "
+                        "replanned or removed; the plan counts on its energy and "
+                        "plans around it. Turning the feature or control authority "
+                        "off still removes it.",
+                    )
                 continue
             if not await self._mutation_context_safe():
                 return False
@@ -1824,6 +1917,13 @@ def _freeze(value: object) -> object:
     if isinstance(value, list | tuple):
         return tuple(_freeze(item) for item in value)
     return value
+
+
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if isfinite(number) else None
 
 
 def _price_at_epoch(series: PriceSeries, epoch: int) -> float | None:
