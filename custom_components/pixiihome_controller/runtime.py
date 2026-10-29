@@ -1,7 +1,8 @@
 """Per-config-entry runtime state."""
 
 import asyncio
-from collections.abc import Mapping
+import logging
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
@@ -15,6 +16,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 
+from .activity import log_activity
 from .allocator import MessageIdAllocator
 from .aps_controller import AdaptivePeakShavingController, build_aps_lease_request
 from .battery import BatteryModel, BatteryReading
@@ -97,6 +99,8 @@ from .scheduler.transport import HomeAssistantSchedulerCommandExecutor
 from .scheduler.validation import SchedulerValidationRoundtrip
 from .solar_controller import SolarChargingController, build_solar_lease_request
 from .telemetry import TelemetryStore
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _scheduler_snapshot(manager: SchedulerRefreshManager) -> list[dict[str, object]]:
@@ -1894,27 +1898,53 @@ class RuntimeData:
         await self.command_manager.start()
 
     async def stop(self) -> None:
+        first_error: Exception | None = None
+
+        async def stop_step(name: str, action: Callable[[], Awaitable[None]]) -> None:
+            nonlocal first_error
+            try:
+                await action()
+            except Exception as error:  # noqa: BLE001 - every remaining stop must run
+                _LOGGER.exception("Failed to stop %s during runtime shutdown", name)
+                log_activity(
+                    self,
+                    "recovery_status",
+                    f"Runtime shutdown could not stop {name}; continuing cleanup",
+                    cause=f"Stop of {name} failed: {error}",
+                )
+                if first_error is None:
+                    first_error = error
+
         if self.battery_activity is not None:
-            await self.battery_activity.stop()
+            await stop_step("battery activity", self.battery_activity.stop)
         if self.energy_forecast is not None:
-            await self.energy_forecast.stop()
+            await stop_step("energy forecast", self.energy_forecast.stop)
         if self.price_optimization_controller is not None:
-            await self.price_optimization_controller.soc_guard.stop()
-            await self.price_optimization_controller.stop()
+            await stop_step("price SOC guard", self.price_optimization_controller.soc_guard.stop)
+            await stop_step("price optimization", self.price_optimization_controller.stop)
         if self.adaptive_peak_shaving_controller is not None:
-            await self.adaptive_peak_shaving_controller.stop()
+            await stop_step("adaptive peak shaving", self.adaptive_peak_shaving_controller.stop)
         if self.solar_charging_controller is not None:
-            await self.solar_charging_controller.stop()
+            await stop_step("solar charging", self.solar_charging_controller.stop)
         if self.load_balancing_observer is not None:
-            await self.load_balancing_observer.stop()
+            await stop_step("load balancing observer", self.load_balancing_observer.stop)
         if self.meter_limit_load_balancer is not None:
-            await self.meter_limit_load_balancer.stop()
+            await stop_step("meter limit load balancer", self.meter_limit_load_balancer.stop)
         if self.scheduler_coordinator is not None:
-            await self.scheduler_coordinator.async_stop()
-        await self.async_flush_control_journal()
-        await self.command_manager.stop()
+            await stop_step("scheduler coordinator", self.scheduler_coordinator.async_stop)
+        await stop_step("control journal flush", self.async_flush_control_journal)
+        await stop_step("command manager", self.command_manager.stop)
         if self.transport is not None:
-            await self.transport.stop()
+            await stop_step("MQTT transport", self.transport.stop)
+        log_activity(
+            self,
+            "recovery_status",
+            "Runtime shutdown attempted all local components"
+            + ("; cleanup errors remain" if first_error is not None else "; cleanup completed"),
+            cause="Integration unload requested; communication and background tasks must stop",
+        )
+        if first_error is not None:
+            raise first_error
 
     def handle_message(self, message: ParsedMqttMessage) -> None:
         previous_service = self.telemetry.value("core", "srv_type")

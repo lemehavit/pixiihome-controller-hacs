@@ -492,6 +492,147 @@ async def _configured_runtime(
     return runtime, entry, hass, updates
 
 
+def _stub_runtime_stop_steps(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: RuntimeData,
+    failures: dict[str, Exception],
+    calls: list[str],
+) -> None:
+    async def stop(name: str) -> None:
+        calls.append(name)
+        if name in failures:
+            raise failures[name]
+
+    def component(name: str) -> Any:
+        async def run() -> None:
+            await stop(name)
+
+        return SimpleNamespace(stop=run)
+
+    runtime.battery_activity = component("battery activity")
+    runtime.energy_forecast = component("energy forecast")
+    runtime.price_optimization_controller = component("price optimization")
+    runtime.price_optimization_controller.soc_guard = component("price SOC guard")
+    runtime.adaptive_peak_shaving_controller = component("adaptive peak shaving")
+    runtime.solar_charging_controller = component("solar charging")
+    runtime.load_balancing_observer = component("load balancing observer")
+    runtime.meter_limit_load_balancer = component("meter limit load balancer")
+    runtime.scheduler_coordinator = SimpleNamespace(
+        async_stop=lambda: stop("scheduler coordinator")
+    )
+    monkeypatch.setattr(
+        RuntimeData,
+        "async_flush_control_journal",
+        lambda _self: stop("control journal flush"),
+    )
+    runtime.command_manager = component("command manager")
+    runtime.transport = component("MQTT transport")
+
+
+STOP_ORDER = [
+    "battery activity",
+    "energy forecast",
+    "price SOC guard",
+    "price optimization",
+    "adaptive peak shaving",
+    "solar charging",
+    "load balancing observer",
+    "meter limit load balancer",
+    "scheduler coordinator",
+    "control journal flush",
+    "command manager",
+    "MQTT transport",
+]
+
+
+@pytest.mark.parametrize("failed_steps", [(), ("meter limit load balancer",),
+                                         ("meter limit load balancer", "control journal flush")])
+@pytest.mark.asyncio
+async def test_runtime_stop_attempts_every_step_and_reports_each_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failed_steps: tuple[str, ...],
+) -> None:
+    runtime, _, _, _ = await _configured_runtime(monkeypatch)
+    calls: list[str] = []
+    failures = {name: RuntimeError(f"{name} failed") for name in failed_steps}
+    activity: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        runtime_module,
+        "log_activity",
+        lambda _runtime, _status, message, cause: activity.append((message, cause)),
+    )
+    _stub_runtime_stop_steps(monkeypatch, runtime, failures, calls)
+
+    if failed_steps:
+        with pytest.raises(RuntimeError) as raised:
+            await runtime.stop()
+        assert raised.value is failures[failed_steps[0]]
+    else:
+        await runtime.stop()
+
+    assert calls == STOP_ORDER
+    assert len(activity) == len(failed_steps) + 1
+    assert "all local components" in activity[-1][0]
+    assert "Integration unload requested" in activity[-1][1]
+    for name in failed_steps:
+        assert f"Failed to stop {name}" in caplog.text
+        assert f"{name} failed" in caplog.text
+        assert any(name in message and f"{name} failed" in cause
+                   for message, cause in activity)
+
+
+@pytest.mark.asyncio
+async def test_unload_stops_command_manager_and_mqtt_after_regulator_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, entry, hass, _ = await _configured_runtime(monkeypatch)
+    command_manager = runtime.command_manager
+    transport = runtime.transport
+    calls: list[str] = []
+    failure = RuntimeError("regulator failed")
+    _stub_runtime_stop_steps(
+        monkeypatch, runtime, {"meter limit load balancer": failure}, calls
+    )
+    runtime.command_manager = command_manager
+    runtime.transport = transport
+    subscriptions: list[str] = []
+    unsubscribed: list[str] = []
+
+    async def wait_for_mqtt(_hass: Any) -> bool:
+        return True
+
+    async def subscribe(
+        _hass: Any, topic: str, _callback: Any, *, qos: int, encoding: str | None
+    ) -> Any:
+        del qos, encoding
+        subscriptions.append(topic)
+        return lambda: unsubscribed.append(topic)
+
+    monkeypatch.setattr(mqtt_module, "async_wait_for_mqtt_client", wait_for_mqtt)
+    monkeypatch.setattr(command_module, "async_wait_for_mqtt_client", wait_for_mqtt)
+    monkeypatch.setattr(mqtt_module, "async_subscribe", subscribe)
+    monkeypatch.setattr(command_module, "async_subscribe", subscribe)
+    await runtime.start()
+    assert command_manager.ready
+    assert transport is not None and transport._unsubscribers
+
+    async def unload_platforms(*_args: Any) -> bool:
+        raise AssertionError("unload should report the stop failure first")
+
+    hass.data = {DOMAIN: {entry.entry_id: runtime}}
+    hass.config_entries.async_unload_platforms = unload_platforms
+    with pytest.raises(RuntimeError) as raised:
+        await integration_module.async_unload_entry(hass, entry)
+
+    assert raised.value is failure
+    assert calls == STOP_ORDER[:-2]
+    assert not command_manager.ready
+    assert transport._unsubscribers == []
+    assert sorted(unsubscribed) == sorted(subscriptions)
+    assert entry.entry_id not in hass.data[DOMAIN]
+
+
 @pytest.mark.asyncio
 async def test_configured_runtime_wires_without_legacy_ha_state(
     monkeypatch: pytest.MonkeyPatch,
