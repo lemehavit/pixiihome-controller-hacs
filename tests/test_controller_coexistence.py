@@ -18,6 +18,7 @@ from custom_components.pixiihome_controller.control.policy import AutomationPoli
 from custom_components.pixiihome_controller.idle_phase_controller import IdlePhaseLoadBalancer
 from custom_components.pixiihome_controller.load_balancing_observer import LoadBalancingObserver
 from custom_components.pixiihome_controller.meter_limit_controller import MeterLimitLoadBalancer
+from custom_components.pixiihome_controller.runtime import RuntimeData
 from custom_components.pixiihome_controller.sensor import PixiiLoadBalancingSensor
 
 from .test_price_controller import policy
@@ -320,6 +321,178 @@ async def test_idle_phase_support_yields_to_all_existing_services_and_does_not_r
     assert controller.gateway.priority_list == [102, 101, 105, 107]
     assert controller.gateway.switches == [True]
     assert controller.gateway.service == 102
+
+
+def _report_policy(**changes) -> AutomationPolicy:
+    """The reported policy: 100 W, SOC 80-100 %, 1 s, no weekdays, only targetsoc."""
+    reported = {
+        "allowed_service_classes": ("targetsoc",),
+        "time_window": {"start": "00:00", "end": "23:59", "days": []},
+        "max_duration_seconds": 1,
+        "soc_min_percent": 80,
+        "soc_max_percent": 100,
+        "max_power_kw": 0.1,
+    }
+    return replace(policy(), **{**reported, **changes})
+
+
+def _policy_controller(monkeypatch, configured, *, soc, grid_w):
+    activity = []
+
+    def record_policy(*args, **kwargs):
+        if "policy" in args[2]:
+            activity.append((args, kwargs))
+
+    monkeypatch.setattr(idle_phase_module, "log_activity", record_policy)
+    sample = PhaseSample(abs(grid_w) / 230, 230, grid_w, 0)
+    observer = SimpleNamespace(
+        config=LoadBalancingConfig(),
+        samples=(sample, PhaseSample(1, 230, 100, 0), PhaseSample(1, 230, 100, 0)),
+        snapshot={
+            "usable_soc_percent": soc,
+            "battery_charge_capacity_dc_w": 10_000,
+            "battery_discharge_capacity_dc_w": 10_000,
+            "battery_healthy": True,
+        },
+    )
+    state = {"policy": configured}
+    controller = object.__new__(IdlePhaseLoadBalancer)
+    controller.gateway = PhaseGateway()
+    controller.lease = None
+    controller._lock = asyncio.Lock()
+    controller.targets = controller.previous = controller.last_tick = None
+    controller.status, controller.reason = "standby", None
+    runtime = SimpleNamespace(
+        load_balancing_observer=observer,
+        telemetry=SimpleNamespace(payload=lambda _name: {}),
+        _automation_policy=lambda: state["policy"],
+    )
+    # The production validity rule, evaluated on the stubbed policy.
+    runtime._automation_policy_valid = lambda: RuntimeData._automation_policy_valid(runtime)
+    controller.runtime = runtime
+
+    async def persist(lease):
+        controller.lease = lease
+
+    controller._persist = persist
+    return controller, state, activity
+
+
+@pytest.mark.asyncio
+async def test_idle_phase_support_does_not_discharge_below_policy_soc(monkeypatch):
+    # Reported case: 4 140 W discharge at 50 % SOC despite a 100 W/80 % policy.
+    controller, _state, activity = _policy_controller(
+        monkeypatch, _report_policy(), soc=50, grid_w=4000,
+    )
+    with pytest.raises(ValueError, match="insufficient_capacity"):
+        controller._plan()
+    controller.lease = {"original": dict.fromkeys(PHASE_FIELDS, 0), "owned": [],
+                        "priority": [102, 101, 105, 107],
+                        "owned_priority": [102, 101, 105, 107, 129]}
+    controller.gateway.priority_list = controller.lease["owned_priority"]
+    for _ in range(3):
+        await controller.tick()
+        assert controller.status == "blocked"
+    assert controller.lease is None
+    assert controller.gateway.switches == []
+    # One log per transition, with the cause, not one per tick.
+    assert len(activity) == 1
+    assert "minimum SOC 80" in activity[0][1]["cause"]
+
+
+@pytest.mark.asyncio
+async def test_idle_phase_support_clips_power_and_run_time_to_policy(monkeypatch):
+    controller, state, activity = _policy_controller(
+        monkeypatch, _report_policy(), soc=90, grid_w=3240,
+    )
+    targets = controller._plan()
+    assert targets is not None
+    assert any(targets)
+    assert all(abs(power) <= 33 for power in targets)
+    assert controller.lease_seconds == 1
+    state["policy"] = _report_policy(max_duration_seconds=5)
+    controller.previous = controller.last_tick = None
+    await controller.tick()
+    assert controller.status == "balancing_idle_overload"
+    assert all(abs(power) <= 33 for power in controller.targets)
+    assert controller.gateway.record["duration"] == 5
+    controller.gateway.writes = 1
+    assert controller.attributes()["idle_support_lease_seconds"] == 5
+    await controller.tick()
+    # Both clips logged at their transitions only.
+    assert len(activity) == 2
+    assert "power limited to 33 W per phase" in activity[0][1]["cause"]
+    assert "run time limited to 5 s" in activity[1][1]["cause"]
+
+
+def test_idle_phase_support_blocks_overload_above_policy_power(monkeypatch):
+    # L1 needs 80 W of discharge; the policy allows only 33 W per phase.
+    controller, _state, activity = _policy_controller(
+        monkeypatch, _report_policy(soc_min_percent=10, soc_max_percent=90),
+        soc=50, grid_w=3300,
+    )
+    with pytest.raises(ValueError, match="insufficient_capacity"):
+        controller._plan()
+    assert len(activity) == 1
+    assert "power limited to 33 W per phase" in activity[0][1]["cause"]
+
+
+@pytest.mark.parametrize("soc,allowed", [(80, False), (81, True)])
+def test_idle_phase_support_does_not_discharge_at_policy_soc_min(monkeypatch, soc, allowed):
+    controller, _state, _activity = _policy_controller(
+        monkeypatch, _report_policy(max_duration_seconds=15, max_power_kw=10),
+        soc=soc, grid_w=3240,
+    )
+    if allowed:
+        targets = controller._plan()
+        assert targets is not None and targets[0] < 0
+    else:
+        with pytest.raises(ValueError, match="insufficient_capacity"):
+            controller._plan()
+
+
+@pytest.mark.asyncio
+async def test_idle_phase_support_requires_a_policy_that_authorizes_automation(monkeypatch):
+    controller, _state, _activity = _policy_controller(
+        monkeypatch,
+        _report_policy(max_duration_seconds=15, max_power_kw=10, allowed_operation_classes=()),
+        soc=90, grid_w=3240,
+    )
+    assert controller.runtime._automation_policy().enabled
+    await controller.tick()
+    assert controller.status == "blocked"
+    assert controller.reason == "automation_policy_not_authorized"
+    assert controller.gateway.switches == []
+
+
+@pytest.mark.asyncio
+async def test_idle_phase_support_is_released_when_policy_becomes_invalid(monkeypatch):
+    controller, state, activity = _policy_controller(
+        monkeypatch, _report_policy(max_duration_seconds=15, max_power_kw=10),
+        soc=90, grid_w=3240,
+    )
+    await controller.tick()
+    assert controller.lease is not None
+    assert controller.gateway.switches == [True]
+    state["policy"] = replace(state["policy"], enabled=False)
+    await controller.tick()
+    assert controller.lease is None
+    assert controller.status == "blocked"
+    assert controller.reason == "automation_policy_not_authorized"
+    assert controller.gateway.switches == [True, False]
+    assert controller.gateway.priority_list == [102, 101, 105, 107]
+    await controller.tick()
+    assert controller.gateway.switches == [True, False]
+    assert len(activity) == 1
+
+
+def test_idle_phase_support_does_not_charge_at_policy_soc_max(monkeypatch):
+    controller, _state, _activity = _policy_controller(
+        monkeypatch, _report_policy(soc_min_percent=10, soc_max_percent=90),
+        soc=90, grid_w=-3240,
+    )
+    with pytest.raises(ValueError, match="insufficient_capacity"):
+        controller._plan()
 
 
 def test_gateway_minimum_cannot_raise_the_site_fuse_limit():

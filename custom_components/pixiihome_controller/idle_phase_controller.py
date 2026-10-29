@@ -23,6 +23,11 @@ _LEASE_SECONDS = 15
 class IdlePhaseLoadBalancer:
     """Start only an expiring load-balancing lease for a live idle overload."""
 
+    # Planned run time of the next Service 129 write; bounded by the policy.
+    lease_seconds: int = _LEASE_SECONDS
+    # Last logged policy intervention, so it is logged once per transition.
+    policy_note: tuple[str, ...] | None = None
+
     def __init__(self, runtime: RuntimeData) -> None:
         self.runtime = runtime
         self.store = Store(
@@ -43,7 +48,7 @@ class IdlePhaseLoadBalancer:
             "idle_support_status": self.status,
             "idle_support_blocked_reason": self.reason,
             "idle_support_target_phase_power_w": self.targets,
-            "idle_support_lease_seconds": _LEASE_SECONDS,
+            "idle_support_lease_seconds": self.lease_seconds,
             "idle_support_active": self.lease is not None,
             "idle_support_writes": self.gateway.writes if self.gateway else 0,
             "old_mode_restarts": 0,
@@ -108,7 +113,29 @@ class IdlePhaseLoadBalancer:
                 raise ValueError("phase_service_in_use")
             self.status, self.reason = "standby", None
 
+    def _note_policy(self, note: tuple[str, ...] | None, message: str, cause: str) -> None:
+        """Log a policy block or clip only when it changes."""
+        if note == self.policy_note:
+            return
+        self.policy_note = note
+        if note is not None:
+            log_activity(self.runtime, "load_balancing_observation", message, cause=cause)
+
     def _plan(self) -> tuple[int, ...] | None:
+        # A policy that fails the general validity check (disabled, no
+        # automatic operation, empty service list, zero power or duration,
+        # inverted SOC) stops this support, and its SOC, power and run-time
+        # bounds apply. Membership of this support in the service allowlist
+        # and the time window are deliberately not checked: fuse protection
+        # must not stop outside a service list or time window.
+        if not self.runtime._automation_policy_valid():
+            self._note_policy(
+                ("automation_policy_not_authorized",),
+                "Phase support blocked by the automation policy",
+                cause="The automation policy is disabled or invalid",
+            )
+            raise ValueError("automation_policy_not_authorized")
+        policy = self.runtime._automation_policy()
         observer = self.runtime.load_balancing_observer
         if observer is None:
             raise ValueError("load_balancing_configuration_required")
@@ -133,23 +160,65 @@ class IdlePhaseLoadBalancer:
             [float(value) for value in reported if finite(value) and value > 0]
             or [configured_phase_cap]
         )
+        charge_limit_w = float(charge) * 0.85
+        discharge_limit_w = float(discharge) * 0.85
+        phase_limit_w = min(phase_cap, configured_phase_cap)
+        duration = min(_LEASE_SECONDS, int(policy.max_duration_seconds))
+        policy_phase_w = policy.max_power_kw * 1000 / config.phases
+        limits: list[str] = []
+        if usable_soc <= policy.soc_min_percent and discharge_limit_w > 0:
+            discharge_limit_w = 0.0
+            limits.append(f"discharge stopped at policy minimum SOC {policy.soc_min_percent:g} %")
+        if usable_soc >= policy.soc_max_percent and charge_limit_w > 0:
+            charge_limit_w = 0.0
+            limits.append(f"charge stopped at policy maximum SOC {policy.soc_max_percent:g} %")
+        if policy_phase_w < phase_limit_w:
+            phase_limit_w = policy_phase_w
+            limits.append(f"power limited to {policy_phase_w:.0f} W per phase")
+        # Only the SOC and power bounds can make a plan impossible.
+        blocking = tuple(limits)
+        if duration < _LEASE_SECONDS:
+            limits.append(f"run time limited to {duration} s")
         now = monotonic()
         elapsed = 0 if self.last_tick is None else now - self.last_tick
-        plan = plan_phases(
-            config,
-            observer.samples,
-            (0.0,) * config.phases,
-            usable_soc=float(usable_soc),
-            charge_limit_w=float(charge) * 0.85,
-            discharge_limit_w=float(discharge) * 0.85,
-            phase_limit_w=min(phase_cap, configured_phase_cap),
-            duration_seconds=_LEASE_SECONDS,
-            previous_w=self.previous,
-            elapsed_seconds=elapsed,
-        )
+        try:
+            plan = plan_phases(
+                config,
+                observer.samples,
+                (0.0,) * config.phases,
+                usable_soc=float(usable_soc),
+                charge_limit_w=charge_limit_w,
+                discharge_limit_w=discharge_limit_w,
+                phase_limit_w=phase_limit_w,
+                duration_seconds=duration,
+                previous_w=self.previous,
+                elapsed_seconds=elapsed,
+            )
+        except ValueError as error:
+            if blocking:
+                self._note_policy(
+                    ("blocked", str(error), *blocking),
+                    "Phase support blocked by the automation policy",
+                    cause=f"{error}: " + "; ".join(blocking),
+                )
+            else:
+                self._note_policy(None, "", "")
+            raise
         self.last_tick = now
         self.previous = plan.powers_w
-        return plan.powers_w if plan.correction_required else None
+        if not plan.correction_required:
+            self._note_policy(None, "", "")
+            return None
+        self.lease_seconds = plan.duration_seconds
+        if limits:
+            self._note_policy(
+                ("clipped", *limits),
+                "Phase support limited by the automation policy",
+                cause="; ".join(limits),
+            )
+        else:
+            self._note_policy(None, "", "")
+        return plan.powers_w
 
     async def tick(self) -> None:
         async with self._lock:
@@ -228,7 +297,7 @@ class IdlePhaseLoadBalancer:
             **lease["original"],
             "act_enabled": 1,
             "react_enabled": 0,
-            "duration": _LEASE_SECONDS,
+            "duration": self.lease_seconds,
             "keep_active": 0,
         }
         for index in (1, 2, 3):

@@ -79,6 +79,21 @@ The native service-120 implementation uses a total budget split per phase; a
 diagnostic aggregate is not a promise that every independent phase can be
 controlled under every active service.
 
+The automatic idle-phase support (Service 129) also follows the automation
+policy's limits. It does not discharge at or below `soc_min_percent`. It does not
+charge at or above `soc_max_percent`. It limits each phase to
+`max_power_kw × 1000 / phases`, and each run lasts at most
+`min(15 s, max_duration_seconds)`. If the policy is disabled or invalid, no idle
+support starts and an active one is released (`automation_policy_not_authorized`).
+That includes any policy that fails the general validity check: disabled, no
+`automatic` operation class, an empty service list, zero power or duration, or
+an inverted SOC range.
+If the policy limits cannot cover the overload, the support is blocked rather
+than exceeding them. The logbook records each block or limit once, with its cause.
+This is intentional: whether the idle-phase support is in the service allowlist,
+and whether the time window is open, are **not** checked, because fuse
+protection must not stop outside a service list or time window.
+
 Disabling control restores its exact owned limiter record when identity and
 readback permit it, and releases its own idle-phase support. Uncertain ownership
 blocks blind restoration. It does not stop the external service under the overlay.
