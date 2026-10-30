@@ -438,6 +438,67 @@ async def test_integration_setup_initializes_scheduler_without_scheduler_http(
 
 
 @pytest.mark.asyncio
+async def test_invalid_phase_journal_survives_successful_native_read_after_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(integration_module, "remove_retired_entities", lambda *args: None)
+    monkeypatch.setattr(runtime_module, "async_get_clientsession", lambda _hass: NoHttpSession())
+    monkeypatch.setattr(
+        runtime_module, "build_scheduler_ssl_context",
+        lambda **_kwargs: ssl.create_default_context(),
+    )
+
+    async def mqtt_ready(_hass: Any) -> bool:
+        return True
+
+    async def runtime_start(_runtime: Any) -> None:
+        return None
+
+    monkeypatch.setattr(integration_module, "async_wait_for_mqtt_client", mqtt_ready)
+    monkeypatch.setattr(integration_module.RuntimeData, "start", runtime_start)
+    monkeypatch.setattr(integration_module.LoadBalancingObserver, "start", lambda _observer: None)
+    hass = _executor_hass()
+    hass.data = {}
+    hass.config_entries = SimpleNamespace(
+        async_forward_entry_setups=lambda _entry, _platforms: asyncio.sleep(0),
+        async_update_entry=lambda entry, *, data: setattr(entry, "data", data),
+    )
+    entry = _entry(options={
+        CONF_SCHEDULER_URL: "https://gateway.example",
+        CONF_SCHEDULER_BOOTSTRAP_ID: BOOTSTRAP_ID,
+        CONF_SCHEDULER_USERNAME: "operator",
+        CONF_SCHEDULER_PASSWORD: "password",
+    })
+    entry.async_on_unload = lambda _callback: None
+    entry.add_update_listener = lambda callback: callback
+    MemoryStore.data["pixiihome_controller.GATEWAY.idle_phase_lease"] = {"invalid": True}
+
+    assert await integration_module.async_setup_entry(hass, entry)
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    controller = runtime.meter_limit_load_balancer
+    assert controller is not None and runtime.gateway_scheduler is not None
+    assert controller.idle_support.startup_read_error == "idle_phase_journal_invalid"
+    native = {
+        "enabled": 0, "exp_soft_enabled": 0, "exp_hard_enabled": 0,
+        "exp_soft_limit": 0, "exp_hard_limit": 0, "gen_soft_enabled": 0,
+        "gen_hard_enabled": 0, "gen_soft_limit": 0, "gen_hard_limit": 0,
+        "limit_per_phase": 0, "meter_id": 1,
+    }
+
+    async def read_native(**_kwargs: Any) -> dict[str, int]:
+        return dict(native)
+
+    monkeypatch.setattr(
+        runtime.gateway_scheduler.client, "read_load_balancing_status", read_native
+    )
+    await controller._read()
+    await controller.tick()
+    sensor = PixiiLoadBalancingSensor(runtime, "load_balancing_observation")
+    assert sensor.extra_state_attributes["control_status"] == "recovery_required"
+    assert sensor.extra_state_attributes["control_blocked_reason"] == "idle_phase_journal_invalid"
+
+
+@pytest.mark.asyncio
 async def test_disabled_setup_observer_first_tick_restores_saved_native_lease(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
