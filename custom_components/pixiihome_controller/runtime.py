@@ -1,7 +1,8 @@
 """Per-config-entry runtime state."""
 
 import asyncio
-from collections.abc import Mapping
+import logging
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
@@ -15,6 +16,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 
+from .activity import log_activity
 from .allocator import MessageIdAllocator
 from .aps_controller import AdaptivePeakShavingController, build_aps_lease_request
 from .battery import BatteryModel, BatteryReading
@@ -97,6 +99,8 @@ from .scheduler.transport import HomeAssistantSchedulerCommandExecutor
 from .scheduler.validation import SchedulerValidationRoundtrip
 from .solar_controller import SolarChargingController, build_solar_lease_request
 from .telemetry import TelemetryStore
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _scheduler_snapshot(manager: SchedulerRefreshManager) -> list[dict[str, object]]:
@@ -192,6 +196,8 @@ class RuntimeData:
     last_controller_decision: ControllerDecision | None = field(init=False, default=None)
     load_balancing_observer: LoadBalancingObserver | None = field(init=False, default=None)
     meter_limit_load_balancer: MeterLimitLoadBalancer | None = field(init=False, default=None)
+    _authority_cleanup_problems: list[str] = field(init=False, default_factory=list)
+    _authority_cleanup_persisted: bool = field(init=False, default=True)
     solar_charging_controller: SolarChargingController | None = field(init=False, default=None)
     adaptive_peak_shaving_controller: AdaptivePeakShavingController | None = field(
         init=False, default=None
@@ -682,11 +688,31 @@ class RuntimeData:
         ):
             try:
                 await self.meter_limit_load_balancer.deactivate()
-            except ValueError as error:
-                raise HomeAssistantError(str(error)) from error
+            except Exception as error:  # noqa: BLE001 - persist authority off despite cleanup failure
+                reason = str(error) or "meter_limitation_restore_failed"
+                cleanup_problems.append(f"load_balancing Service 120 ({reason})")
         async with self._control_journal_lock:
             journal = self.control_journal
             if journal is None:
+                self._fail_closed_control_state(
+                    getattr(self, "control_state_error", None) or "control_journal_unavailable"
+                )
+                if cleanup_problems:
+                    self._authority_cleanup_persisted = False
+                    try:
+                        RuntimeData._update_authority_cleanup_notification(
+                            self, cleanup_problems, persisted=False
+                        )
+                    except Exception:  # noqa: BLE001 - preserve missing journal error
+                        _LOGGER.exception("Could not report authority cleanup problems")
+                    try:
+                        log_activity(
+                            self, "price_optimization_status",
+                            "Control authority closed without a journal; cleanup needs recovery",
+                            cause=", ".join(cleanup_problems),
+                        )
+                    except Exception:  # noqa: BLE001 - preserve missing journal error
+                        _LOGGER.exception("Could not log authority cleanup problems")
                 raise HomeAssistantError("ControllerStore is unavailable")
             authority = ProductionControlAuthority(
                 enabled=enabled,
@@ -707,6 +733,23 @@ class RuntimeData:
                 await self._save_control_journal_verified(candidate)
             except Exception:
                 self._fail_closed_control_state("control_journal_persistence_failed")
+                if cleanup_problems:
+                    self._authority_cleanup_persisted = False
+                    try:
+                        RuntimeData._update_authority_cleanup_notification(
+                            self, cleanup_problems, persisted=False
+                        )
+                    except Exception:  # noqa: BLE001 - keep the original journal error
+                        _LOGGER.exception("Could not report authority cleanup problems")
+                    try:
+                        log_activity(
+                            self, "price_optimization_status",
+                            "Control authority closed after journal save failed; "
+                            "cleanup needs recovery",
+                            cause=", ".join(cleanup_problems),
+                        )
+                    except Exception:  # noqa: BLE001 - keep the original journal error
+                        _LOGGER.exception("Could not log authority cleanup problems")
                 raise
             self.control_journal = candidate
             self.production_authority = authority
@@ -718,24 +761,53 @@ class RuntimeData:
                 else {"production_control_disabled", "state_changing_control_not_live_validated"}
             )
         if not enabled:
-            from .activity import log_activity
-
             log_activity(
                 self, "price_optimization_status",
                 "Control authority turned off"
                 + (f"; could not remove: {', '.join(cleanup_problems)}" if cleanup_problems
                    else "; integration-owned schedules and leases were removed first"),
+                cause="Administrator disabled production control; "
+                + (", ".join(cleanup_problems) if cleanup_problems else "cleanup completed"),
             )
-        if cleanup_problems:
-            from homeassistant.components import persistent_notification
+        if not enabled:
+            RuntimeData._update_authority_cleanup_notification(self, cleanup_problems)
 
+    def _update_authority_cleanup_notification(
+        self, problems: list[str], *, persisted: bool = True
+    ) -> None:
+        """Keep the warning aligned with unresolved integration-owned effects."""
+        from homeassistant.components import persistent_notification
+
+        previous = getattr(self, "_authority_cleanup_problems", [])
+        self._authority_cleanup_problems = list(problems)
+        self._authority_cleanup_persisted = persisted
+        notification_id = f"pixiihome_controller_{self.serial}_authority_cleanup"
+        if problems:
             persistent_notification.async_create(
                 self.hass,
-                "Production control authority was turned off, but these "
-                "integration-owned Pixii effects could not be removed and may "
-                "still run: " + ", ".join(cleanup_problems),
+                (
+                    "Production control authority was turned off, but these "
+                    if persisted
+                    else "Production control authority was turned off in memory, "
+                    "but the change could not be saved; these "
+                )
+                + "integration-owned Pixii effects could not be removed and may "
+                "still run: " + ", ".join(problems),
                 title="Pixii: cleanup incomplete",
-                notification_id=f"pixiihome_controller_{self.serial}_authority_cleanup",
+                notification_id=notification_id,
+            )
+        elif previous:
+            persistent_notification.async_dismiss(self.hass, notification_id)
+
+    def _meter_limitation_restored(self) -> None:
+        """Refresh a cleanup warning after the disabled observer restores Service 120."""
+        problems = getattr(self, "_authority_cleanup_problems", [])
+        if any(problem.startswith("load_balancing Service 120 (") for problem in problems):
+            RuntimeData._update_authority_cleanup_notification(
+                self,
+                [problem for problem in problems
+                 if not problem.startswith("load_balancing Service 120 (")],
+                persisted=getattr(self, "_authority_cleanup_persisted", True),
             )
 
     async def _async_release_owned_control(self) -> list[str]:
@@ -1887,27 +1959,53 @@ class RuntimeData:
         await self.command_manager.start()
 
     async def stop(self) -> None:
+        first_error: Exception | None = None
+
+        async def stop_step(name: str, action: Callable[[], Awaitable[None]]) -> None:
+            nonlocal first_error
+            try:
+                await action()
+            except Exception as error:  # noqa: BLE001 - every remaining stop must run
+                _LOGGER.exception("Failed to stop %s during runtime shutdown", name)
+                log_activity(
+                    self,
+                    "recovery_status",
+                    f"Runtime shutdown could not stop {name}; continuing cleanup",
+                    cause=f"Stop of {name} failed: {error}",
+                )
+                if first_error is None:
+                    first_error = error
+
         if self.battery_activity is not None:
-            await self.battery_activity.stop()
+            await stop_step("battery activity", self.battery_activity.stop)
         if self.energy_forecast is not None:
-            await self.energy_forecast.stop()
+            await stop_step("energy forecast", self.energy_forecast.stop)
         if self.price_optimization_controller is not None:
-            await self.price_optimization_controller.soc_guard.stop()
-            await self.price_optimization_controller.stop()
+            await stop_step("price SOC guard", self.price_optimization_controller.soc_guard.stop)
+            await stop_step("price optimization", self.price_optimization_controller.stop)
         if self.adaptive_peak_shaving_controller is not None:
-            await self.adaptive_peak_shaving_controller.stop()
+            await stop_step("adaptive peak shaving", self.adaptive_peak_shaving_controller.stop)
         if self.solar_charging_controller is not None:
-            await self.solar_charging_controller.stop()
+            await stop_step("solar charging", self.solar_charging_controller.stop)
         if self.load_balancing_observer is not None:
-            await self.load_balancing_observer.stop()
+            await stop_step("load balancing observer", self.load_balancing_observer.stop)
         if self.meter_limit_load_balancer is not None:
-            await self.meter_limit_load_balancer.stop()
+            await stop_step("meter limit load balancer", self.meter_limit_load_balancer.stop)
         if self.scheduler_coordinator is not None:
-            await self.scheduler_coordinator.async_stop()
-        await self.async_flush_control_journal()
-        await self.command_manager.stop()
+            await stop_step("scheduler coordinator", self.scheduler_coordinator.async_stop)
+        await stop_step("control journal flush", self.async_flush_control_journal)
+        await stop_step("command manager", self.command_manager.stop)
         if self.transport is not None:
-            await self.transport.stop()
+            await stop_step("MQTT transport", self.transport.stop)
+        log_activity(
+            self,
+            "recovery_status",
+            "Runtime shutdown attempted all local components"
+            + ("; cleanup errors remain" if first_error is not None else "; cleanup completed"),
+            cause="Integration unload requested; communication and background tasks must stop",
+        )
+        if first_error is not None:
+            raise first_error
 
     def handle_message(self, message: ParsedMqttMessage) -> None:
         previous_service = self.telemetry.value("core", "srv_type")

@@ -523,6 +523,94 @@ async def test_known_running_target_soc_allows_writes_only_after_its_end():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("second_read", "expected_target", "expected_log"),
+    [
+        (20, 20.0, "changed from 90 % to 20 %"),
+        (90, 90.0, None),
+        (OSError("Gateway unavailable"), None, "unreadable (OSError: Gateway unavailable)"),
+        (float("nan"), None, "unreadable (non-finite reference)"),
+        (float("inf"), None, "unreadable (non-finite reference)"),
+    ],
+)
+async def test_external_target_is_read_again_for_the_same_schedule(
+    monkeypatch, second_read, expected_target, expected_log
+):
+    from dataclasses import replace
+
+    import custom_components.pixiihome_controller.price_controller as module
+
+    instance, _ = runtime()
+    instance.battery = replace(instance.battery, effective_min_soc=0, effective_max_soc=100)
+    schedule = external_schedule(datetime.now(UTC) + timedelta(hours=2))
+    instance.scheduler_manager.normalized_schedules = [schedule]
+    reads = []
+    responses = iter((90, second_read))
+
+    async def read_target(service_no):
+        reads.append(service_no)
+        value = next(responses)
+        if isinstance(value, Exception):
+            raise value
+        return {"reference": value}
+
+    instance.gateway_scheduler = SimpleNamespace(
+        client=SimpleNamespace(read_target_soc=read_target)
+    )
+    logged = []
+    monkeypatch.setattr(
+        module, "log_activity",
+        lambda _runtime, _key, message, cause=None: logged.append((message, cause)),
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller._load_external_windows(())
+    assert controller._external_windows[0].target_usable_soc_percent == 90.0
+    assert controller._external_meta[0][1] == 90.0
+
+    await controller._load_external_windows(())
+
+    assert reads == [schedule.service_no, schedule.service_no]
+    window = controller._external_windows[0]
+    assert window.target_usable_soc_percent == expected_target
+    assert window.known is (expected_target is not None)
+    assert controller._external_meta[0][1] == expected_target
+    if expected_log is None:
+        assert logged == []
+    else:
+        assert len(logged) == 1
+        assert expected_log in logged[0][0]
+        assert logged[0][1] is not None and "Why:" in logged[0][1]
+
+
+@pytest.mark.asyncio
+async def test_next_planning_pass_uses_changed_target_for_same_schedule():
+    instance, _ = runtime(schedule_writes=False)
+    schedule, _ = _aggregator_day(instance, adjust=False)
+    reads = []
+    targets = iter((90, 20))
+
+    async def read_target(service_no):
+        reads.append(service_no)
+        return {"reference": next(targets)}
+
+    instance.gateway_scheduler.client.read_target_soc = read_target
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+    assert controller.status == "preview"
+    assert controller._external_windows[0].target_usable_soc_percent == 90.0
+    first_fingerprint = controller.plan.fingerprint
+
+    await controller.tick()
+
+    assert controller.status == "preview"
+    assert reads == [schedule.service_no, schedule.service_no]
+    assert controller._external_windows[0].target_usable_soc_percent == 20.0
+    assert controller.plan.fingerprint != first_fingerprint
+
+
+@pytest.mark.asyncio
 async def test_running_service_without_a_matching_schedule_still_blocks_writes():
     instance, mutations = runtime()
     later = datetime.now(UTC).replace(microsecond=0) + timedelta(hours=6)
@@ -927,3 +1015,207 @@ def test_without_an_own_recharge_targets_are_held_up_to_the_cheapest_refill(chea
 
     assert [w.adjustable for w in held] == ([True, True, False] if cheap_later
                                            else [True, False, False])
+
+
+class _Clock:
+    """Simulated clock for the price controller module."""
+
+    def __init__(self, monkeypatch) -> None:
+        from custom_components.pixiihome_controller import price_controller as module
+
+        self.now = datetime.now(UTC)
+        clock = self
+
+        class FakeDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):  # type: ignore[override]
+                return clock.now if tz is None else clock.now.astimezone(tz)
+
+        monkeypatch.setattr(module, "datetime", FakeDatetime)
+
+    def advance(self, minutes: int) -> None:
+        self.now += timedelta(minutes=minutes)
+
+
+def _blocked_notice_runtime(monkeypatch, hours: int = 1):
+    from homeassistant.components import persistent_notification
+
+    instance, mutations = runtime()
+    instance.serial = "234301002683"
+    instance.operational_settings = instance.operational_settings.set(
+        "price_blocked_notify_hours", hours
+    )
+    events: list[dict] = []
+    instance.hass.bus = SimpleNamespace(
+        async_fire=lambda event, data, context=None: events.append(
+            {**data, "_event": event, "_context": context}
+        )
+    )
+    created: list[str] = []
+    dismissed: list[str] = []
+    monkeypatch.setattr(
+        persistent_notification, "async_create",
+        lambda hass, message, **kwargs: created.append(message),
+    )
+    monkeypatch.setattr(
+        persistent_notification, "async_dismiss",
+        lambda hass, notification_id: dismissed.append(notification_id),
+    )
+    normal_refresh = instance.scheduler_coordinator.async_refresh
+
+    async def partial():
+        return SimpleNamespace(data_status="partial")
+
+    def block(on: bool) -> None:
+        instance.scheduler_coordinator.async_refresh = partial if on else normal_refresh
+
+    return instance, mutations, events, created, dismissed, block
+
+
+def _messages(events: list[dict]) -> list[str]:
+    return [event["message"] for event in events if "name" in event]
+
+
+@pytest.mark.asyncio
+async def test_late_block_over_several_passes_notifies_once_and_logs_once(
+    monkeypatch, caplog,
+) -> None:
+    clock = _Clock(monkeypatch)
+    instance, _, events, created, dismissed, block = _blocked_notice_runtime(monkeypatch)
+    block(True)
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+    first = controller.problem_since
+    assert first is not None
+    for _ in range(3):
+        clock.advance(30)
+        await controller.tick()
+        assert controller.status == "blocked"
+        assert controller.reason == "price_scheduler_inventory_incomplete"
+        assert controller.problem_since == first
+
+    assert controller.problem_notified is True
+    assert len(created) == 1
+    assert caplog.text.count("Price optimization blocked") == 1
+    stopped = [m for m in _messages(events) if "has been stopped for over 1 h" in m]
+    assert len(stopped) == 1
+    stopped_events = [
+        event for event in events
+        if "has been stopped for over 1 h" in event.get("message", "")
+    ]
+    assert len(stopped_events) == 1
+    stopped_index = events.index(stopped_events[0])
+    cause = events[stopped_index - 1]
+    assert cause["_event"] == "pixiihome_controller_cause"
+    assert "every planning pass has been blocked" in cause["message"]
+    assert cause["_context"] is stopped_events[0]["_context"]
+
+    # Recovery: a pass that ends active/ready resets the timer.
+    block(False)
+    clock.advance(30)
+    await controller.tick()
+    assert controller.status in {"active", "ready"}
+    assert controller.problem_since is None
+    assert controller.problem_notified is False
+    assert dismissed == ["pixiihome_controller_234301002683_price_blocked"]
+    assert "Price optimization is running again" in _messages(events)
+
+
+@pytest.mark.asyncio
+async def test_block_shorter_than_limit_never_notifies(monkeypatch) -> None:
+    clock = _Clock(monkeypatch)
+    instance, _, events, created, dismissed, block = _blocked_notice_runtime(monkeypatch)
+    block(True)
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+    clock.advance(30)
+    await controller.tick()
+    block(False)
+    clock.advance(30)
+    await controller.tick()
+
+    assert controller.problem_since is None
+    assert created == []
+    assert dismissed == []
+    assert "Price optimization is running again" not in _messages(events)
+
+
+@pytest.mark.asyncio
+async def test_prepare_publishes_ready_only_on_the_switch_path() -> None:
+    instance, _ = runtime()
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    seen: list[str] = []
+    controller.add_listener(lambda: seen.append(controller.status))
+
+    await controller.prepare(publish=False)
+    assert controller.status == "disabled"
+    assert seen == []
+
+    await controller.prepare()
+    assert controller.status == "ready"
+    assert seen == ["ready"]
+
+    instance.production_control_enabled = lambda: False
+    with pytest.raises(ValueError, match="production_control_disabled"):
+        await controller.prepare(publish=False)
+    with pytest.raises(ValueError, match="production_control_disabled"):
+        await controller.prepare()
+
+
+@pytest.mark.asyncio
+async def test_validation_error_inside_pass_is_still_published() -> None:
+    instance, _ = runtime()
+    instance.production_control_enabled = lambda: False
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert controller.status == "blocked"
+    assert controller.reason == "production_control_disabled"
+    assert controller.problem_since is not None
+
+
+@pytest.mark.asyncio
+async def test_failing_pass_keeps_the_problem_timer_running(monkeypatch) -> None:
+    clock = _Clock(monkeypatch)
+    instance, _, _, created, _, block = _blocked_notice_runtime(monkeypatch)
+    block(True)
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    await controller.tick()
+    first = controller.problem_since
+    assert first is not None
+
+    async def fail() -> None:
+        controller._publish("ready")  # a passing status inside the failing pass
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(controller, "_tick_locked", fail)
+    for _ in range(3):
+        clock.advance(30)
+        with pytest.raises(RuntimeError):
+            await controller.tick()
+        assert controller._in_tick is False
+        assert not controller._lock.locked()
+        assert controller.problem_since == first
+        # What ``_run`` publishes after the exception.
+        controller._publish("blocked", "price_controller_failed")
+        assert controller.problem_since == first
+
+    assert len(created) == 1
+
+
+@pytest.mark.asyncio
+async def test_planning_pass_never_sends_a_passing_ready_to_listeners(monkeypatch) -> None:
+    instance, _, _, _, _, block = _blocked_notice_runtime(monkeypatch)
+    block(True)
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    seen: list[str] = []
+    controller.add_listener(lambda: seen.append(controller.status))
+
+    await controller.tick()
+    await controller.tick()
+
+    assert seen
+    assert "ready" not in seen

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers.storage import Store
 
+from .activity import log_activity
 from .control.load_balancing import finite
 from .control.phase_balancing import plan_phases
 from .control.phase_gateway import PhaseGateway
@@ -22,6 +23,11 @@ _LEASE_SECONDS = 15
 class IdlePhaseLoadBalancer:
     """Start only an expiring load-balancing lease for a live idle overload."""
 
+    # Planned run time of the next Service 129 write; bounded by the policy.
+    lease_seconds: int = _LEASE_SECONDS
+    # Last logged policy intervention, so it is logged once per transition.
+    policy_note: tuple[str, ...] | None = None
+
     def __init__(self, runtime: RuntimeData) -> None:
         self.runtime = runtime
         self.store = Store(
@@ -29,6 +35,7 @@ class IdlePhaseLoadBalancer:
         )
         self.gateway: PhaseGateway | None = None
         self.lease: dict[str, Any] | None = None
+        self.startup_read_error: str | None = None
         self.status = "disabled"
         self.reason: str | None = None
         self.targets: tuple[int, ...] | None = None
@@ -42,7 +49,7 @@ class IdlePhaseLoadBalancer:
             "idle_support_status": self.status,
             "idle_support_blocked_reason": self.reason,
             "idle_support_target_phase_power_w": self.targets,
-            "idle_support_lease_seconds": _LEASE_SECONDS,
+            "idle_support_lease_seconds": self.lease_seconds,
             "idle_support_active": self.lease is not None,
             "idle_support_writes": self.gateway.writes if self.gateway else 0,
             "old_mode_restarts": 0,
@@ -56,26 +63,47 @@ class IdlePhaseLoadBalancer:
             raise ValueError("idle_phase_journal_invalid")
         self.lease = lease
 
-    async def _recover(self) -> None:
-        assert self.gateway is not None
+    async def load_saved_lease(self, *, control_off: bool = False) -> None:
+        """Set up the Gateway reader and load ownership without restoring it."""
         saved = await self.store.async_load()
         if saved is None:
             self.lease = None
+            self.startup_read_error = None
             return
         if not isinstance(saved, dict) or set(saved) != {"lease"}:
             raise ValueError("idle_phase_journal_invalid")
         self.lease = saved["lease"]
+        if self.lease is None:
+            self.startup_read_error = None
+            return
+        scheduler = self.runtime.gateway_scheduler
+        if scheduler is None:
+            raise ValueError("native_meter_unavailable")
+        self.gateway = PhaseGateway(scheduler.client)
+        self.startup_read_error = None
+        self.status, self.reason = "recovery_required", "idle_phase_restore_pending"
+        if control_off:
+            log_activity(
+                self.runtime, "load_balancing_observation",
+                "Saved phase support requires restoration",
+                cause="A Service 129 lease remained after restart while control is off",
+            )
+
+    async def _recover(self) -> None:
+        await self.load_saved_lease()
         if self.lease is None:
             return
         await self.release()
 
     async def prepare(self) -> None:
         async with self._lock:
-            scheduler = self.runtime.gateway_scheduler
-            if scheduler is None:
-                raise ValueError("native_meter_unavailable")
-            self.gateway = PhaseGateway(scheduler.client)
             await self._recover()
+            if self.gateway is None:
+                scheduler = self.runtime.gateway_scheduler
+                if scheduler is None:
+                    raise ValueError("native_meter_unavailable")
+                self.gateway = PhaseGateway(scheduler.client)
+            assert self.gateway is not None
             services = await self.gateway.read(100)
             settings = self.gateway.settings(await self.gateway.read(129))
             if (
@@ -90,7 +118,29 @@ class IdlePhaseLoadBalancer:
                 raise ValueError("phase_service_in_use")
             self.status, self.reason = "standby", None
 
+    def _note_policy(self, note: tuple[str, ...] | None, message: str, cause: str) -> None:
+        """Log a policy block or clip only when it changes."""
+        if note == self.policy_note:
+            return
+        self.policy_note = note
+        if note is not None:
+            log_activity(self.runtime, "load_balancing_observation", message, cause=cause)
+
     def _plan(self) -> tuple[int, ...] | None:
+        # A policy that fails the general validity check (disabled, no
+        # automatic operation, empty service list, zero power or duration,
+        # inverted SOC) stops this support, and its SOC, power and run-time
+        # bounds apply. Membership of this support in the service allowlist
+        # and the time window are deliberately not checked: fuse protection
+        # must not stop outside a service list or time window.
+        if not self.runtime._automation_policy_valid():
+            self._note_policy(
+                ("automation_policy_not_authorized",),
+                "Phase support blocked by the automation policy",
+                cause="The automation policy is disabled or invalid",
+            )
+            raise ValueError("automation_policy_not_authorized")
+        policy = self.runtime._automation_policy()
         observer = self.runtime.load_balancing_observer
         if observer is None:
             raise ValueError("load_balancing_configuration_required")
@@ -115,23 +165,85 @@ class IdlePhaseLoadBalancer:
             [float(value) for value in reported if finite(value) and value > 0]
             or [configured_phase_cap]
         )
+        charge_limit_w = float(charge) * 0.85
+        discharge_limit_w = float(discharge) * 0.85
+        phase_limit_w = min(phase_cap, configured_phase_cap)
+        native_limits = (charge_limit_w, discharge_limit_w, phase_limit_w)
+        duration = min(_LEASE_SECONDS, int(policy.max_duration_seconds))
+        policy_phase_w = policy.max_power_kw * 1000 / config.phases
+        limits: list[str] = []
+        if usable_soc <= policy.soc_min_percent and discharge_limit_w > 0:
+            discharge_limit_w = 0.0
+            limits.append(f"discharge stopped at policy minimum SOC {policy.soc_min_percent:g} %")
+        if usable_soc >= policy.soc_max_percent and charge_limit_w > 0:
+            charge_limit_w = 0.0
+            limits.append(f"charge stopped at policy maximum SOC {policy.soc_max_percent:g} %")
+        if policy_phase_w < phase_limit_w:
+            phase_limit_w = policy_phase_w
+            limits.append(f"power limited to {policy_phase_w:.0f} W per phase")
+        # Only the SOC and power bounds can make a plan impossible.
+        blocking = tuple(limits)
+        if duration < _LEASE_SECONDS:
+            limits.append(f"run time limited to {duration} s")
         now = monotonic()
         elapsed = 0 if self.last_tick is None else now - self.last_tick
-        plan = plan_phases(
-            config,
-            observer.samples,
-            (0.0,) * config.phases,
-            usable_soc=float(usable_soc),
-            charge_limit_w=float(charge) * 0.85,
-            discharge_limit_w=float(discharge) * 0.85,
-            phase_limit_w=min(phase_cap, configured_phase_cap),
-            duration_seconds=_LEASE_SECONDS,
-            previous_w=self.previous,
-            elapsed_seconds=elapsed,
-        )
+        try:
+            plan = plan_phases(
+                config,
+                observer.samples,
+                (0.0,) * config.phases,
+                usable_soc=float(usable_soc),
+                charge_limit_w=charge_limit_w,
+                discharge_limit_w=discharge_limit_w,
+                phase_limit_w=phase_limit_w,
+                duration_seconds=duration,
+                previous_w=self.previous,
+                elapsed_seconds=elapsed,
+            )
+        except ValueError as error:
+            policy_caused = False
+            if blocking and str(error) in {
+                "insufficient_capacity", "insufficient_charge_capacity",
+                "insufficient_discharge_capacity",
+            }:
+                try:
+                    plan_phases(
+                        config, observer.samples, (0.0,) * config.phases,
+                        usable_soc=float(usable_soc),
+                        charge_limit_w=native_limits[0],
+                        discharge_limit_w=native_limits[1],
+                        phase_limit_w=native_limits[2],
+                        duration_seconds=duration,
+                        previous_w=self.previous, elapsed_seconds=elapsed,
+                    )
+                except ValueError:
+                    pass
+                else:
+                    policy_caused = True
+            if policy_caused:
+                self._note_policy(
+                    ("blocked", str(error), *blocking),
+                    "Phase support blocked by the automation policy",
+                    cause=f"{error}: " + "; ".join(blocking),
+                )
+            else:
+                self._note_policy(None, "", "")
+            raise
         self.last_tick = now
         self.previous = plan.powers_w
-        return plan.powers_w if plan.correction_required else None
+        if not plan.correction_required:
+            self._note_policy(None, "", "")
+            return None
+        self.lease_seconds = plan.duration_seconds
+        if limits:
+            self._note_policy(
+                ("clipped", *limits),
+                "Phase support limited by the automation policy",
+                cause="; ".join(limits),
+            )
+        else:
+            self._note_policy(None, "", "")
+        return plan.powers_w
 
     async def tick(self) -> None:
         async with self._lock:
@@ -142,6 +254,7 @@ class IdlePhaseLoadBalancer:
                 core = await self.gateway.core()
                 service = core.get("srv_type")
                 if service not in (0, 129):
+                    self._note_policy(None, "", "")
                     if self.lease is not None:
                         await self.release()
                     self.status, self.reason = "standby_native_mode_active", None
@@ -210,7 +323,7 @@ class IdlePhaseLoadBalancer:
             **lease["original"],
             "act_enabled": 1,
             "react_enabled": 0,
-            "duration": _LEASE_SECONDS,
+            "duration": self.lease_seconds,
             "keep_active": 0,
         }
         for index in (1, 2, 3):
@@ -228,8 +341,13 @@ class IdlePhaseLoadBalancer:
             raise ValueError("phase_priority_not_effective")
 
     async def release(self) -> None:
-        if self.lease is None or self.gateway is None:
+        if self.lease is None:
             return
+        if self.gateway is None:
+            scheduler = self.runtime.gateway_scheduler
+            if scheduler is None:
+                raise ValueError("native_meter_unavailable")
+            self.gateway = PhaseGateway(scheduler.client)
         saved = self.lease
         services = await self.gateway.read(100)
         current = self.gateway.settings(await self.gateway.read(129))
@@ -238,6 +356,12 @@ class IdlePhaseLoadBalancer:
             and current != saved["original"]
             or services.get("used_list") not in (saved["priority"], saved["owned_priority"])
         ):
+            self.status, self.reason = "recovery_required", "idle_phase_recovery_conflict"
+            log_activity(
+                self.runtime, "load_balancing_observation",
+                "Saved phase support could not be restored",
+                cause="Gateway Service 129 settings or priority no longer match the saved lease",
+            )
             raise ValueError("idle_phase_recovery_conflict")
         if (await self.gateway.core()).get("srv_type") == 129:
             await self.gateway.switch(False)
@@ -248,14 +372,41 @@ class IdlePhaseLoadBalancer:
             else:
                 raise ValueError("idle_phase_recovery_pending")
         if current != saved["original"]:
-            await self.gateway.save(saved["original"])
+            current = self.gateway.settings(await self.gateway.read(129))
+            if current != saved["original"]:
+                if current not in saved["owned"]:
+                    raise ValueError("idle_phase_recovery_conflict")
+                await self.gateway.save(saved["original"])
         if services.get("used_list") == saved["owned_priority"]:
+            services = await self.gateway.read(100)
+            current = self.gateway.settings(await self.gateway.read(129))
+            if (
+                services.get("used_list") != saved["owned_priority"]
+                or current not in saved["owned"] and current != saved["original"]
+            ):
+                raise ValueError("idle_phase_recovery_conflict")
             await self.gateway.priority(saved["priority"])
         await self._persist(None)
         self.targets = self.previous = None
         self.last_tick = None
+        log_activity(
+            self.runtime, "load_balancing_observation",
+            "Saved phase support restored",
+            cause="Gateway Service 129 still matched the saved lease",
+        )
 
     async def stop(self) -> None:
         async with self._lock:
-            await self.release()
+            try:
+                await self.release()
+            except ValueError as error:
+                if str(error) != "native_meter_unavailable":
+                    raise
+                self.status, self.reason = "recovery_required", "native_meter_unavailable"
+                log_activity(
+                    self.runtime, "load_balancing_observation",
+                    "Saved phase support still needs recovery after unload",
+                    cause="Gateway scheduler is unavailable; the saved Service 129 lease remains",
+                )
+                return
             self.status, self.reason = "disabled", None

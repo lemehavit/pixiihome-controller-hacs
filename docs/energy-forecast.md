@@ -67,11 +67,14 @@ same day, and sell the surplus instead. It only waits when all of these hold:
 - the actual production during the last 30 minutes is not below 60 % of the
   forecast. If it is, smart waiting is turned off for the rest of the day.
 
-If the target can no longer be reached, the controller charges at once and keeps
-charging for at least 30 minutes. The status is then `deferring` with
-`reason_text` explaining why. The attribute `smart_solar_charging` shows the
-calculation, including `reachable_soc_percent`: what the forecast says can be
-reached today. **Price usable capacity** must be set.
+While it waits, the status of **Solar charging status** is `deferring` (or
+`lease_expiring` while an active charge lease runs out) and the attribute
+`deferring` is `true`. If the target can no longer be reached, the
+controller charges at once and keeps charging for at least 30 minutes;
+`deferring` is then `false`, and `decision` and `reason_text` explain why. The
+calculation is shown in the solar controller's attributes, including
+`reachable_usable_soc_percent`: what the forecast says can be reached today.
+**Price usable capacity** must be set.
 
 ## Load forecast in price optimization
 

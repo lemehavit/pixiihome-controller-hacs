@@ -85,6 +85,7 @@ class PriceOptimizationController:
         self.current_service: int | None = None
         self._source_fingerprint: str | None = None
         self._external_windows: tuple[ExternalWindow, ...] = ()
+        # Last successful reads are used only to detect changes, never to plan.
         self._target_cache: dict[tuple[int, int, int, int], float] = {}
         # Foreign Target SOC schedules aligned with ``_external_windows``.
         self._external_meta: tuple[tuple[Any, float | None], ...] = ()
@@ -119,6 +120,10 @@ class PriceOptimizationController:
         self._logged_plan: tuple[object, ...] | None = None
         self.problem_since: datetime | None = None
         self.problem_notified = False
+        # True while one planning pass runs. A passing non-problem status
+        # inside the pass must not restart the problem timer; the status the
+        # pass ends with decides.
+        self._in_tick = False
 
     @property
     def config(self) -> PriceOptimizationConfig:
@@ -144,6 +149,10 @@ class PriceOptimizationController:
     def _track_problem(self, status: str, reason: str | None) -> None:
         """Notify once when planning has been blocked longer than the set limit."""
         now = datetime.now(UTC)
+        problem = status in {"blocked", "waiting_telemetry"}
+        if self._in_tick and not problem:
+            # Only the status a pass ends with may count as recovery.
+            return
         if status == "blocked" and reason != self._logged_block_reason:
             # Every new block is in the Home Assistant log at once, not only
             # after the notification limit.
@@ -152,10 +161,12 @@ class PriceOptimizationController:
                             reason_text(reason) if reason else "")
         elif status != "blocked":
             self._logged_block_reason = None
-        if status not in {"blocked", "waiting_telemetry"}:
+        if not problem:
             if self.problem_notified:
                 _dismiss_notification(self.runtime)
-                log_activity(self.runtime, PRICE_STATUS, "Price optimization is running again")
+                log_activity(self.runtime, PRICE_STATUS, "Price optimization is running again",
+                             "Who: price optimization. Why: price optimization is no longer "
+                             "blocked, so the earlier stop notification is removed.")
             self.problem_since, self.problem_notified = None, False
             return
         if self.problem_since is None:
@@ -166,7 +177,10 @@ class PriceOptimizationController:
         self.problem_notified = True
         text = reason_text(reason)
         log_activity(self.runtime, PRICE_STATUS,
-                     f"Price optimization has been stopped for over {hours} h: {text}")
+                     f"Price optimization has been stopped for over {hours} h: {text}",
+                     "Who: price optimization. Why: every planning pass has been blocked "
+                     "or waiting for telemetry longer than the setting Notify when price "
+                     "optimization is stopped for allows.")
         _create_notification(
             self.runtime,
             f"Prisoptimeringen har stått still i över {hours} h.\n\nOrsak: {text}\n\n"
@@ -331,8 +345,12 @@ class PriceOptimizationController:
             "next_action": next(iter(price_timeline(self, datetime.now(UTC))), None),
         }
 
-    async def prepare(self) -> None:
-        """Validate every required binding before enabling live reconciliation."""
+    async def prepare(self, publish: bool = True) -> None:
+        """Validate every required binding before enabling live reconciliation.
+
+        The planning pass validates with ``publish=False``: it publishes its
+        own status, and a passing ``ready`` would look like a recovery.
+        """
         config = self.config
         if config.price_entity_id is None:
             raise ValueError("price_entity_required")
@@ -364,7 +382,8 @@ class PriceOptimizationController:
         ):
             raise ValueError("price_automation_policy_not_authorized")
         self._validated_limits()
-        self._publish("ready")
+        if publish:
+            self._publish("ready")
 
     def start(self) -> None:
         if self._task is None:
@@ -497,7 +516,15 @@ class PriceOptimizationController:
     async def tick(self) -> None:
         """Build and safely reconcile one fresh price plan."""
         async with self._lock:
-            await self._tick_locked()
+            self._in_tick = True
+            try:
+                await self._tick_locked()
+            finally:
+                self._in_tick = False
+            # Only a pass that returned normally ends with a status of its
+            # own. After an exception ``_run`` publishes the failure instead,
+            # so the old status must not reset the problem timer first.
+            self._track_problem(self.status, self.reason)
         await self._resume_after_recovery()
 
     async def check_unconfirmed_deletes(self) -> None:
@@ -608,7 +635,7 @@ class PriceOptimizationController:
             self._publish("waiting_for_priority", "battery_calibration_running")
             return
         try:
-            await self.prepare()
+            await self.prepare(publish=False)
         except ValueError as error:
             reason = str(error)
             self._publish(
@@ -1199,18 +1226,48 @@ class PriceOptimizationController:
                 key = (schedule.sch_index, schedule.service_no,
                        schedule.start_epoch, schedule.duration_seconds)
                 keys.add(key)
-                reference = self._target_cache.get(key)
-                if reference is None:
-                    try:
-                        value = float(
-                            (await gateway.client.read_target_soc(schedule.service_no))[
-                                "reference"
-                            ]
+                previous = self._target_cache.get(key)
+                try:
+                    value = float(
+                        (await gateway.client.read_target_soc(schedule.service_no))[
+                            "reference"
+                        ]
+                    )
+                    failure = None if isfinite(value) else "non-finite reference"
+                except Exception as error:  # noqa: BLE001 - unreadable means unknown energy
+                    failure = f"{type(error).__name__}: {error}"
+                    value = float("nan")
+                if failure is None:
+                    reference = value
+                    self._target_cache[key] = value
+                    if previous is not None and previous != value:
+                        when = time_span(
+                            datetime.fromtimestamp(schedule.start_epoch, UTC),
+                            datetime.fromtimestamp(schedule.end_epoch, UTC),
                         )
-                    except Exception:  # noqa: BLE001 - unreadable means unknown energy
-                        value = float("nan")
-                    if isfinite(value):
-                        reference = self._target_cache[key] = value
+                        log_activity(
+                            self.runtime, PRICE_STATUS,
+                            f"Aggregator Target SOC {when} changed from {previous:g} % "
+                            f"to {value:g} %; the price plan uses the new target",
+                            "Who: aggregator via the Gateway. Why: the Gateway returned "
+                            "a different Target SOC for the same schedule; the price "
+                            "plan uses the latest reading.",
+                        )
+                else:
+                    self._target_cache.pop(key, None)
+                    if previous is not None:
+                        when = time_span(
+                            datetime.fromtimestamp(schedule.start_epoch, UTC),
+                            datetime.fromtimestamp(schedule.end_epoch, UTC),
+                        )
+                        log_activity(
+                            self.runtime, PRICE_STATUS,
+                            f"Aggregator Target SOC {when} is unreadable ({failure}); "
+                            "the price plan treats its resulting energy as unknown",
+                            "Who: price optimization. Why: the current Gateway Target "
+                            f"SOC read failed ({failure}); planning stops at the start "
+                            "of this window instead of using an earlier target.",
+                        )
                 if reference is not None:
                     target = min(
                         100.0,

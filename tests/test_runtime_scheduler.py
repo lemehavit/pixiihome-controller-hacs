@@ -54,6 +54,7 @@ from custom_components.pixiihome_controller.scheduler.ownership import (
     SchedulerOwnershipRecord,
     SchedulerOwnershipStore,
 )
+from custom_components.pixiihome_controller.sensor import PixiiLoadBalancingSensor
 
 BOOTSTRAP_ID = "A" * 32
 
@@ -377,8 +378,17 @@ async def test_integration_setup_initializes_scheduler_without_scheduler_http(
         del runtime
 
     monkeypatch.setattr(integration_module.RuntimeData, "start", fake_start)
+    observer_starts: list[Any] = []
+    monkeypatch.setattr(
+        integration_module.LoadBalancingObserver,
+        "start",
+        lambda observer: observer_starts.append(observer),
+    )
     hass = _executor_hass()
     hass.data = {}
+    activity: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    monkeypatch.setattr(meter_limit_module, "log_activity",
+                        lambda *args, **kwargs: activity.append((args, kwargs)))
     forwarded: list[Any] = []
 
     async def forward_entry_setups(entry: Any, platforms: Any) -> None:
@@ -402,6 +412,11 @@ async def test_integration_setup_initializes_scheduler_without_scheduler_http(
     entry.async_on_unload = lambda callback: None
     entry.add_update_listener = lambda callback: callback
 
+    native_lease = {"original": {}, "owned": [{}]}
+    phase_lease = {"original": {}, "owned": [{}], "priority": [], "owned_priority": []}
+    MemoryStore.data["pixiihome_controller.GATEWAY.meter_limit_lease"] = {"lease": native_lease}
+    MemoryStore.data["pixiihome_controller.GATEWAY.idle_phase_lease"] = {"lease": phase_lease}
+
     assert await integration_module.async_setup_entry(hass, entry) is True
 
     assert len(initialized) == 1
@@ -409,6 +424,179 @@ async def test_integration_setup_initializes_scheduler_without_scheduler_http(
     assert len(hass.executor_jobs) == 1
     assert session.calls == 0
     assert forwarded
+    controller = initialized[0].meter_limit_load_balancer
+    assert controller.lease == native_lease
+    assert controller.idle_support.lease == phase_lease
+    assert controller.idle_support.gateway is not None
+    assert controller.writes == 0
+    assert observer_starts == [initialized[0].load_balancing_observer]
+    assert controller.status == "recovery_required"
+    assert any(
+        "after restart while control is off" in item[1].get("cause", "")
+        for item in activity
+    )
+
+
+@pytest.mark.asyncio
+async def test_invalid_phase_journal_survives_successful_native_read_after_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(integration_module, "remove_retired_entities", lambda *args: None)
+    monkeypatch.setattr(runtime_module, "async_get_clientsession", lambda _hass: NoHttpSession())
+    monkeypatch.setattr(
+        runtime_module, "build_scheduler_ssl_context",
+        lambda **_kwargs: ssl.create_default_context(),
+    )
+
+    async def mqtt_ready(_hass: Any) -> bool:
+        return True
+
+    async def runtime_start(_runtime: Any) -> None:
+        return None
+
+    monkeypatch.setattr(integration_module, "async_wait_for_mqtt_client", mqtt_ready)
+    monkeypatch.setattr(integration_module.RuntimeData, "start", runtime_start)
+    monkeypatch.setattr(integration_module.LoadBalancingObserver, "start", lambda _observer: None)
+    hass = _executor_hass()
+    hass.data = {}
+    hass.config_entries = SimpleNamespace(
+        async_forward_entry_setups=lambda _entry, _platforms: asyncio.sleep(0),
+        async_update_entry=lambda entry, *, data: setattr(entry, "data", data),
+    )
+    entry = _entry(options={
+        CONF_SCHEDULER_URL: "https://gateway.example",
+        CONF_SCHEDULER_BOOTSTRAP_ID: BOOTSTRAP_ID,
+        CONF_SCHEDULER_USERNAME: "operator",
+        CONF_SCHEDULER_PASSWORD: "password",
+    })
+    entry.async_on_unload = lambda _callback: None
+    entry.add_update_listener = lambda callback: callback
+    MemoryStore.data["pixiihome_controller.GATEWAY.idle_phase_lease"] = {"invalid": True}
+
+    assert await integration_module.async_setup_entry(hass, entry)
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    controller = runtime.meter_limit_load_balancer
+    assert controller is not None and runtime.gateway_scheduler is not None
+    assert controller.idle_support.startup_read_error == "idle_phase_journal_invalid"
+    native = {
+        "enabled": 0, "exp_soft_enabled": 0, "exp_hard_enabled": 0,
+        "exp_soft_limit": 0, "exp_hard_limit": 0, "gen_soft_enabled": 0,
+        "gen_hard_enabled": 0, "gen_soft_limit": 0, "gen_hard_limit": 0,
+        "limit_per_phase": 0, "meter_id": 1,
+    }
+
+    async def read_native(**_kwargs: Any) -> dict[str, int]:
+        return dict(native)
+
+    monkeypatch.setattr(
+        runtime.gateway_scheduler.client, "read_load_balancing_status", read_native
+    )
+    await controller._read()
+    await controller.tick()
+    sensor = PixiiLoadBalancingSensor(runtime, "load_balancing_observation")
+    assert sensor.extra_state_attributes["control_status"] == "recovery_required"
+    assert sensor.extra_state_attributes["control_blocked_reason"] == "idle_phase_journal_invalid"
+
+
+@pytest.mark.asyncio
+async def test_disabled_setup_observer_first_tick_restores_saved_native_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(integration_module, "remove_retired_entities", lambda *args: None)
+    monkeypatch.setattr(runtime_module, "async_get_clientsession", lambda _hass: NoHttpSession())
+    monkeypatch.setattr(
+        runtime_module,
+        "build_scheduler_ssl_context",
+        lambda **_kwargs: ssl.create_default_context(),
+    )
+
+    async def mqtt_ready(_hass: Any) -> bool:
+        return True
+
+    async def runtime_start(_runtime: Any) -> None:
+        return None
+
+    permits: asyncio.Queue[None] = asyncio.Queue()
+
+    async def gated_refresh(_observer: Any) -> None:
+        await permits.get()
+
+    monkeypatch.setattr(integration_module, "async_wait_for_mqtt_client", mqtt_ready)
+    monkeypatch.setattr(integration_module.RuntimeData, "start", runtime_start)
+    monkeypatch.setattr(integration_module.LoadBalancingObserver, "async_refresh", gated_refresh)
+    hass = _executor_hass()
+    hass.data = {}
+    background_tasks: list[asyncio.Task[Any]] = []
+
+    def create_background_task(coro: Any, _name: str) -> asyncio.Task[Any]:
+        task = asyncio.create_task(coro)
+        background_tasks.append(task)
+        return task
+
+    hass.async_create_background_task = create_background_task
+    hass.config_entries = SimpleNamespace(
+        async_forward_entry_setups=lambda _entry, _platforms: asyncio.sleep(0),
+        async_update_entry=lambda entry, *, data: setattr(entry, "data", data),
+    )
+    entry = _entry(options={
+        CONF_SCHEDULER_URL: "https://gateway.example",
+        CONF_SCHEDULER_BOOTSTRAP_ID: BOOTSTRAP_ID,
+        CONF_SCHEDULER_USERNAME: "operator",
+        CONF_SCHEDULER_PASSWORD: "password",
+    })
+    entry.async_on_unload = lambda _callback: None
+    entry.add_update_listener = lambda callback: callback
+    original = {
+        "enabled": 0, "exp_soft_enabled": 0, "exp_hard_enabled": 0,
+        "exp_soft_limit": 0, "exp_hard_limit": 0, "gen_soft_enabled": 0,
+        "gen_hard_enabled": 0, "gen_soft_limit": 0, "gen_hard_limit": 0,
+        "limit_per_phase": 0, "meter_id": 1,
+    }
+    owned = {**original, "enabled": 1, "exp_soft_enabled": 1, "exp_soft_limit": 6000}
+    native_key = "pixiihome_controller.GATEWAY.meter_limit_lease"
+    MemoryStore.data[native_key] = {"lease": {"original": original, "owned": [owned]}}
+
+    assert await integration_module.async_setup_entry(hass, entry)
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    observer = runtime.load_balancing_observer
+    controller = runtime.meter_limit_load_balancer
+    assert observer is not None and controller is not None
+    assert observer._task is not None
+    assert controller.lease is not None
+    assert MemoryStore.data[native_key]["lease"] is not None
+    assert controller.writes == 0
+    assert runtime.gateway_scheduler is not None
+    client = runtime.gateway_scheduler.client
+    current = dict(owned)
+    gateway_calls: list[str] = []
+
+    async def read_native(**_kwargs: Any) -> dict[str, int]:
+        gateway_calls.append("read")
+        return dict(current)
+
+    async def write_native(record: Any) -> None:
+        gateway_calls.append("write")
+        current.clear()
+        current.update(record)
+
+    monkeypatch.setattr(client, "read_load_balancing_status", read_native)
+    monkeypatch.setattr(client, "write_meter_limitation_settings", write_native)
+    updates: asyncio.Queue[None] = asyncio.Queue()
+    observer.add_listener(lambda: updates.put_nowait(None))
+    sensor = PixiiLoadBalancingSensor(runtime, "load_balancing_observation")
+    try:
+        permits.put_nowait(None)
+        await asyncio.wait_for(updates.get(), 1)
+        assert gateway_calls == ["read", "write"]
+        assert current == original
+        assert MemoryStore.data[native_key] == {"lease": None}
+        assert controller.lease is None
+        assert sensor.extra_state_attributes["control_status"] == "disabled"
+        assert sensor.extra_state_attributes["control_blocked_reason"] is None
+    finally:
+        for task in background_tasks:
+            task.cancel()
+        await asyncio.gather(*background_tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -490,6 +678,180 @@ async def _configured_runtime(
     await runtime.async_initialize_control_state()
     await runtime.async_initialize_scheduler()
     return runtime, entry, hass, updates
+
+
+def _stub_runtime_stop_steps(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: RuntimeData,
+    failures: dict[str, Exception],
+    calls: list[str],
+) -> None:
+    async def stop(name: str) -> None:
+        calls.append(name)
+        if name in failures:
+            raise failures[name]
+
+    def component(name: str) -> Any:
+        async def run() -> None:
+            await stop(name)
+
+        return SimpleNamespace(stop=run)
+
+    runtime.battery_activity = component("battery activity")
+    runtime.energy_forecast = component("energy forecast")
+    runtime.price_optimization_controller = component("price optimization")
+    runtime.price_optimization_controller.soc_guard = component("price SOC guard")
+    runtime.adaptive_peak_shaving_controller = component("adaptive peak shaving")
+    runtime.solar_charging_controller = component("solar charging")
+    runtime.load_balancing_observer = component("load balancing observer")
+    runtime.meter_limit_load_balancer = component("meter limit load balancer")
+    runtime.scheduler_coordinator = SimpleNamespace(
+        async_stop=lambda: stop("scheduler coordinator")
+    )
+    monkeypatch.setattr(
+        RuntimeData,
+        "async_flush_control_journal",
+        lambda _self: stop("control journal flush"),
+    )
+    runtime.command_manager = component("command manager")
+    runtime.transport = component("MQTT transport")
+
+
+STOP_ORDER = [
+    "battery activity",
+    "energy forecast",
+    "price SOC guard",
+    "price optimization",
+    "adaptive peak shaving",
+    "solar charging",
+    "load balancing observer",
+    "meter limit load balancer",
+    "scheduler coordinator",
+    "control journal flush",
+    "command manager",
+    "MQTT transport",
+]
+
+
+@pytest.mark.parametrize("failed_steps", [(), ("meter limit load balancer",),
+                                         ("meter limit load balancer", "control journal flush")])
+@pytest.mark.asyncio
+async def test_runtime_stop_attempts_every_step_and_reports_each_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failed_steps: tuple[str, ...],
+) -> None:
+    runtime, _, _, _ = await _configured_runtime(monkeypatch)
+    calls: list[str] = []
+    failures = {name: RuntimeError(f"{name} failed") for name in failed_steps}
+    activity: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        runtime_module,
+        "log_activity",
+        lambda _runtime, _status, message, cause: activity.append((message, cause)),
+    )
+    _stub_runtime_stop_steps(monkeypatch, runtime, failures, calls)
+
+    if failed_steps:
+        with pytest.raises(RuntimeError) as raised:
+            await runtime.stop()
+        assert raised.value is failures[failed_steps[0]]
+    else:
+        await runtime.stop()
+
+    assert calls == STOP_ORDER
+    assert len(activity) == len(failed_steps) + 1
+    assert "all local components" in activity[-1][0]
+    assert "Integration unload requested" in activity[-1][1]
+    for name in failed_steps:
+        assert f"Failed to stop {name}" in caplog.text
+        assert f"{name} failed" in caplog.text
+        assert any(name in message and f"{name} failed" in cause
+                   for message, cause in activity)
+
+
+@pytest.mark.asyncio
+async def test_unload_stops_command_manager_and_mqtt_after_regulator_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, entry, hass, _ = await _configured_runtime(monkeypatch)
+    command_manager = runtime.command_manager
+    transport = runtime.transport
+    calls: list[str] = []
+    failure = RuntimeError("regulator failed")
+    _stub_runtime_stop_steps(
+        monkeypatch, runtime, {"meter limit load balancer": failure}, calls
+    )
+    runtime.command_manager = command_manager
+    runtime.transport = transport
+    subscriptions: list[str] = []
+    unsubscribed: list[str] = []
+
+    async def wait_for_mqtt(_hass: Any) -> bool:
+        return True
+
+    async def subscribe(
+        _hass: Any, topic: str, _callback: Any, *, qos: int, encoding: str | None
+    ) -> Any:
+        del qos, encoding
+        subscriptions.append(topic)
+        return lambda: unsubscribed.append(topic)
+
+    monkeypatch.setattr(mqtt_module, "async_wait_for_mqtt_client", wait_for_mqtt)
+    monkeypatch.setattr(command_module, "async_wait_for_mqtt_client", wait_for_mqtt)
+    monkeypatch.setattr(mqtt_module, "async_subscribe", subscribe)
+    monkeypatch.setattr(command_module, "async_subscribe", subscribe)
+    await runtime.start()
+    assert command_manager.ready
+    assert transport is not None and transport._unsubscribers
+
+    async def unload_platforms(*_args: Any) -> bool:
+        raise AssertionError("unload should report the stop failure first")
+
+    hass.data = {DOMAIN: {entry.entry_id: runtime}}
+    hass.config_entries.async_unload_platforms = unload_platforms
+    with pytest.raises(RuntimeError) as raised:
+        await integration_module.async_unload_entry(hass, entry)
+
+    assert raised.value is failure
+    assert calls == STOP_ORDER[:-2]
+    assert not command_manager.ready
+    assert transport._unsubscribers == []
+    assert sorted(unsubscribed) == sorted(subscriptions)
+    assert entry.entry_id not in hass.data[DOMAIN]
+
+
+@pytest.mark.asyncio
+async def test_unload_with_phase_lease_without_scheduler_stops_other_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.pixiihome_controller.meter_limit_controller import (
+        MeterLimitLoadBalancer,
+    )
+
+    runtime, entry, hass, _ = await _configured_runtime(monkeypatch)
+    calls: list[str] = []
+    _stub_runtime_stop_steps(monkeypatch, runtime, {}, calls)
+    controller = MeterLimitLoadBalancer(runtime)
+    controller.idle_support.lease = {"original": {}}
+    runtime.meter_limit_load_balancer = controller
+    runtime.gateway_scheduler = None
+    hass.data = {DOMAIN: {entry.entry_id: runtime}}
+
+    async def unload_platforms(*_args: Any) -> bool:
+        calls.append("platforms")
+        return True
+
+    hass.config_entries.async_unload_platforms = unload_platforms
+
+    assert await integration_module.async_unload_entry(hass, entry)
+
+    assert calls == [
+        step for step in STOP_ORDER if step != "meter limit load balancer"
+    ] + ["platforms"]
+    assert controller.idle_support.reason == "native_meter_unavailable"
+    assert controller.idle_support.lease is not None
+    assert entry.entry_id not in hass.data[DOMAIN]
 
 
 @pytest.mark.asyncio
