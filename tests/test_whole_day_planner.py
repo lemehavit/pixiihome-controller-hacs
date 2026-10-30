@@ -323,6 +323,27 @@ def test_later_discharge_uses_energy_retained_after_filtered_discharge(monkeypat
     assert all(action.start != series.intervals[0].start for action in result.plan.actions)
 
 
+def test_filtered_charge_cannot_fund_later_discharge_below_minimum_soc(monkeypatch) -> None:
+    from custom_components.pixiihome_controller.control import whole_day_planner as module
+
+    series = _series([0.2, 0.2, 3.0, 3.0, 3.0, 3.0])
+    unfiltered = _plan(series, lambda _start, _end: (1.5, 0.0))
+    assert any(action.direction is PriceDirection.CHARGE for action in unfiltered.plan.actions)
+    assert any(action.direction is PriceDirection.DISCHARGE for action in unfiltered.plan.actions)
+    original = module._meets_minimum
+    monkeypatch.setattr(
+        module, "_meets_minimum",
+        lambda action, minimum, export_minimum: (
+            action.direction is not PriceDirection.CHARGE
+            and original(action, minimum, export_minimum)
+        ),
+    )
+    result = _plan(series, lambda _start, _end: (1.5, 0.0))
+    assert all(action.direction is not PriceDirection.CHARGE for action in result.plan.actions)
+    assert all(slot.usable_soc_percent >= 10.0 - 1e-9 for slot in result.slots)
+    assert all(slot.battery_kw >= -1e-9 for slot in result.slots)
+
+
 def test_written_actions_and_reported_cost_share_the_same_trajectory() -> None:
     series = _series([0.2, 0.2, 3.0, 3.0, 3.0, 3.0])
     result = _plan(series, lambda start, end: (1.5, 0.0))

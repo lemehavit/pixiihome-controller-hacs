@@ -279,8 +279,8 @@ class PriceOptimizationController:
                 "ready": whole_day.plan.ready,
                 "blockers": list(whole_day.plan.blockers),
                 "expected_margin_sek": round(whole_day.plan.expected_margin_sek, 2),
-                # Kompatibilitetsnamn: basen saknar egna prisåtgärder men
-                # inkluderar påfyllning från fasta externa SOC-mål.
+                # Compatibility name: the baseline excludes our price actions
+                # but includes refills from fixed external SOC targets.
                 "cost_without_battery_sek": round(whole_day.baseline_cost_sek, 2),
                 "planned_cost_sek": round(whole_day.planned_cost_sek, 2),
                 "action_count": len(merge_adjacent_actions(whole_day.plan.actions)),

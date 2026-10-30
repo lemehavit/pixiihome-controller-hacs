@@ -174,6 +174,15 @@ def test_forecast_cap_above_power_headroom_does_not_set_limit_flag() -> None:
     assert not capped.charge_demand_limited
 
 
+def test_sub_threshold_charge_cap_does_not_report_demand_limit() -> None:
+    result = plan(
+        greenely(.2, 3), initial_soc=10, charge_kw=.04, discharge_kw=5,
+        net_load_kw=lambda _start, _end: .01,
+    )
+    assert _charged_kwh(result) == 0
+    assert not result.charge_demand_limited
+
+
 def _prices_with_expensive_initial_basis(*prices: float, initial_basis: float = 3.0):
     return normalize_price_series(
         {"raw_today": [

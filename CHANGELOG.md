@@ -2,6 +2,8 @@
 
 ## 0.5.22 — 2026-10-29
 
+- F3c: Regressionstester täcker en laddgräns under 0,05 kW och en filtrerad
+  laddning före urladdning; engelska prisplanstexter har rättats.
 - F7b: Dygnsplanens omspelning begränsar automatisk solladdning till verkligt
   överskott och urladdning till faktisk energi över minsta SOC. Standardplanens
   framtida pristoppar beräknas per segment och laddgränsen loggas bara när
