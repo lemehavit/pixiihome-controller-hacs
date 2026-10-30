@@ -184,6 +184,12 @@ keeps more energy for hours with usually high load. **Use whole-day planner**
 plans the whole price horizon together with solar. See
 [Energy forecast](energy-forecast.md).
 
+The standard plan sizes profitable charging from available battery headroom
+and the charge power limit. Forecast household load does not cap charging;
+without export permission, it still caps actual self-consumption discharge.
+Known external Target SOC windows separate planning segments. A future-demand
+charge limit (F6) is deferred to a separate PR.
+
 ## Read the result and disable
 
 The whole-day plan's `cost_without_battery_sek` is the comparison cost without

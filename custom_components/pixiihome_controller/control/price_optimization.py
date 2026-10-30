@@ -196,7 +196,6 @@ class PricePlan:
     expected_margin_sek: float
     # Planned usable SOC at the start of each adjustable external window.
     window_socs: tuple[tuple[datetime, float], ...] = ()
-    charge_demand_limited: bool = False
 
     @property
     def ready(self) -> bool:
@@ -387,24 +386,12 @@ def build_price_plan(
                 net_load_kw = None
                 break
     segment = [sum(1 for window in resets if window.end <= item.start) for item in candidates]
-    # Later profitable use stops at a known reset. Blocked intervals cannot
-    # supply a peak, and one reverse pass avoids a suffix scan per candidate.
-    later_peak: list[float | None] = [None] * len(candidates)
-    peak: float | None = None
-    for position in range(len(candidates) - 1, -1, -1):
-        if position + 1 < len(candidates) and segment[position + 1] != segment[position]:
-            peak = None
-        later_peak[position] = peak
-        if not blocked[position]:
-            price_at_position = candidates[position].price_sek_per_kwh
-            peak = price_at_position if peak is None else max(peak, price_at_position)
     refill_price = [_mean_price(series, window.start, window.end) for window in resets]
     window_socs: dict[datetime, float] = {}
     active_segment: int | None = None
     closing: float | None = None
     stored_price = acquisition_price
     charged_energy = charged_price = 0.0
-    charge_demand_limited = False
 
     for index, item in enumerate(candidates):
         if segment[index] != active_segment:
@@ -465,80 +452,6 @@ def build_price_plan(
             and charge_mode is not None
         ):
             power = min(maximum_charge_kw, headroom / (hours * charge_efficiency))
-            unrestricted_power = power
-            if net_load_kw is not None:
-                needed_stored_energy = 0.0
-                covered_stored_energy = 0.0
-                existing_charged_energy = min(available, charged_energy)
-                existing_stored_energy = max(0.0, available - existing_charged_energy)
-                for future_index in range(index + 1, len(candidates)):
-                    future = candidates[future_index]
-                    if segment[future_index] != active_segment:
-                        break
-                    if blocked[future_index]:
-                        continue
-                    future_later_peak = later_peak[future_index]
-                    if (future_later_peak is not None
-                            and future.price_sek_per_kwh < future_later_peak - 1e-9):
-                        continue
-                    future_mode, _ = _qualifying_discharge(
-                        price, future.price_sek_per_kwh,
-                        efficiency=round_trip_efficiency_percent / 100,
-                        grid_cost=grid_import_cost_sek_per_kwh,
-                        cycle_cost=cycle_cost_sek_per_kwh,
-                        minimum_profit=minimum_difference_sek_per_kwh,
-                        export_allowed=export_allowed,
-                        export_minimum_profit=export_minimum_difference_sek_per_kwh,
-                    )
-                    delivery = 0.0
-                    if future_mode is PriceDischargeMode.EXPORT:
-                        delivery = maximum_discharge_kw * future.duration_hours
-                    elif future_mode is PriceDischargeMode.SELF_CONSUMPTION:
-                        demand = net_load_kw(future.start, future.end)
-                        if demand is None or not isfinite(demand):
-                            continue
-                        delivery = (
-                            min(maximum_discharge_kw, max(0.0, demand)) * future.duration_hours
-                        )
-                    stored_need = delivery / discharge_efficiency
-                    needed_stored_energy += stored_need
-                    # Spend the least flexible (usually more expensive) energy
-                    # first. Forecast and actual discharge use this same order.
-                    buckets = sorted(
-                        ((stored_price, "stored"), (charged_price, "charged")),
-                        reverse=True,
-                    )
-                    remaining = stored_need
-                    for basis, bucket in buckets:
-                        bucket_energy = (existing_stored_energy if bucket == "stored"
-                                         else existing_charged_energy)
-                        if bucket_energy <= 1e-6 or remaining <= 1e-6:
-                            continue
-                        existing_mode, _ = _qualifying_discharge(
-                            basis, future.price_sek_per_kwh,
-                            efficiency=round_trip_efficiency_percent / 100,
-                            grid_cost=grid_import_cost_sek_per_kwh,
-                            cycle_cost=cycle_cost_sek_per_kwh,
-                            minimum_profit=minimum_difference_sek_per_kwh,
-                            export_allowed=export_allowed,
-                            export_minimum_profit=export_minimum_difference_sek_per_kwh,
-                        )
-                        if existing_mode is future_mode or (
-                            future_mode is PriceDischargeMode.SELF_CONSUMPTION
-                            and existing_mode is PriceDischargeMode.EXPORT
-                        ):
-                            covered = min(remaining, bucket_energy)
-                            remaining -= covered
-                            covered_stored_energy += covered
-                            if bucket == "stored":
-                                existing_stored_energy -= covered
-                            else:
-                                existing_charged_energy -= covered
-                remaining_headroom = max(0.0, needed_stored_energy - covered_stored_energy)
-                demand_power = remaining_headroom / (hours * charge_efficiency)
-                power = min(power, demand_power)
-                if unrestricted_power >= 0.05 and power < unrestricted_power - 1e-9:
-                    charge_demand_limited = True
             if power < 0.05:
                 continue
             added_energy = power * hours * charge_efficiency
@@ -746,7 +659,7 @@ def build_price_plan(
         window_socs.setdefault(window.start, energy / usable_capacity_kwh * 100)
     return PricePlan(
         tuple(actions), (), fingerprint, min_soc, max_soc, expected_margin,
-        tuple(sorted(window_socs.items())), charge_demand_limited,
+        tuple(sorted(window_socs.items())),
     )
 
 

@@ -1618,9 +1618,10 @@ def _binding_runtime(monkeypatch):
     return clock, instance, mutations, events, charge_start
 
 
-def test_standard_plan_logs_forecast_charge_limit_without_gateway_calls(monkeypatch):
+def test_standard_plan_charges_with_zero_forecast_without_f6_log_or_gateway_calls(monkeypatch):
     from custom_components.pixiihome_controller import price_controller as module
     from custom_components.pixiihome_controller.control.price_optimization import (
+        PriceDirection,
         normalize_price_series,
     )
 
@@ -1637,37 +1638,7 @@ def test_standard_plan_logs_forecast_charge_limit_without_gateway_calls(monkeypa
     result = controller._build_plan(series, controller._validated_limits())
     controller._build_plan(series, controller._validated_limits())
 
-    assert result.charge_demand_limited
-    cap_entries = [
-        (message, reason) for message, reason in logged
-        if "forecast profitable use" in message
-    ]
-    assert len(cap_entries) == 1
-    assert "Energy already stored above minimum SOC is counted only" in cap_entries[0][1]
-    assert "where its price basis qualifies" in cap_entries[0][1]
-    assert mutations.created == []
-    assert mutations.deleted == []
-
-
-def test_standard_plan_does_not_log_an_inactive_forecast_limit(monkeypatch):
-    from custom_components.pixiihome_controller import price_controller as module
-    from custom_components.pixiihome_controller.control.price_optimization import (
-        normalize_price_series,
-    )
-
-    _, instance, mutations, _, _ = _binding_runtime(monkeypatch)
-    instance.energy_forecast = SimpleNamespace(
-        net_load_kw=lambda _start, _end, high=False: 100.0,
-        net_forecast=lambda _start, _end, high=False: (100.0, 0.0),
-    )
-    logged = []
-    monkeypatch.setattr(module, "log_activity", lambda *_args: logged.append(_args[2:]))
-    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
-    series = normalize_price_series(instance.hass.states.state.attributes, "SEK/kWh")
-
-    result = controller._build_plan(series, controller._validated_limits())
-
-    assert not result.charge_demand_limited
+    assert any(a.direction is PriceDirection.CHARGE for a in result.actions)
     assert not any("forecast profitable use" in message for message, _reason in logged)
     assert mutations.created == []
     assert mutations.deleted == []

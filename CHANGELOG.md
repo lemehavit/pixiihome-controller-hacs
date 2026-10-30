@@ -6,13 +6,14 @@
   laddning före urladdning; engelska prisplanstexter har rättats.
 - F7b: Dygnsplanens omspelning begränsar automatisk solladdning till verkligt
   överskott och urladdning till faktisk energi över minsta SOC. Standardplanens
-  framtida pristoppar beräknas per segment och laddgränsen loggas bara när
-  laddbeslutet ändras. Omspelningen skapar inte laddning från ett nollval under
+  prisbedömning följer externa segment. Omspelningen skapar inte laddning från ett nollval under
   minsta SOC. Jämförelsekostnadens externa påfyllning förtydligas.
 - F4: Ett eget schema som snart ska börja raderas inte medan det fortfarande
   kan behövas för planens styrning.
 - F7: Dygnsplanens SOC och ekonomi räknas från de åtgärder som faktiskt skrivs.
-- F6: Standardplaneraren köper bara energi som kan användas lönsamt.
+- F6 skjuts upp till en separat PR. Standardplaneraren dimensionerar åter
+  laddning efter ledigt batteriutrymme och effektgräns; prognostiserad last
+  begränsar fortfarande faktisk urladdning utan tillåten export.
 - F5: Dygnsplanen räknar bara med solladdning som någon faktiskt utför.
 
 ## 0.5.21 — 2026-10-29
