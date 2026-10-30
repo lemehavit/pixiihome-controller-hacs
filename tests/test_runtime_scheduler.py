@@ -761,6 +761,30 @@ async def test_unload_stops_command_manager_and_mqtt_after_regulator_failure(
 
 
 @pytest.mark.asyncio
+async def test_unload_with_phase_lease_without_scheduler_stops_other_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.pixiihome_controller.meter_limit_controller import (
+        MeterLimitLoadBalancer,
+    )
+
+    runtime, entry, hass, _ = await _configured_runtime(monkeypatch)
+    calls: list[str] = []
+    _stub_runtime_stop_steps(monkeypatch, runtime, {}, calls)
+    controller = MeterLimitLoadBalancer(runtime)
+    controller.idle_support.lease = {"original": {}}
+    runtime.meter_limit_load_balancer = controller
+    runtime.gateway_scheduler = None
+    hass.data = {DOMAIN: {entry.entry_id: runtime}}
+
+    with pytest.raises(ValueError, match="native_meter_unavailable"):
+        await integration_module.async_unload_entry(hass, entry)
+
+    assert calls == [step for step in STOP_ORDER if step != "meter limit load balancer"]
+    assert entry.entry_id not in hass.data[DOMAIN]
+
+
+@pytest.mark.asyncio
 async def test_configured_runtime_wires_without_legacy_ha_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -35,6 +35,7 @@ class IdlePhaseLoadBalancer:
         )
         self.gateway: PhaseGateway | None = None
         self.lease: dict[str, Any] | None = None
+        self.startup_read_error: str | None = None
         self.status = "disabled"
         self.reason: str | None = None
         self.targets: tuple[int, ...] | None = None
@@ -62,27 +63,31 @@ class IdlePhaseLoadBalancer:
             raise ValueError("idle_phase_journal_invalid")
         self.lease = lease
 
-    async def load_saved_lease(self) -> None:
+    async def load_saved_lease(self, *, control_off: bool = False) -> None:
         """Set up the Gateway reader and load ownership without restoring it."""
         saved = await self.store.async_load()
         if saved is None:
             self.lease = None
+            self.startup_read_error = None
             return
         if not isinstance(saved, dict) or set(saved) != {"lease"}:
             raise ValueError("idle_phase_journal_invalid")
         self.lease = saved["lease"]
         if self.lease is None:
+            self.startup_read_error = None
             return
         scheduler = self.runtime.gateway_scheduler
         if scheduler is None:
             raise ValueError("native_meter_unavailable")
         self.gateway = PhaseGateway(scheduler.client)
+        self.startup_read_error = None
         self.status, self.reason = "recovery_required", "idle_phase_restore_pending"
-        log_activity(
-            self.runtime, "load_balancing_observation",
-            "Saved phase support requires restoration",
-            cause="A Service 129 lease remained after restart while control is off",
-        )
+        if control_off:
+            log_activity(
+                self.runtime, "load_balancing_observation",
+                "Saved phase support requires restoration",
+                cause="A Service 129 lease remained after restart while control is off",
+            )
 
     async def _recover(self) -> None:
         await self.load_saved_lease()

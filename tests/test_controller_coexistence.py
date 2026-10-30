@@ -773,6 +773,58 @@ async def test_prepare_load_does_not_log_control_off(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_phase_prepare_load_does_not_log_control_off(monkeypatch):
+    runtime, _reads, _writes, activity = _restarted_controller(monkeypatch, {})
+    original = dict.fromkeys(PHASE_FIELDS, 0)
+    LeaseStore.data["pixiihome_controller.GATEWAY.idle_phase_lease"] = {"lease": {
+        "original": original, "owned": [original],
+    }}
+    controller = IdlePhaseLoadBalancer(runtime)
+    await controller.load_saved_lease()
+    assert not any("after restart while control is off" in str(item) for item in activity)
+    await controller.load_saved_lease(control_off=True)
+    assert any("after restart while control is off" in str(item) for item in activity)
+
+
+@pytest.mark.asyncio
+async def test_phase_journal_error_survives_service_120_read(monkeypatch):
+    native = dict.fromkeys(MeterLimitLoadBalancer._record({
+        key: 0 for key in (
+            "enabled", "exp_soft_enabled", "exp_hard_enabled", "exp_soft_limit",
+            "exp_hard_limit", "gen_soft_enabled", "gen_hard_enabled",
+            "gen_soft_limit", "gen_hard_limit", "limit_per_phase", "meter_id",
+        )
+    }), 0)
+    runtime, _reads, _writes, _activity = _restarted_controller(monkeypatch, native)
+    controller = MeterLimitLoadBalancer(runtime)
+    controller.idle_support.startup_read_error = "idle_phase_journal_invalid"
+    await controller._read()
+    await controller.tick()
+    assert controller.reason == "idle_phase_journal_invalid"
+    await controller.idle_support.load_saved_lease()
+    await controller.tick()
+    assert (controller.status, controller.reason) == ("disabled", None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["native_meter_unavailable", "idle_phase_recovery_pending"])
+async def test_known_restore_reason_is_visible_on_sensor(monkeypatch, code):
+    runtime, _reads, _writes, _activity = _restarted_controller(monkeypatch, {})
+    controller = MeterLimitLoadBalancer(runtime)
+    runtime.meter_limit_load_balancer = controller
+    runtime.load_balancing_observer = SimpleNamespace(attributes=controller.attributes)
+    controller.idle_support.lease = {"original": {}}
+
+    async def fail():
+        raise ValueError(code)
+
+    controller.deactivate = fail
+    await controller.tick()
+    sensor = PixiiLoadBalancingSensor(runtime, "load_balancing_observation")
+    assert sensor.extra_state_attributes["control_blocked_reason"] == code
+
+
+@pytest.mark.asyncio
 async def test_phase_release_accepts_original_on_second_read(monkeypatch):
     runtime, _reads, _writes, _activity = _restarted_controller(monkeypatch, {})
     original = dict.fromkeys(PHASE_FIELDS, 0)

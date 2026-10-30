@@ -694,11 +694,25 @@ class RuntimeData:
         async with self._control_journal_lock:
             journal = self.control_journal
             if journal is None:
-                self._fail_closed_control_state("control_journal_unavailable")
+                self._fail_closed_control_state(
+                    getattr(self, "control_state_error", None) or "control_journal_unavailable"
+                )
                 if cleanup_problems:
-                    RuntimeData._update_authority_cleanup_notification(
-                        self, cleanup_problems, persisted=False
-                    )
+                    self._authority_cleanup_persisted = False
+                    try:
+                        RuntimeData._update_authority_cleanup_notification(
+                            self, cleanup_problems, persisted=False
+                        )
+                    except Exception:  # noqa: BLE001 - preserve missing journal error
+                        _LOGGER.exception("Could not report authority cleanup problems")
+                    try:
+                        log_activity(
+                            self, "price_optimization_status",
+                            "Control authority closed without a journal; cleanup needs recovery",
+                            cause=", ".join(cleanup_problems),
+                        )
+                    except Exception:  # noqa: BLE001 - preserve missing journal error
+                        _LOGGER.exception("Could not log authority cleanup problems")
                 raise HomeAssistantError("ControllerStore is unavailable")
             authority = ProductionControlAuthority(
                 enabled=enabled,
@@ -720,12 +734,13 @@ class RuntimeData:
             except Exception:
                 self._fail_closed_control_state("control_journal_persistence_failed")
                 if cleanup_problems:
+                    self._authority_cleanup_persisted = False
                     try:
                         RuntimeData._update_authority_cleanup_notification(
                             self, cleanup_problems, persisted=False
                         )
                     except Exception:  # noqa: BLE001 - keep the original journal error
-                        pass
+                        _LOGGER.exception("Could not report authority cleanup problems")
                     try:
                         log_activity(
                             self, "price_optimization_status",
@@ -734,7 +749,7 @@ class RuntimeData:
                             cause=", ".join(cleanup_problems),
                         )
                     except Exception:  # noqa: BLE001 - keep the original journal error
-                        pass
+                        _LOGGER.exception("Could not log authority cleanup problems")
                 raise
             self.control_journal = candidate
             self.production_authority = authority

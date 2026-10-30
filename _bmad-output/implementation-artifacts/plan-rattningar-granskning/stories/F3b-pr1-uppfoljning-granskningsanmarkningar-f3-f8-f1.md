@@ -68,12 +68,12 @@ deferred: []
 
 ## Review Triage Log
 
-### 2026-10-29 ? Review pass
-- verdicts: 3 findings ? high 0, medium 2, low 0, false 1, maybe-false 0
+### 2026-10-29 – Review pass
+- verdicts: 3 findings – high 0, medium 2, low 0, false 1, maybe-false 0
 - findings:
-  - `[medium]` `[patch]` Startv?gens logg saknade ett test ? lade kontroll av control-off-orsak i `test_runtime_scheduler.py`.
-  - `[medium]` `[patch]` Native kapacitetsbrist saknade regressionsfall ? lade test med noll urladdningskapacitet och aktiv policygr?ns.
-  - `[false]` `[reject]` F8-orsaken finns inte som f?lt i `logbook_entry` ? befintlig `log_activity` skickar ett separat orsaksh?ndelse med samma context; testet kontrollerar just den kopplingen.
+  - `[medium]` `[patch]` Startvägens logg saknade ett test – lade kontroll av control-off-orsak i `test_runtime_scheduler.py`.
+  - `[medium]` `[patch]` Native kapacitetsbrist saknade regressionsfall – lade test med noll urladdningskapacitet och aktiv policygräns.
+  - `[false]` `[reject]` F8-orsaken finns inte som fält i `logbook_entry` – befintlig `log_activity` skickar ett separat orsakshändelse med samma context; testet kontrollerar just den kopplingen.
 
 ## Verification
 
@@ -89,9 +89,9 @@ deferred: []
 
 Status: done
 
-- ?ndring: sju F3b-anm?rkningar ?tg?rdade med regressionstester och uppdaterad 0.5.21-post i CHANGELOG.
-- Filer: meterbegr?nsning och uppstart rensar gamla l?sfel och loggar korrekt; fasst?d ?terst?ller lease och skiljer policyorsaker; testerna t?cker varje punkt.
-- Granskning: tv? medelstora verifieringsluckor lagades; ingen uppskjuten; en felaktig l?sning av F8:s h?ndelsemodell avvisades enligt loggbokens befintliga context-koppling.
-- Uppf?ljande granskning: true. Tv? medium-patchar g?llde testt?ckning; kvarst?ende risk ?r att HA:s verkliga loggbokspresentation och Gateway-?terkomst inte ?r live-verifierade.
-- Verifiering: ruff, pyright, pytest och build_release --check passerade p? PR1 efter kod?ndringar; tv? riktade tester passerade efter granskningspatcharna.
-- Kvarvarande risk: uppstart och gateway ?r simulerade i tester; inget live-system har anv?nts.
+- Ändring: sju F3b-anmärkningar åtgärdade med regressionstester och uppdaterad 0.5.21-post i CHANGELOG.
+- Filer: meterbegränsning och uppstart rensar gamla läsfel och loggar korrekt; fasstöd återställer lease och skiljer policyorsaker; testerna täcker varje punkt.
+- Granskning: två medelstora verifieringsluckor lagades; ingen uppskjuten; en felaktig läsning av F8:s händelsemodell avvisades enligt loggbokens befintliga context-koppling.
+- Uppföljande granskning: true. Två medium-patchar gällde testtäckning; kvarstående risk är att HA:s verkliga loggbokspresentation och Gateway-återkomst inte är live-verifierade.
+- Verifiering: ruff, pyright, pytest och build_release --check passerade på PR1 efter kodändringar; två riktade tester passerade efter granskningspatcharna.
+- Kvarvarande risk: uppstart och gateway är simulerade i tester; inget live-system har använts.

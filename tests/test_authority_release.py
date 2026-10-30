@@ -273,6 +273,55 @@ async def test_missing_journal_warns_about_unrestored_service_120_before_error(m
 
 
 @pytest.mark.asyncio
+async def test_missing_journal_preserves_prior_reason_when_notification_fails(
+    monkeypatch, caplog,
+) -> None:
+    from homeassistant.components import persistent_notification
+
+    from custom_components.pixiihome_controller import runtime as runtime_module
+
+    events = []
+    gate = SimpleNamespace(live_writes_enabled=True)
+
+    async def admin(_user_id):
+        return None
+
+    async def release():
+        return []
+
+    async def deactivate():
+        raise OSError("Gateway unavailable")
+
+    def fail_closed(reason):
+        events.append(reason)
+        gate.live_writes_enabled = False
+
+    def fail_notification(*_args, **_kwargs):
+        raise OSError("notification unavailable")
+
+    def fail_activity(*_args, **_kwargs):
+        raise OSError("activity unavailable")
+
+    monkeypatch.setattr(persistent_notification, "async_create", fail_notification)
+    monkeypatch.setattr(runtime_module, "log_activity", fail_activity)
+    fake = SimpleNamespace(
+        _require_admin=admin, production_control_enabled=lambda: True,
+        _async_release_owned_control=release,
+        meter_limit_load_balancer=SimpleNamespace(lease={"original": {}}, deactivate=deactivate),
+        _control_journal_lock=asyncio.Lock(), control_journal=None,
+        control_state_error="control_journal_invalid",
+        _fail_closed_control_state=fail_closed,
+        release_gate=gate, hass=object(), serial="GATEWAY",
+    )
+    with pytest.raises(HomeAssistantError, match="ControllerStore is unavailable"):
+        await RuntimeData.async_set_production_control_enabled(fake, False, None)
+    assert events == ["control_journal_invalid"]
+    assert fake._authority_cleanup_persisted is False
+    assert "Could not report authority cleanup problems" in caplog.text
+    assert "Could not log authority cleanup problems" in caplog.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("reporting_error", [None, "notification", "activity"])
 async def test_journal_save_failure_warns_about_service_120_and_keeps_original_error(
     monkeypatch, reporting_error,
