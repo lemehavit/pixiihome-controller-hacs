@@ -777,10 +777,19 @@ async def test_unload_with_phase_lease_without_scheduler_stops_other_components(
     runtime.gateway_scheduler = None
     hass.data = {DOMAIN: {entry.entry_id: runtime}}
 
-    with pytest.raises(ValueError, match="native_meter_unavailable"):
-        await integration_module.async_unload_entry(hass, entry)
+    async def unload_platforms(*_args: Any) -> bool:
+        calls.append("platforms")
+        return True
 
-    assert calls == [step for step in STOP_ORDER if step != "meter limit load balancer"]
+    hass.config_entries.async_unload_platforms = unload_platforms
+
+    assert await integration_module.async_unload_entry(hass, entry)
+
+    assert calls == [
+        step for step in STOP_ORDER if step != "meter limit load balancer"
+    ] + ["platforms"]
+    assert controller.idle_support.reason == "native_meter_unavailable"
+    assert controller.idle_support.lease is not None
     assert entry.entry_id not in hass.data[DOMAIN]
 
 

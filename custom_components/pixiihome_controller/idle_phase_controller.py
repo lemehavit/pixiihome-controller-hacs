@@ -397,5 +397,16 @@ class IdlePhaseLoadBalancer:
 
     async def stop(self) -> None:
         async with self._lock:
-            await self.release()
+            try:
+                await self.release()
+            except ValueError as error:
+                if str(error) != "native_meter_unavailable":
+                    raise
+                self.status, self.reason = "recovery_required", "native_meter_unavailable"
+                log_activity(
+                    self.runtime, "load_balancing_observation",
+                    "Saved phase support still needs recovery after unload",
+                    cause="Gateway scheduler is unavailable; the saved Service 129 lease remains",
+                )
+                return
             self.status, self.reason = "disabled", None
