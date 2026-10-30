@@ -322,6 +322,54 @@ async def test_missing_journal_preserves_prior_reason_when_notification_fails(
 
 
 @pytest.mark.asyncio
+async def test_missing_journal_keeps_prior_control_state_error_without_cleanup() -> None:
+    reasons: list[str] = []
+
+    async def admin(_user_id):
+        return None
+
+    fake = SimpleNamespace(
+        _require_admin=admin, production_control_enabled=lambda: False,
+        meter_limit_load_balancer=None, _control_journal_lock=asyncio.Lock(),
+        control_journal=None, control_state_error="control_journal_invalid",
+        _fail_closed_control_state=reasons.append,
+    )
+    with pytest.raises(HomeAssistantError, match="ControllerStore is unavailable"):
+        await RuntimeData.async_set_production_control_enabled(fake, False, None)
+    assert reasons == ["control_journal_invalid"]
+
+
+@pytest.mark.asyncio
+async def test_missing_journal_sets_cleanup_persistence_before_notification(monkeypatch) -> None:
+    async def admin(_user_id):
+        return None
+
+    async def release():
+        return []
+
+    async def deactivate():
+        raise OSError("Gateway unavailable")
+
+    def fail_notification(*_args, **_kwargs):
+        raise OSError("notification unavailable")
+
+    monkeypatch.setattr(
+        RuntimeData, "_update_authority_cleanup_notification", fail_notification
+    )
+    fake = SimpleNamespace(
+        _require_admin=admin, production_control_enabled=lambda: True,
+        _async_release_owned_control=release,
+        meter_limit_load_balancer=SimpleNamespace(lease={"original": {}}, deactivate=deactivate),
+        _control_journal_lock=asyncio.Lock(), control_journal=None,
+        control_state_error=None, _fail_closed_control_state=lambda _reason: None,
+        _authority_cleanup_persisted=True,
+    )
+    with pytest.raises(HomeAssistantError, match="ControllerStore is unavailable"):
+        await RuntimeData.async_set_production_control_enabled(fake, False, None)
+    assert fake._authority_cleanup_persisted is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("reporting_error", [None, "notification", "activity"])
 async def test_journal_save_failure_warns_about_service_120_and_keeps_original_error(
     monkeypatch, reporting_error,
