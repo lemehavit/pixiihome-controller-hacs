@@ -471,7 +471,6 @@ def build_price_plan(
                 covered_stored_energy = 0.0
                 existing_charged_energy = min(available, charged_energy)
                 existing_stored_energy = max(0.0, available - existing_charged_energy)
-                forecast_known = True
                 for future_index in range(index + 1, len(candidates)):
                     future = candidates[future_index]
                     if segment[future_index] != active_segment:
@@ -497,8 +496,7 @@ def build_price_plan(
                     elif future_mode is PriceDischargeMode.SELF_CONSUMPTION:
                         demand = net_load_kw(future.start, future.end)
                         if demand is None or not isfinite(demand):
-                            forecast_known = False
-                            break
+                            continue
                         delivery = (
                             min(maximum_discharge_kw, max(0.0, demand)) * future.duration_hours
                         )
@@ -525,7 +523,10 @@ def build_price_plan(
                             export_allowed=export_allowed,
                             export_minimum_profit=export_minimum_difference_sek_per_kwh,
                         )
-                        if existing_mode is future_mode:
+                        if existing_mode is future_mode or (
+                            future_mode is PriceDischargeMode.SELF_CONSUMPTION
+                            and existing_mode is PriceDischargeMode.EXPORT
+                        ):
                             covered = min(remaining, bucket_energy)
                             remaining -= covered
                             covered_stored_energy += covered
@@ -533,12 +534,11 @@ def build_price_plan(
                                 existing_stored_energy -= covered
                             else:
                                 existing_charged_energy -= covered
-                if forecast_known:
-                    remaining_headroom = max(0.0, needed_stored_energy - covered_stored_energy)
-                    demand_power = remaining_headroom / (hours * charge_efficiency)
-                    power = min(power, demand_power)
-                    if unrestricted_power >= 0.05 and power < unrestricted_power - 1e-9:
-                        charge_demand_limited = True
+                remaining_headroom = max(0.0, needed_stored_energy - covered_stored_energy)
+                demand_power = remaining_headroom / (hours * charge_efficiency)
+                power = min(power, demand_power)
+                if unrestricted_power >= 0.05 and power < unrestricted_power - 1e-9:
+                    charge_demand_limited = True
             if power < 0.05:
                 continue
             added_energy = power * hours * charge_efficiency
@@ -610,11 +610,23 @@ def build_price_plan(
                     export_allowed=export_allowed,
                     export_minimum_profit=export_minimum_difference_sek_per_kwh,
                 )
-                mode = (charged_mode if charged_available > 1e-6 and charged_mode is not None
-                        else stored_mode if stored_available > 1e-6 else None)
+                modes = (
+                    stored_mode if stored_available > 1e-6 else None,
+                    charged_mode if charged_available > 1e-6 else None,
+                )
+                mode = (PriceDischargeMode.EXPORT
+                        if PriceDischargeMode.EXPORT in modes
+                        else PriceDischargeMode.SELF_CONSUMPTION
+                        if PriceDischargeMode.SELF_CONSUMPTION in modes else None)
                 eligible = (
-                    (charged_available if charged_mode is mode else 0.0)
-                    + (stored_available if stored_mode is mode else 0.0)
+                    (charged_available if charged_mode is mode or (
+                        mode is PriceDischargeMode.SELF_CONSUMPTION
+                        and charged_mode is PriceDischargeMode.EXPORT
+                    ) else 0.0)
+                    + (stored_available if stored_mode is mode or (
+                        mode is PriceDischargeMode.SELF_CONSUMPTION
+                        and stored_mode is PriceDischargeMode.EXPORT
+                    ) else 0.0)
                 ) if mode is not None else 0.0
             if (
                 maximum_discharge_kw > 0
@@ -645,7 +657,10 @@ def build_price_plan(
                             stored_available if bucket == "stored" else charged_available
                         )
                         bucket_mode = stored_mode if bucket == "stored" else charged_mode
-                        if bucket_mode is not mode:
+                        if bucket_mode is not mode and not (
+                            mode is PriceDischargeMode.SELF_CONSUMPTION
+                            and bucket_mode is PriceDischargeMode.EXPORT
+                        ):
                             continue
                         taken = min(used, bucket_available)
                         weighted_basis += taken * basis
@@ -662,6 +677,13 @@ def build_price_plan(
                         export_allowed=export_allowed,
                         export_minimum_profit=export_minimum_difference_sek_per_kwh,
                     )
+                    if mode is PriceDischargeMode.SELF_CONSUMPTION:
+                        discharge_net = (
+                            price + grid_import_cost_sek_per_kwh
+                            - (basis + grid_import_cost_sek_per_kwh)
+                            / (round_trip_efficiency_percent / 100)
+                            - cycle_cost_sek_per_kwh
+                        )
                 energy -= delivered / discharge_efficiency
                 projected_soc = energy / usable_capacity_kwh * 100
                 margin = delivered * discharge_net

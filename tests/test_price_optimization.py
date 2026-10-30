@@ -348,6 +348,27 @@ def test_self_consumption_energy_does_not_crowd_out_profitable_export_charge() -
     assert result.expected_margin_sek > 0
 
 
+def test_stored_export_energy_takes_priority_over_new_self_consumption_energy() -> None:
+    series = _prices_with_expensive_initial_basis(.6, .6, 1.6, initial_basis=.1)
+    def forecast(start, _end):
+        return 2.0 if start == _hour(2) else 0.0
+    result = plan(
+        series, initial_soc=50, charge_kw=5, discharge_kw=5,
+        export_allowed=True, export_delta=1.0, net_load_kw=forecast,
+    )
+    without_new_charge = plan(
+        series, initial_soc=50, charge_kw=0, discharge_kw=5,
+        export_allowed=True, export_delta=1.0, net_load_kw=forecast,
+    )
+    assert _charged_kwh(result) == pytest.approx(0)
+    discharge = [action for action in result.actions
+                 if action.direction is PriceDirection.DISCHARGE]
+    assert len(discharge) == 1
+    assert discharge[0].discharge_mode is PriceDischargeMode.EXPORT
+    assert discharge[0].power_kw == pytest.approx(4 * (.9 ** .5))
+    assert result.expected_margin_sek >= without_new_charge.expected_margin_sek - 1e-9
+
+
 def test_greenely_source_is_normalized_from_stockholm_to_utc() -> None:
     series = greenely(1.0, 2.0)
 

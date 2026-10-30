@@ -4,8 +4,8 @@ type: bugfix
 created: 2026-10-29
 status: done
 baseline_revision: 80e2ad876921a4ce4f5e595c02acdcdeed87c6b2
-review_loop_iteration: 2
-followup_review_recommended: false
+review_loop_iteration: 0
+followup_review_recommended: true
 context: []
 warnings: []
 deferred:
@@ -137,6 +137,11 @@ deferred:
 - findings:
   - `[medium]` `[patch]` Okänt värde från en befintlig prognosfunktion kunde lämna den nya prisbaslogiken aktiv — hela planen återgår nu till tidigare beteende när prognosen är ofullständig; numeriskt test tillagt.
 
+### 2026-10-30 — Fjärde fixrundans granskning
+- verdicts: 1 finding — high 1, medium 0, low 0, false 0, maybe-false 0
+- findings:
+  - `[high]` `[patch]` Lagrad exportkvalificerad energi uteslöts när ny energi bara kvalificerade för egenförbrukning — numeriskt regressionstest visade onödig laddning 2,22 kWh; lägesval, framtida täckning och faktisk urladdning använder nu samma prioritet och kompatibilitet.
+
 ## Design Notes
 
 Beräkna behovet inom segmentet mellan externa återställningar. `net_load_kw` är redan last minus sol, så en separat solavräkning skulle dubbelräkna den. Räkna prognosens levererbara AC-energi baklänges genom RTE för att få nödvändig inköpt AC-energi. Skilj energi som fanns vid segmentstart från energi laddad i segmentet när prognos finns; deras prisbaser är separata. Räkna av endast den del som kan levereras lönsamt i rätt urladdningsläge vid relevant framtida pris. När båda delar kvalificerar får båda användas till samma slot, men tillsammans aldrig mer än behovet. Använd samma prioritet i prognostäckning och faktisk urladdning. Den del som har högre prisbas har färre lönsamma framtida slotar och bör därför användas först när den kvalificerar, så att billigare energi finns kvar till senare slotar. Pris och marginal för en urladdning med två delar ska viktas efter förbrukad energi. Schemat behåller full effekt vid egenförbrukning; bara simulerad energi begränsas av prognosen. Utan prognos gäller tidigare blandade prisbas och åtgärdsval.
@@ -150,7 +155,7 @@ Beräkna behovet inom segmentet mellan externa återställningar. `net_load_kw` 
 
 ## Auto Run Result
 
-Status: done
+status: done
 
 **Sammanfattning:** Standardplaneraren begränsar nu laddning till lönsam framtida användning inom aktuellt planeringssegment. Den räknar av lagrad energi och använder nettolastprognosen, som redan inkluderar sol. Utan känd prognos gäller tidigare beteende. Kvalificerad export kan fortfarande motivera laddning.
 
@@ -164,7 +169,7 @@ Status: done
 
 ### Uppföljningsresultat 2026-10-29
 
-Status: done
+status: done
 
 **Sammanfattning:** Lagrad energi räknas nu av från framtida laddbehov bara när dess prisbas kvalificerar för samma urladdningsläge i den framtida sloten. Detta bevarar lönsamma billiga cykler när tidigare energi är dyr och när endast ny energi är lönsam att exportera.
 
@@ -178,7 +183,7 @@ Status: done
 
 ### Tredje fixrundans resultat 2026-10-30
 
-Status: done
+status: done
 
 **Sammanfattning:** I öppna och stängda segment har äldre lagrad energi och ny billig laddning nu skilda prisbaser när nettolastprognos finns. Prognosens behov och faktisk urladdning använder samma prioritet för energidelarna. Utan fullständig prognos används tidigare blandad prisbas och åtgärdsval.
 
@@ -189,3 +194,17 @@ Status: done
 **Verifiering:** `pytest -q tests/test_price_optimization.py`: 61 godkända. `pytest -q tests/test_price_controller.py`: 78 godkända. Riktad Ruff passerade; riktad Pyright gav 0 fel och 0 varningar; `git diff --check` passerade. Inga live-anrop gjordes.
 
 **Kvarvarande risk:** Planen använder fortfarande en pris- och lastprognos; verklig last eller sol kan avvika från prognosen. Full testsvit och CI kördes inte här.
+
+### Fjärde fixrundans resultat 2026-10-30
+
+Status: done
+
+**Sammanfattning:** Lagrad energi som kvalificerar för export väljs före nyladdad energi som bara kvalificerar för egenförbrukning. Exportkvalificerad energi kan också täcka prognostiserad egenförbrukning, så samma behov finansierar inte onödig laddning. Den valda urladdningens marginal beräknas för dess faktiska läge.
+
+**Ändrade filer:** `control/price_optimization.py` rättar lägesval, täckning och urladdning samt tar bort den oåtkomliga `forecast_known`-grenen; `tests/test_price_optimization.py` lägger ett numeriskt export/egenförbrukningsfall.
+
+**Granskning:** Ett high-fynd patchades; inga fynd sköts upp eller avvisades i denna runda. Uppföljande granskning rekommenderas eftersom lägesvalet mellan två energidelar är en konkret kvarvarande regressionsrisk (`true`).
+
+**Verifiering:** Hela `pytest -q` passerade; `ruff check .` passerade efter rättning av teststil; `pyright` gav 0 fel och 0 varningar; `scripts/build_release.py --check` gav Metadata OK: 0.5.22. Det numeriska regressionstestet föll före rättningen och passerade efteråt.
+
+**Kvarvarande risk:** Prognosen kan avvika från faktisk last och sol; live-systemet har inte anropats.
