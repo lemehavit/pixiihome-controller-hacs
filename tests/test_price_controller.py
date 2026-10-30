@@ -13,6 +13,7 @@ from custom_components.pixiihome_controller.control.models import PlantHealth
 from custom_components.pixiihome_controller.control.policy import AutomationPolicy
 from custom_components.pixiihome_controller.control.price_optimization import (
     CONF_PRICE_OPTIMIZATION,
+    PriceDirection,
     PriceOptimizationConfig,
 )
 from custom_components.pixiihome_controller.control.settings import (
@@ -743,6 +744,60 @@ async def test_whole_day_attributes_follow_filtered_discharge() -> None:
     assert whole_day["planned_cost_sek"] == pytest.approx(3.8)
     assert whole_day["expected_margin_sek"] == pytest.approx(0.0)
     assert mutations.created == []
+
+
+@pytest.mark.asyncio
+async def test_controller_publishes_safe_soc_after_filtered_charge(monkeypatch) -> None:
+    from custom_components.pixiihome_controller.control import whole_day_planner
+
+    instance, _mutations = runtime(schedule_writes=False)
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+    instance.hass.states.state.attributes = {
+        "unit_of_measurement": "SEK/kWh",
+        "prices": [
+            {
+                "start": (start + timedelta(hours=index)).isoformat(),
+                "end": (start + timedelta(hours=index + 1)).isoformat(),
+                "price": price,
+            }
+            for index, price in enumerate((0.2, 0.2, 3.0, 3.0, 3.0, 3.0))
+        ],
+    }
+    instance.battery = replace(instance.battery, usable_soc=10)
+    instance.energy_forecast = SimpleNamespace(
+        net_load_kw=lambda _start, _end, high=False: 1.5,
+        net_forecast=lambda _start, _end, high=False: (1.5, 0.0),
+    )
+    instance.operational_settings = instance.operational_settings.set(
+        "price_whole_day_planner", True
+    )
+    baseline = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    await baseline.tick()
+    assert any(segment["kind"] == "grid_charge"
+               for segment in baseline.attributes()["whole_day_plan"]["segments"])
+    assert any(segment["kind"] == "self_consumption"
+               for segment in baseline.attributes()["whole_day_plan"]["segments"])
+
+    original = whole_day_planner._meets_minimum
+    filtered_charges = []
+
+    def filter_charge(action, minimum, export_minimum):
+        if action.direction is PriceDirection.CHARGE:
+            filtered_charges.append(action)
+            return False
+        return original(action, minimum, export_minimum)
+
+    monkeypatch.setattr(whole_day_planner, "_meets_minimum", filter_charge)
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    await controller.tick()
+    attributes = controller.attributes()
+    whole_day = attributes["whole_day_plan"]
+    assert filtered_charges
+    assert attributes["planner_engine"] == "whole_day"
+    assert attributes["minimum_projected_usable_soc"] >= 10.0 - 1e-9
+    assert all(segment["end_soc"] >= 10.0 - 1e-9 for segment in whole_day["segments"])
+    assert not any(segment["kind"] == "self_consumption"
+                   for segment in whole_day["segments"])
 
 
 def _sunny_flat_day(instance, *, solar_charging: bool) -> None:
