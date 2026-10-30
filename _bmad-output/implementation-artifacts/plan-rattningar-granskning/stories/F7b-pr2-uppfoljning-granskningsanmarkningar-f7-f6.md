@@ -67,6 +67,12 @@ deferred: []
 
 ## Review Triage Log
 
+### 2026-10-30 — Uppföljningspass
+- verdicts: 2 findings — high 0, medium 2, low 0, false 0, maybe-false 0
+- findings:
+  - `[medium]` `[patch]` Flera oskrivna småladdningar kunde finansiera en senare urladdning utan skyddande regression — nytt flerslotstest kräver att faktisk SOC och urladdning stannar vid miniminivån.
+  - `[medium]` `[patch]` Om faktisk SOC redan var under minimum kunde omspelning göra nollval till positiv laddning trots noll laddgräns — klipper urladdningsgrenen till högst noll och testar den förbjudna laddningen.
+
 ### 2026-10-29 — Review pass
 - verdicts: 5 findings — high 0, medium 1, low 0, false 4, maybe-false 0
 - findings:
@@ -91,6 +97,10 @@ deferred: []
 ## Auto Run Result
 
 Status: done
+
+**Uppföljning 2026-10-30:** Två mediumfynd patchades i omspelningen: en flerslotsregression skyddar mot urladdning finansierad av oskrivna småladdningar, och omspelningen kan inte längre skapa laddning från ett nollval när SOC ligger under minimum. F6:s två uppskjutna solanmärkningar är täckta av befintliga controller-tester för batteriets laddeffekt och loggning enbart i dygnsplanläge. Uppföljande granskning rekommenderas inte enligt tröskeln för uppföljningspass. Inga fynd sköts upp eller avvisades i detta pass.
+
+**Verifiering av uppföljningen:** Två nya riktade tester godkända; hela Pytest-sviten godkänd; Ruff godkänd; Pyright 0 fel och 0 varningar; `scripts/build_release.py --check` rapporterade `Metadata OK: 0.5.22`.
 
 **Sammanfattning:** Dygnsplanens sol- och SOC-omspelning följer utförbar energi. Standardplanens framtida prisbehov beräknas per segment och begränsningsloggning speglar ändrade beslut. Solantagandet loggas även när dygnsplanen aktiveras efter standardläge.
 

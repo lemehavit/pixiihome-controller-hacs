@@ -483,6 +483,27 @@ def test_tiny_unwritten_charge_without_sun_does_not_increase_soc() -> None:
     assert all(slot.usable_soc_percent == pytest.approx(10.0) for slot in result.slots)
 
 
+def test_unwritten_small_charges_cannot_fund_later_discharge() -> None:
+    result = _plan(
+        _series([0.1] * 10 + [3.0]), lambda _start, _end: (1.0, 0.0),
+        usable_capacity_kwh=1.0, usable_soc_percent=10.0,
+        maximum_charge_kw=0.04, levels=100,
+    )
+    assert result.plan.actions == ()
+    assert all(slot.battery_kw == 0 for slot in result.slots)
+    assert all(slot.usable_soc_percent == pytest.approx(10.0) for slot in result.slots)
+
+
+def test_replay_does_not_invent_charge_below_minimum_soc() -> None:
+    result = _plan(
+        _series([1.0]), lambda _start, _end: (1.0, 0.0),
+        usable_soc_percent=5.0, maximum_charge_kw=0.0,
+    )
+    assert result.plan.actions == ()
+    assert result.slots[0].battery_kw == 0
+    assert result.slots[0].usable_soc_percent == pytest.approx(5.0)
+
+
 def test_automatic_solar_never_uses_more_than_actual_surplus() -> None:
     result = _plan(
         _series([1.0] * 3), lambda _start, _end: (1.0, 1.5),

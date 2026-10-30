@@ -395,7 +395,7 @@ def build_whole_day_plan(
         actual_level = round(kept / step)
         candidate_delta = (
             min(delta, max(0, idx_max - actual_level)) if delta > 0
-            else max(delta, idx_min - actual_level)
+            else min(0, max(delta, idx_min - actual_level))
         )
         # A charge DP left to solar charging stays solar charging: it stops at
         # the solar SOC cap of the actual battery, never becoming a schedule.
