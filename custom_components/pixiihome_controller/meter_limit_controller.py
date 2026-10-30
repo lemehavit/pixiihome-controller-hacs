@@ -302,9 +302,13 @@ class MeterLimitLoadBalancer:
                     error_text = str(error)
                     reason = (
                         error_text
-                        if error_text in {
+                        if isinstance(error, ValueError) and error_text in {
                             "meter_limitation_recovery_conflict",
                             "idle_phase_recovery_conflict",
+                            "idle_phase_recovery_pending",
+                            "native_meter_unavailable",
+                            "meter_limitation_journal_invalid",
+                            "idle_phase_journal_invalid",
                         }
                         else "meter_limitation_restore_failed"
                     )
@@ -328,7 +332,10 @@ class MeterLimitLoadBalancer:
                 restored = getattr(self.runtime, "_meter_limitation_restored", None)
                 if callable(restored) and self.lease is None:
                     restored()
-            startup_read_error = getattr(self, "startup_read_error", None)
+            startup_read_error = (
+                getattr(self, "startup_read_error", None)
+                or getattr(self.idle_support, "startup_read_error", None)
+            )
             if startup_read_error is not None:
                 self.status, self.reason = "recovery_required", startup_read_error
             else:

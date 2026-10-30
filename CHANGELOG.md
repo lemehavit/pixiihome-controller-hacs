@@ -19,7 +19,8 @@
   kvarstår utan sparad avstängning av styrbehörigheten.
 - F3b: Granskningsuppföljning för säker leaseåterställning, korrekt policyloggning
   och kontroll av orsaken i prisoptimeringens loggbok.
-
+- F3c: Separata läsfel för tjänst 120 och fasjournalen, tydliga återställningsorsaker
+  samt säker avlastning och avisering vid journalfel.
 - F2/F2b: Avstängd styrbehörighet släpper mätarbegränsningen även när
   styruppdateringar blockeras, med säker hantering av misslyckade försök.
 - F10: Nedstängning stoppar kommunikationen även om ett tidigare steg misslyckas.
