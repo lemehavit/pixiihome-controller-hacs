@@ -375,6 +375,16 @@ def build_price_plan(
         any(window.start < item.end and item.start < window.end for window in resets)
         for item in candidates
     ]
+    # A partial forecast cannot safely price the separate energy buckets.
+    # Fall back to the historical unforecast plan for the whole horizon.
+    if net_load_kw is not None:
+        for item, is_blocked in zip(candidates, blocked, strict=True):
+            if is_blocked:
+                continue
+            forecast = net_load_kw(item.start, item.end)
+            if forecast is None or not isfinite(forecast):
+                net_load_kw = None
+                break
     segment = [sum(1 for window in resets if window.end <= item.start) for item in candidates]
     refill_price = [_mean_price(series, window.start, window.end) for window in resets]
     window_socs: dict[datetime, float] = {}
@@ -395,12 +405,12 @@ def build_price_plan(
                     acquisition_price = bought_at
             # Energy already stored when a segment starts and discharged before
             # its closing Target SOC window is bought back at that window's
-            # price. Energy charged inside the segment keeps its own price and
-            # is sold first, so a short charge/discharge cycle stays possible.
+            # price. Energy charged inside the segment keeps its own price.
             closing = refill_price[active_segment] if active_segment < len(resets) else None
-            if closing is not None:
-                stored_price = max(acquisition_price, closing)
-                charged_energy = charged_price = 0.0
+            stored_price = (
+                max(acquisition_price, closing) if closing is not None else acquisition_price
+            )
+            charged_energy = charged_price = 0.0
         for window in held:
             if window.start not in window_socs and window.start <= item.start:
                 window_socs[window.start] = energy / usable_capacity_kwh * 100
@@ -445,15 +455,16 @@ def build_price_plan(
             if power < 0.05:
                 continue
             added_energy = power * hours * charge_efficiency
-            if closing is not None:
+            if net_load_kw is None and closing is None:
+                acquisition_price = (energy * acquisition_price + added_energy * price) / (
+                    energy + added_energy
+                )
+                stored_price = acquisition_price
+            else:
                 charged_price = (charged_energy * charged_price + added_energy * price) / (
                     charged_energy + added_energy
                 )
                 charged_energy += added_energy
-            else:
-                acquisition_price = (energy * acquisition_price + added_energy * price) / (
-                    energy + added_energy
-                )
             energy += added_energy
             projected_soc = energy / usable_capacity_kwh * 100
             action = PricePlanAction(
@@ -472,40 +483,121 @@ def build_price_plan(
                 charge_net,
             )
         else:
-            basis = acquisition_price
-            if closing is not None:
-                if charged_energy > 1e-6:
-                    basis, available = charged_price, min(available, charged_energy)
-                else:
-                    basis = stored_price
-            mode, discharge_net = _qualifying_discharge(
-                basis, price,
-                efficiency=round_trip_efficiency_percent / 100,
-                grid_cost=grid_import_cost_sek_per_kwh,
-                cycle_cost=cycle_cost_sek_per_kwh,
-                minimum_profit=minimum_difference_sek_per_kwh,
-                export_allowed=export_allowed,
-                export_minimum_profit=export_minimum_difference_sek_per_kwh,
-            )
+            if net_load_kw is None:
+                # Preserve the historical price basis and action choice when
+                # there is no forecast to constrain charging.
+                basis = acquisition_price
+                eligible = available
+                if closing is not None:
+                    if charged_energy > 1e-6:
+                        basis, eligible = charged_price, min(available, charged_energy)
+                    else:
+                        basis = stored_price
+                mode, discharge_net = _qualifying_discharge(
+                    basis, price,
+                    efficiency=round_trip_efficiency_percent / 100,
+                    grid_cost=grid_import_cost_sek_per_kwh,
+                    cycle_cost=cycle_cost_sek_per_kwh,
+                    minimum_profit=minimum_difference_sek_per_kwh,
+                    export_allowed=export_allowed,
+                    export_minimum_profit=export_minimum_difference_sek_per_kwh,
+                )
+            else:
+                charged_available = min(available, charged_energy)
+                stored_available = max(0.0, available - charged_available)
+                charged_mode, _ = _qualifying_discharge(
+                    charged_price, price,
+                    efficiency=round_trip_efficiency_percent / 100,
+                    grid_cost=grid_import_cost_sek_per_kwh,
+                    cycle_cost=cycle_cost_sek_per_kwh,
+                    minimum_profit=minimum_difference_sek_per_kwh,
+                    export_allowed=export_allowed,
+                    export_minimum_profit=export_minimum_difference_sek_per_kwh,
+                )
+                stored_mode, _ = _qualifying_discharge(
+                    stored_price, price,
+                    efficiency=round_trip_efficiency_percent / 100,
+                    grid_cost=grid_import_cost_sek_per_kwh,
+                    cycle_cost=cycle_cost_sek_per_kwh,
+                    minimum_profit=minimum_difference_sek_per_kwh,
+                    export_allowed=export_allowed,
+                    export_minimum_profit=export_minimum_difference_sek_per_kwh,
+                )
+                modes = (
+                    stored_mode if stored_available > 1e-6 else None,
+                    charged_mode if charged_available > 1e-6 else None,
+                )
+                mode = (PriceDischargeMode.EXPORT
+                        if PriceDischargeMode.EXPORT in modes
+                        else PriceDischargeMode.SELF_CONSUMPTION
+                        if PriceDischargeMode.SELF_CONSUMPTION in modes else None)
+                eligible = (
+                    (charged_available if charged_mode is mode or (
+                        mode is PriceDischargeMode.SELF_CONSUMPTION
+                        and charged_mode is PriceDischargeMode.EXPORT
+                    ) else 0.0)
+                    + (stored_available if stored_mode is mode or (
+                        mode is PriceDischargeMode.SELF_CONSUMPTION
+                        and stored_mode is PriceDischargeMode.EXPORT
+                    ) else 0.0)
+                ) if mode is not None else 0.0
             if (
                 maximum_discharge_kw > 0
-                and available > 1e-6
+                and eligible > 1e-6
                 and price >= future_peak - 1e-9
                 and mode is not None
             ):
-                power = min(maximum_discharge_kw, available * discharge_efficiency / hours)
+                power = min(maximum_discharge_kw, eligible * discharge_efficiency / hours)
                 if power < 0.05:
                     continue
                 delivered = power * hours
                 if mode is PriceDischargeMode.SELF_CONSUMPTION and net_load_kw is not None:
                     demand = net_load_kw(item.start, item.end)
-                    if demand is not None:
+                    if demand is not None and isfinite(demand):
                         if min(power, demand) < 0.05:
                             continue
                         delivered = min(power, demand) * hours
+                if net_load_kw is None:
+                    if closing is not None:
+                        charged_energy = max(0.0, charged_energy - delivered / discharge_efficiency)
+                else:
+                    used = delivered / discharge_efficiency
+                    weighted_basis = 0.0
+                    for basis, bucket in sorted(
+                        ((stored_price, "stored"), (charged_price, "charged")), reverse=True,
+                    ):
+                        bucket_available = (
+                            stored_available if bucket == "stored" else charged_available
+                        )
+                        bucket_mode = stored_mode if bucket == "stored" else charged_mode
+                        if bucket_mode is not mode and not (
+                            mode is PriceDischargeMode.SELF_CONSUMPTION
+                            and bucket_mode is PriceDischargeMode.EXPORT
+                        ):
+                            continue
+                        taken = min(used, bucket_available)
+                        weighted_basis += taken * basis
+                        used -= taken
+                        if bucket == "charged":
+                            charged_energy = max(0.0, charged_energy - taken)
+                    basis = weighted_basis / (delivered / discharge_efficiency)
+                    _, discharge_net = _qualifying_discharge(
+                        basis, price,
+                        efficiency=round_trip_efficiency_percent / 100,
+                        grid_cost=grid_import_cost_sek_per_kwh,
+                        cycle_cost=cycle_cost_sek_per_kwh,
+                        minimum_profit=minimum_difference_sek_per_kwh,
+                        export_allowed=export_allowed,
+                        export_minimum_profit=export_minimum_difference_sek_per_kwh,
+                    )
+                    if mode is PriceDischargeMode.SELF_CONSUMPTION:
+                        discharge_net = (
+                            price + grid_import_cost_sek_per_kwh
+                            - (basis + grid_import_cost_sek_per_kwh)
+                            / (round_trip_efficiency_percent / 100)
+                            - cycle_cost_sek_per_kwh
+                        )
                 energy -= delivered / discharge_efficiency
-                if closing is not None:
-                    charged_energy = max(0.0, charged_energy - delivered / discharge_efficiency)
                 projected_soc = energy / usable_capacity_kwh * 100
                 margin = delivered * discharge_net
                 expected_margin += margin

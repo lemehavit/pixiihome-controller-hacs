@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.22 — 2026-10-29
+
+- F3c: Regressionstester täcker en laddgräns under 0,05 kW och en filtrerad
+  laddning före urladdning; engelska prisplanstexter har rättats.
+- F7b: Dygnsplanens omspelning begränsar automatisk solladdning till verkligt
+  överskott och urladdning till faktisk energi över minsta SOC. Standardplanens
+  prisbedömning följer externa segment. Omspelningen skapar inte laddning från ett nollval under
+  minsta SOC. Jämförelsekostnadens externa påfyllning förtydligas.
+- F4: Ett eget schema som snart ska börja raderas inte medan det fortfarande
+  kan behövas för planens styrning.
+- F7: Dygnsplanens SOC och ekonomi räknas från de åtgärder som faktiskt skrivs.
+- F6 skjuts upp till en separat PR. Standardplaneraren dimensionerar åter
+  laddning efter ledigt batteriutrymme och effektgräns; prognostiserad last
+  begränsar fortfarande faktisk urladdning utan tillåten export.
+- F5: Dygnsplanen räknar bara med solladdning som någon faktiskt utför.
+
 ## 0.5.21 — 2026-10-29
 
 - F2c: Stabil sensororsak vid återställningsfel och tydlig varning när tjänst 120

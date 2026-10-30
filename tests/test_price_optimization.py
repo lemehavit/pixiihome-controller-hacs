@@ -31,6 +31,7 @@ def plan(
     series, *, export_allowed=False, export_delta=1.0, grid_import_cost=0.0,
     initial_soc=50, charge_kw=2, discharge_kw=2,
     minimum_profit=0.5, cycle_cost=0.0, end_before=None, windows=(),
+    net_load_kw=None,
 ):
     return build_price_plan(
         series,
@@ -51,7 +52,313 @@ def plan(
         grid_import_cost_sek_per_kwh=grid_import_cost,
         end_before=end_before,
         external_windows=windows,
+        net_load_kw=net_load_kw,
     )
+
+
+def _charged_kwh(result):
+    return sum(
+        action.power_kw * action.duration_seconds / 3600
+        for action in result.actions if action.direction is PriceDirection.CHARGE
+    )
+
+
+def test_zero_forecast_load_still_charges_to_headroom_when_export_is_off() -> None:
+    result = plan(
+        greenely(.2, .2, 3), initial_soc=10, charge_kw=5, discharge_kw=5,
+        grid_import_cost=.5, net_load_kw=lambda _start, _end: 0.0,
+    )
+    assert _charged_kwh(result) == pytest.approx(8 / .9**.5)
+    assert not any(a.direction is PriceDirection.DISCHARGE for a in result.actions)
+
+def test_charge_uses_headroom_while_discharge_follows_small_net_load() -> None:
+    result = plan(
+        greenely(.2, .2, 3), initial_soc=10, charge_kw=5, discharge_kw=5,
+        grid_import_cost=.5,
+        net_load_kw=lambda start, _end: .1 if start == _hour(2) else 0.0,
+    )
+    assert _charged_kwh(result) == pytest.approx(8 / .9**.5)
+    discharge = [a for a in result.actions if a.direction is PriceDirection.DISCHARGE]
+    assert discharge
+    delivered = sum(a.expected_margin_sek / a.net_profit_sek_per_kwh for a in discharge)
+    assert delivered == pytest.approx(.1)
+
+def test_existing_stored_energy_does_not_cap_headroom_charge() -> None:
+    result = plan(
+        greenely(.2, .2, 3), initial_soc=30, charge_kw=5, discharge_kw=5,
+        grid_import_cost=.5, net_load_kw=lambda _start, _end: 1.0,
+    )
+    assert _charged_kwh(result) == pytest.approx(6 / .9**.5)
+
+def test_negative_net_load_in_peak_does_not_cap_charge() -> None:
+    result = plan(
+        greenely(.2, .2, 3), initial_soc=10, charge_kw=5, discharge_kw=5,
+        grid_import_cost=.5, net_load_kw=lambda _start, _end: -2.0,
+    )
+    assert _charged_kwh(result) == pytest.approx(8 / .9**.5)
+    assert not any(a.direction is PriceDirection.DISCHARGE for a in result.actions)
+
+@pytest.mark.parametrize("forecast", [None, float("nan")])
+def test_unknown_forecast_keeps_headroom_charge_behavior(forecast) -> None:
+    result = plan(
+        greenely(.2, .2, 3), initial_soc=10, charge_kw=5, discharge_kw=5,
+        grid_import_cost=.5, net_load_kw=lambda _start, _end: forecast,
+    )
+    assert _charged_kwh(result) > 5
+
+
+def test_absent_forecast_keeps_headroom_charge_behavior() -> None:
+    result = plan(
+        greenely(.2, .2, 3), initial_soc=10, charge_kw=5, discharge_kw=5,
+        grid_import_cost=.5,
+    )
+    assert _charged_kwh(result) > 5
+
+
+def test_intermediate_load_does_not_cap_headroom_charge() -> None:
+    result = plan(
+        greenely(.2, 2, 3), initial_soc=10, charge_kw=5, discharge_kw=5,
+        net_load_kw=lambda start, _end: 5.0 if start == _hour(1) else 0.0,
+    )
+    assert _charged_kwh(result) == pytest.approx(8 / .9**.5)
+
+def test_export_can_justify_charge_with_zero_household_load() -> None:
+    result = plan(
+        greenely(.2, .2, 3), initial_soc=10, charge_kw=5, discharge_kw=5,
+        grid_import_cost=.5, export_allowed=True, export_delta=.5,
+        net_load_kw=lambda _start, _end: 0.0,
+    )
+    assert _charged_kwh(result) > 0
+    assert any(a.discharge_mode is PriceDischargeMode.EXPORT for a in result.actions)
+
+
+def test_charge_does_not_cross_known_external_reset() -> None:
+    window = ExternalWindow(_hour(2), _hour(3), 10.0)
+    result = plan(
+        greenely(.2, .2, 1, 3), initial_soc=10, charge_kw=5, discharge_kw=5,
+        windows=(window,), net_load_kw=lambda _start, _end: 5.0,
+    )
+    assert not any(a.direction is PriceDirection.CHARGE and a.end <= window.start
+                   for a in result.actions)
+
+def test_pre_reset_charge_uses_headroom_and_discharge_uses_forecast_load() -> None:
+    window = ExternalWindow(_hour(2), _hour(3), 10.0)
+    result = plan(
+        greenely(.2, 3, 1, 9), initial_soc=10, charge_kw=5, discharge_kw=5,
+        windows=(window,),
+        net_load_kw=lambda start, _end: 1.0 if start == _hour(1) else 5.0,
+    )
+    before = [a for a in result.actions
+              if a.direction is PriceDirection.CHARGE and a.end <= window.start]
+    assert len(before) == 1
+    assert before[0].power_kw == pytest.approx(5)
+    assert _delivered_kwh(result, before=window.start) == pytest.approx(1)
+
+def test_forecast_does_not_change_power_limited_charge() -> None:
+    series = greenely(.2, 3)
+    unforecast = plan(series, initial_soc=10, charge_kw=.1, discharge_kw=5)
+    forecast = plan(
+        series, initial_soc=10, charge_kw=.1, discharge_kw=5,
+        net_load_kw=lambda _start, _end: 5.0,
+    )
+    assert [a.power_kw for a in forecast.actions if a.direction is PriceDirection.CHARGE] == [
+        a.power_kw for a in unforecast.actions if a.direction is PriceDirection.CHARGE
+    ]
+
+def test_sub_threshold_headroom_charge_is_filtered() -> None:
+    result = plan(
+        greenely(.2, 3), initial_soc=10, charge_kw=.04, discharge_kw=5,
+        net_load_kw=lambda _start, _end: .01,
+    )
+    assert _charged_kwh(result) == 0
+
+
+def _prices_with_expensive_initial_basis(*prices: float, initial_basis: float = 3.0):
+    return normalize_price_series(
+        {"raw_today": [
+            {"start": _hour(index), "end": _hour(index + 1), "value": price}
+            for index, price in enumerate((initial_basis, *prices), start=-1)
+        ]},
+        "SEK/kWh",
+    )
+
+
+def test_expensive_existing_energy_does_not_crowd_out_cheap_profitable_charge() -> None:
+    result = plan(
+        _prices_with_expensive_initial_basis(.2, .2, 3), initial_soc=50,
+        charge_kw=5, discharge_kw=5,
+        net_load_kw=lambda start, _end: 2.0 if start == _hour(2) else 0.0,
+    )
+    assert _charged_kwh(result) == pytest.approx(4 / .9**.5)
+    assert _delivered_kwh(result) == pytest.approx(2)
+    assert result.expected_margin_sek > 0
+
+
+def test_expensive_energy_before_reset_does_not_crowd_out_cheap_charge() -> None:
+    window = ExternalWindow(_hour(3), _hour(4), 10.0)
+    result = plan(
+        _prices_with_expensive_initial_basis(.2, .2, 3, 3), initial_soc=50,
+        charge_kw=5, discharge_kw=5, windows=(window,),
+        net_load_kw=lambda start, _end: 2.0 if start == _hour(2) else 0.0,
+    )
+    assert _charged_kwh(result) == pytest.approx(4 / .9**.5)
+    assert _delivered_kwh(result, before=window.start) == pytest.approx(2)
+    assert result.expected_margin_sek > 0
+
+
+def _delivered_kwh(result, *, before=None) -> float:
+    return sum(
+        action.expected_margin_sek / action.net_profit_sek_per_kwh
+        for action in result.actions
+        if action.direction is PriceDirection.DISCHARGE
+        and (before is None or action.end <= before)
+    )
+
+
+@pytest.mark.parametrize("soc,peak", [(50, 2.4), (30, 2.0)])
+def test_open_segment_keeps_new_cheap_energy_separate_from_expensive_initial_energy(
+    soc, peak,
+) -> None:
+    result = plan(
+        _prices_with_expensive_initial_basis(.2, .2, peak),
+        initial_soc=soc, charge_kw=5, discharge_kw=5,
+        net_load_kw=lambda start, _end: 2.0 if start == _hour(2) else 0.0,
+    )
+    assert _charged_kwh(result) == pytest.approx((9 - soc / 10) / .9**.5)
+    assert _delivered_kwh(result) == pytest.approx(2)
+    assert result.expected_margin_sek > 0
+
+
+def test_closed_segment_counts_both_initial_and_new_qualifying_energy() -> None:
+    window = ExternalWindow(_hour(3), _hour(4), 10.0)
+    result = plan(
+        _prices_with_expensive_initial_basis(.2, .2, 3, .2, initial_basis=.2),
+        initial_soc=20, charge_kw=5, discharge_kw=5, windows=(window,),
+        net_load_kw=lambda start, _end: 2.0 if start == _hour(2) else 0.0,
+    )
+    assert _charged_kwh(result) == pytest.approx(7 / .9**.5)
+    assert _delivered_kwh(result, before=window.start) == pytest.approx(2)
+
+
+def test_less_flexible_initial_energy_is_used_before_cheap_energy() -> None:
+    result = plan(
+        _prices_with_expensive_initial_basis(.2, 3, 2.5, initial_basis=2),
+        initial_soc=20, charge_kw=5, discharge_kw=5,
+        net_load_kw=lambda start, _end: .9 if start in (_hour(1), _hour(2)) else 0.0,
+    )
+    discharges = [action for action in result.actions
+                  if action.direction is PriceDirection.DISCHARGE]
+    assert len(discharges) == 2
+    assert [action.expected_margin_sek / action.net_profit_sek_per_kwh
+            for action in discharges] == pytest.approx([.9, .9])
+    assert discharges[0].reference_price_sek_per_kwh == pytest.approx(2)
+    assert discharges[1].reference_price_sek_per_kwh == pytest.approx(.2)
+
+
+def test_two_charge_prices_give_energy_weighted_discharge_basis_and_margin() -> None:
+    result = plan(
+        greenely(.2, .3, 3), initial_soc=10, charge_kw=1, discharge_kw=5,
+        net_load_kw=lambda start, _end: 2.0 if start == _hour(2) else 0.0,
+    )
+    discharge = next(action for action in result.actions
+                     if action.direction is PriceDirection.DISCHARGE)
+    assert _charged_kwh(result) == pytest.approx(2)
+    assert discharge.reference_price_sek_per_kwh == pytest.approx(.25)
+    assert discharge.power_kw == pytest.approx(1.8)
+    expected_net = 3 - .25 / .9
+    assert discharge.net_profit_sek_per_kwh == pytest.approx(expected_net)
+    assert discharge.expected_margin_sek == pytest.approx(1.8 * expected_net)
+
+
+def test_forecast_caps_simulated_energy_but_keeps_full_schedule_power() -> None:
+    result = plan(
+        greenely(.2, 3), initial_soc=50, discharge_kw=5,
+        net_load_kw=lambda start, _end: .1 if start == _hour(1) else 0.0,
+    )
+    discharge = next(action for action in result.actions
+                     if action.direction is PriceDirection.DISCHARGE)
+    assert discharge.power_kw == pytest.approx(5)
+    assert discharge.values["discharge_max"] == pytest.approx(5000)
+    assert _delivered_kwh(result) == pytest.approx(.1)
+    charge = next(action for action in result.actions
+                  if action.direction is PriceDirection.CHARGE)
+    assert discharge.projected_usable_soc_percent == pytest.approx(
+        charge.projected_usable_soc_percent - .1 / (.9 ** .5) * 10
+    )
+    assert discharge.expected_margin_sek == pytest.approx(
+        .1 * discharge.net_profit_sek_per_kwh
+    )
+
+
+def test_absent_forecast_preserves_blended_basis_and_action_choice() -> None:
+    result = plan(
+        _prices_with_expensive_initial_basis(.2, .2, 2.4),
+        initial_soc=30, charge_kw=2, discharge_kw=2,
+    )
+    charges = [action for action in result.actions
+               if action.direction is PriceDirection.CHARGE]
+    discharge = next(action for action in result.actions
+                     if action.direction is PriceDirection.DISCHARGE)
+    assert len(charges) == 2
+    assert _charged_kwh(result) == pytest.approx(4)
+    stored_new = 4 * (.9 ** .5)
+    blended_basis = (3 * 3 + stored_new * .2) / (3 + stored_new)
+    assert discharge.reference_price_sek_per_kwh == pytest.approx(blended_basis)
+    assert discharge.power_kw == pytest.approx(2)
+    assert discharge.net_profit_sek_per_kwh == pytest.approx(2.4 - blended_basis / .9)
+
+
+def test_unknown_future_forecast_preserves_blended_basis_and_action_choice() -> None:
+    series = _prices_with_expensive_initial_basis(.2, .2, 2.4)
+    without_forecast = plan(series, initial_soc=30, charge_kw=2, discharge_kw=2)
+    unknown_future = plan(
+        series, initial_soc=30, charge_kw=2, discharge_kw=2,
+        net_load_kw=lambda start, _end: None if start == _hour(2) else 0.0,
+    )
+    assert [action.as_dict() for action in unknown_future.actions] == [
+        action.as_dict() for action in without_forecast.actions
+    ]
+    discharge = next(action for action in unknown_future.actions
+                     if action.direction is PriceDirection.DISCHARGE)
+    stored_new = 4 * (.9 ** .5)
+    assert _charged_kwh(unknown_future) == pytest.approx(4)
+    assert discharge.reference_price_sek_per_kwh == pytest.approx(
+        (3 * 3 + stored_new * .2) / (3 + stored_new)
+    )
+
+
+def test_self_consumption_energy_does_not_crowd_out_profitable_export_charge() -> None:
+    result = plan(
+        _prices_with_expensive_initial_basis(.2, 3, initial_basis=2.2),
+        initial_soc=70, export_allowed=True, export_delta=1.0,
+        charge_kw=5, discharge_kw=5,
+        net_load_kw=lambda _start, _end: 0.0,
+    )
+    assert _charged_kwh(result) > 0
+    assert any(action.discharge_mode is PriceDischargeMode.EXPORT
+               for action in result.actions)
+    assert result.expected_margin_sek > 0
+
+
+def test_stored_export_energy_takes_priority_over_new_self_consumption_energy() -> None:
+    series = _prices_with_expensive_initial_basis(.6, .6, 1.6, initial_basis=.1)
+    def forecast(start, _end):
+        return 2.0 if start == _hour(2) else 0.0
+    result = plan(
+        series, initial_soc=50, charge_kw=5, discharge_kw=5,
+        export_allowed=True, export_delta=1.0, net_load_kw=forecast,
+    )
+    without_new_charge = plan(
+        series, initial_soc=50, charge_kw=0, discharge_kw=5,
+        export_allowed=True, export_delta=1.0, net_load_kw=forecast,
+    )
+    assert _charged_kwh(result) == pytest.approx(4 / .9**.5)
+    discharge = [action for action in result.actions
+                 if action.direction is PriceDirection.DISCHARGE]
+    assert len(discharge) == 1
+    assert discharge[0].discharge_mode is PriceDischargeMode.EXPORT
+    assert discharge[0].power_kw == pytest.approx(4 * (.9 ** .5))
+    assert result.expected_margin_sek >= without_new_charge.expected_margin_sek - 1e-9
 
 
 def test_greenely_source_is_normalized_from_stockholm_to_utc() -> None:

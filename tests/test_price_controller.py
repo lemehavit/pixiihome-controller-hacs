@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -12,12 +13,14 @@ from custom_components.pixiihome_controller.control.models import PlantHealth
 from custom_components.pixiihome_controller.control.policy import AutomationPolicy
 from custom_components.pixiihome_controller.control.price_optimization import (
     CONF_PRICE_OPTIMIZATION,
+    PriceDirection,
     PriceOptimizationConfig,
 )
 from custom_components.pixiihome_controller.control.settings import (
     ControllerState,
     OperationalSettings,
 )
+from custom_components.pixiihome_controller.control.smart_solar import SmartSolarDecision
 from custom_components.pixiihome_controller.price_controller import (
     PRICE_OWNER,
     PriceOptimizationController,
@@ -704,6 +707,358 @@ async def test_whole_day_planner_also_handles_a_held_aggregator_target():
 
 
 @pytest.mark.asyncio
+async def test_whole_day_attributes_follow_filtered_discharge() -> None:
+    instance, mutations = runtime(schedule_writes=False)
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+    instance.hass.states.state.attributes = {
+        "unit_of_measurement": "SEK/kWh",
+        "prices": [
+            {
+                "start": (start + timedelta(hours=index)).isoformat(),
+                "end": (start + timedelta(hours=index + 1)).isoformat(),
+                "price": price,
+            }
+            for index, price in enumerate((1.1, 1.1, 0.8, 0.8))
+        ],
+    }
+    instance.battery = replace(instance.battery, usable_soc=80)
+    instance.energy_forecast = SimpleNamespace(
+        net_load_kw=lambda start, end, high=False: 1.0,
+        net_forecast=lambda start, end, high=False: (1.0, 0.0),
+    )
+    instance.operational_settings = instance.operational_settings.set(
+        "price_whole_day_planner", True
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    attributes = controller.attributes()
+    whole_day = attributes["whole_day_plan"]
+    assert attributes["planner_engine"] == "whole_day"
+    assert whole_day["action_count"] == 0
+    assert whole_day["segments"] == []
+    assert attributes["minimum_projected_usable_soc"] == pytest.approx(80.0)
+    assert attributes["maximum_projected_usable_soc"] == pytest.approx(80.0)
+    assert whole_day["cost_without_battery_sek"] == pytest.approx(3.8)
+    assert whole_day["planned_cost_sek"] == pytest.approx(3.8)
+    assert whole_day["expected_margin_sek"] == pytest.approx(0.0)
+    assert mutations.created == []
+
+
+@pytest.mark.asyncio
+async def test_controller_publishes_safe_soc_after_filtered_charge(monkeypatch) -> None:
+    from custom_components.pixiihome_controller.control import whole_day_planner
+
+    instance, _mutations = runtime(schedule_writes=False)
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+    instance.hass.states.state.attributes = {
+        "unit_of_measurement": "SEK/kWh",
+        "prices": [
+            {
+                "start": (start + timedelta(hours=index)).isoformat(),
+                "end": (start + timedelta(hours=index + 1)).isoformat(),
+                "price": price,
+            }
+            for index, price in enumerate((0.2, 0.2, 3.0, 3.0, 3.0, 3.0))
+        ],
+    }
+    instance.battery = replace(instance.battery, usable_soc=10)
+    instance.energy_forecast = SimpleNamespace(
+        net_load_kw=lambda _start, _end, high=False: 1.5,
+        net_forecast=lambda _start, _end, high=False: (1.5, 0.0),
+    )
+    instance.operational_settings = instance.operational_settings.set(
+        "price_whole_day_planner", True
+    )
+    baseline = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    await baseline.tick()
+    assert any(segment["kind"] == "grid_charge"
+               for segment in baseline.attributes()["whole_day_plan"]["segments"])
+    assert any(segment["kind"] == "self_consumption"
+               for segment in baseline.attributes()["whole_day_plan"]["segments"])
+
+    original = whole_day_planner._meets_minimum
+    filtered_charges = []
+
+    def filter_charge(action, minimum, export_minimum):
+        if action.direction is PriceDirection.CHARGE:
+            filtered_charges.append(action)
+            return False
+        return original(action, minimum, export_minimum)
+
+    monkeypatch.setattr(whole_day_planner, "_meets_minimum", filter_charge)
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    await controller.tick()
+    attributes = controller.attributes()
+    whole_day = attributes["whole_day_plan"]
+    assert filtered_charges
+    assert attributes["planner_engine"] == "whole_day"
+    assert attributes["minimum_projected_usable_soc"] >= 10.0 - 1e-9
+    assert all(segment["end_soc"] >= 10.0 - 1e-9 for segment in whole_day["segments"])
+    assert not any(segment["kind"] == "self_consumption"
+                   for segment in whole_day["segments"])
+
+
+def _sunny_flat_day(instance, *, solar_charging: bool) -> None:
+    """Flat prices, 3 kW sun and no load: only solar charging may fill the battery."""
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+    instance.hass.states.state.attributes = {
+        "unit_of_measurement": "SEK/kWh",
+        "prices": [
+            {
+                "start": (start + timedelta(hours=index)).isoformat(),
+                "end": (start + timedelta(hours=index + 1)).isoformat(),
+                "price": 1.0,
+            }
+            for index in range(4)
+        ],
+    }
+    instance.energy_forecast = SimpleNamespace(
+        net_load_kw=lambda start, end, high=False: -3.0,
+        net_forecast=lambda start, end, high=False: (0.0, 3.0),
+    )
+    instance.controller_state = ControllerState(
+        automatic_price_optimization_enabled=True,
+        automatic_solar_charging_enabled=solar_charging,
+    )
+    settings = instance.operational_settings.set("price_whole_day_planner", True)
+    settings = settings.set("price_grid_import_cost_sek_per_kwh", 0.5)
+    instance.operational_settings = settings.set("solar_max_soc_percent", 80.0)
+
+
+@pytest.mark.asyncio
+async def test_whole_day_plan_counts_no_solar_charging_when_it_is_switched_off(
+    monkeypatch,
+) -> None:
+    instance, mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=False)
+    import custom_components.pixiihome_controller.price_controller as module
+
+    logged: list[str] = []
+    monkeypatch.setattr(
+        module, "log_activity", lambda _runtime, _key, message, *_args: logged.append(message)
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    attributes = controller.attributes()
+    assert attributes["planner_engine"] == "whole_day"
+    assert attributes["whole_day_plan"]["segments"] == []
+    assert attributes["whole_day_plan"]["action_count"] == 0
+    assert attributes["minimum_projected_usable_soc"] == pytest.approx(50.0)
+    assert attributes["maximum_projected_usable_soc"] == pytest.approx(50.0)
+    assert "Whole-day plan counts on solar charging not at all" in logged
+    assert mutations.created == []
+
+
+@pytest.mark.asyncio
+async def test_whole_day_plan_counts_no_solar_charging_while_adaptive_peak_shaving_is_on(
+    monkeypatch,
+) -> None:
+    instance, mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=True)
+    # The runtime lets peak shaving be switched on while solar charging is on.
+    instance.controller_state = replace(
+        instance.controller_state, adaptive_peak_shaving_enabled=True
+    )
+    import custom_components.pixiihome_controller.price_controller as module
+
+    logged: list[str] = []
+    monkeypatch.setattr(
+        module, "log_activity", lambda _runtime, _key, message, *_args: logged.append(message)
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    attributes = controller.attributes()
+    assert attributes["planner_engine"] == "whole_day"
+    assert attributes["whole_day_plan"]["segments"] == []
+    assert attributes["maximum_projected_usable_soc"] == pytest.approx(50.0)
+    assert "Whole-day plan counts on solar charging not at all" in logged
+    assert mutations.created == []
+
+
+@pytest.mark.parametrize("hold", ["calibration", "production_control"])
+def test_solar_limit_is_off_while_the_solar_controller_is_held(hold: str) -> None:
+    # The price controller itself stops on these holds, so no tick builds a plan;
+    # the limit still mirrors the solar controller for any caller.
+    instance, _mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=True)
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    assert controller._solar_charging(instance._automation_policy()).enabled is True
+    if hold == "calibration":
+        instance.battery_calibration_active = lambda: True
+    else:
+        instance.production_control_enabled = lambda: False
+
+    assert controller._solar_charging(instance._automation_policy()).enabled is False
+
+
+@pytest.mark.asyncio
+async def test_whole_day_plan_counts_no_solar_charging_below_the_start_threshold() -> None:
+    instance, mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=True)
+    # 0.5 kW surplus, below the default 1.0 kW start threshold.
+    instance.energy_forecast = SimpleNamespace(
+        net_load_kw=lambda start, end, high=False: -0.5,
+        net_forecast=lambda start, end, high=False: (0.0, 0.5),
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    attributes = controller.attributes()
+    assert attributes["planner_engine"] == "whole_day"
+    assert attributes["whole_day_plan"]["segments"] == []
+    assert attributes["maximum_projected_usable_soc"] == pytest.approx(50.0)
+    assert mutations.created == []
+
+
+@pytest.mark.asyncio
+async def test_whole_day_solar_segment_shows_automatic_solar_charging(monkeypatch) -> None:
+    instance, mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=True)
+    import custom_components.pixiihome_controller.price_controller as module
+
+    logged: list[str] = []
+    monkeypatch.setattr(
+        module, "log_activity", lambda _runtime, _key, message, *_args: logged.append(message)
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+    await controller.tick()
+
+    attributes = controller.attributes()
+    segments = attributes["whole_day_plan"]["segments"]
+    assert attributes["planner_engine"] == "whole_day"
+    assert attributes["maximum_projected_usable_soc"] == pytest.approx(80.0)
+    assert segments and all(
+        segment["kind"] == "solar"
+        and segment["performed_by"] == "automatic_solar_charging"
+        for segment in segments
+    )
+    assert segments[-1]["end_soc"] == pytest.approx(80.0)
+    # Logged once, when the limit was first set, not on every pass.
+    assert logged.count("Whole-day plan counts on solar charging up to its limits") == 1
+    assert mutations.created == []
+
+
+@pytest.mark.asyncio
+async def test_whole_day_solar_uses_lower_battery_charge_limit() -> None:
+    instance, mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=True)
+    instance.battery = replace(instance.battery, charge_power_limit_w=1_000)
+    instance.operational_settings = instance.operational_settings.set(
+        "solar_max_charge_power_kw", 5.0
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert controller.planner_engine == "whole_day"
+    assert controller.solar_charging is not None
+    assert controller.solar_charging.maximum_kw == pytest.approx(1.0)
+    assert controller.whole_day is not None
+    assert any(slot.battery_kw > 0 for slot in controller.whole_day.slots)
+    assert all(slot.battery_kw <= 1.0 + 1e-9 for slot in controller.whole_day.slots)
+    assert mutations.created == []
+
+
+@pytest.mark.asyncio
+async def test_standard_mode_does_not_log_whole_day_solar_assumption(monkeypatch) -> None:
+    import custom_components.pixiihome_controller.price_controller as module
+
+    instance, mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=True)
+    instance.operational_settings = instance.operational_settings.set(
+        "price_whole_day_planner", False
+    )
+    logged: list[str] = []
+    monkeypatch.setattr(
+        module, "log_activity", lambda _runtime, _key, message, *_args: logged.append(message)
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert controller.planner_engine == "standard"
+    assert not any(message.startswith("Whole-day plan counts on solar charging")
+                   for message in logged)
+    assert mutations.created == []
+
+
+@pytest.mark.asyncio
+async def test_enabling_whole_day_logs_existing_solar_assumption(monkeypatch) -> None:
+    import custom_components.pixiihome_controller.price_controller as module
+
+    instance, mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=True)
+    instance.operational_settings = instance.operational_settings.set(
+        "price_whole_day_planner", False
+    )
+    logged: list[str] = []
+    monkeypatch.setattr(
+        module, "log_activity", lambda _runtime, _key, message, *_args: logged.append(message)
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+    instance.operational_settings = instance.operational_settings.set(
+        "price_whole_day_planner", True
+    )
+    await controller.tick()
+
+    assert controller.planner_engine == "whole_day"
+    assert logged.count("Whole-day plan counts on solar charging up to its limits") == 1
+    assert mutations.created == []
+
+
+@pytest.mark.asyncio
+async def test_whole_day_plan_follows_smart_solar_deferral() -> None:
+    instance, mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=True)
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+    instance.hass.states.state.attributes["prices"] = [
+        {
+            "start": (start + timedelta(hours=index)).isoformat(),
+            "end": (start + timedelta(hours=index + 1)).isoformat(),
+            "price": price,
+        }
+        for index, price in enumerate((1.5, 1.5, 1.1, 1.1))
+    ]
+    # 1 kW solar charging: the two cheap hours alone cannot reach the 80 % cap.
+    # No losses, so whole energy steps match the 1 kW limit exactly.
+    settings = instance.operational_settings.set("solar_max_charge_power_kw", 1.0)
+    settings = settings.set("price_round_trip_efficiency_percent", 100.0)
+    # A minimum profit no written charge reaches here: only the sun charges.
+    instance.operational_settings = settings.set("price_min_difference_sek_per_kwh", 1.0)
+    # Charging later at 1.0 plus the 0.2 minimum advantage: export at 1.2 or more.
+    instance.solar_charging_controller = SimpleNamespace(
+        _smart_deferring=True,
+        smart_decision=SmartSolarDecision(
+            True, "export_now_charge_later", charge_price=1.0,
+            deadline=start + timedelta(hours=4),
+        ),
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert controller.whole_day is not None
+    slots = controller.whole_day.slots
+    assert [slot.performed_by for slot in slots[2:]] == ["automatic_solar_charging"] * 2
+    assert all(slot.battery_kw == pytest.approx(0.0) for slot in slots[:2])
+    segments = controller.attributes()["whole_day_plan"]["segments"]
+    assert [segment["performed_by"] for segment in segments] == ["automatic_solar_charging"]
+    assert segments[0]["start"] == slots[2].start.isoformat()
+    assert mutations.created == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("adjust", [True, False])
 async def test_aggregator_target_in_the_best_hour_is_replaced_only_when_allowed(adjust):
     instance, mutations = runtime()
@@ -1219,3 +1574,323 @@ async def test_planning_pass_never_sends_a_passing_ready_to_listeners(monkeypatc
 
     assert seen
     assert "ready" not in seen
+
+
+# CAP-F4: an own schedule about to start is binding, not deleted.
+
+
+def _binding_runtime(monkeypatch):
+    """Runtime whose creates become OWNED records, with a simulated clock."""
+    from custom_components.pixiihome_controller.scheduler.ownership import (
+        OwnershipLifecycle,
+        SchedulerOwnershipRecord,
+    )
+
+    clock = _Clock(monkeypatch)
+    instance, mutations = runtime()
+    events: list[dict] = []
+    instance.hass.bus = SimpleNamespace(
+        async_fire=lambda event, data, context=None: events.append(data)
+    )
+    ids = iter(range(1000000000500, 1000000000600))
+
+    async def create(request):
+        mutations.created.append(request)
+        m_id = next(ids)
+        instance.scheduler_ownership.records[m_id] = SchedulerOwnershipRecord(
+            "entry", "gateway", m_id, request.service,
+            {"starttime": request.starttime.astimezone(UTC).isoformat(),
+             "duration": request.duration_seconds, "values": dict(request.values)},
+            lifecycle=OwnershipLifecycle.OWNED, owner=PRICE_OWNER,
+        )
+        return SimpleNamespace(status=SchedulerTransactionStatus.SUCCESS, reason="")
+
+    async def delete(m_id):
+        mutations.deleted.append(m_id)
+        instance.scheduler_ownership.records.pop(m_id, None)
+        return SimpleNamespace(status=SchedulerTransactionStatus.SUCCESS, reason="")
+
+    mutations.create = create
+    mutations.delete = delete
+    charge_start = datetime.fromisoformat(
+        instance.hass.states.state.attributes["prices"][0]["start"]
+    )
+    return clock, instance, mutations, events, charge_start
+
+
+def test_standard_plan_charges_with_zero_forecast_without_f6_log_or_gateway_calls(monkeypatch):
+    from custom_components.pixiihome_controller import price_controller as module
+    from custom_components.pixiihome_controller.control.price_optimization import (
+        PriceDirection,
+        normalize_price_series,
+    )
+
+    _, instance, mutations, _, _ = _binding_runtime(monkeypatch)
+    instance.energy_forecast = SimpleNamespace(
+        net_load_kw=lambda _start, _end, high=False: 0.0,
+        net_forecast=lambda _start, _end, high=False: (0.0, 0.0),
+    )
+    logged = []
+    monkeypatch.setattr(module, "log_activity", lambda *_args: logged.append(_args[2:]))
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    series = normalize_price_series(instance.hass.states.state.attributes, "SEK/kWh")
+
+    result = controller._build_plan(series, controller._validated_limits())
+    controller._build_plan(series, controller._validated_limits())
+
+    assert any(a.direction is PriceDirection.CHARGE for a in result.actions)
+    assert not any("forecast profitable use" in message for message, _reason in logged)
+    assert mutations.created == []
+    assert mutations.deleted == []
+
+
+def _owned(m_id: int, service: str, start: datetime, values: dict):
+    from custom_components.pixiihome_controller.scheduler.ownership import (
+        OwnershipLifecycle,
+        SchedulerOwnershipRecord,
+    )
+
+    return SchedulerOwnershipRecord(
+        "entry", "gateway", m_id, service,
+        {"starttime": start.isoformat(), "duration": 3600, "values": values},
+        lifecycle=OwnershipLifecycle.OWNED, owner=PRICE_OWNER,
+    )
+
+
+def _charge_id(instance, start):
+    from custom_components.pixiihome_controller.price_controller import _record_start
+
+    return next(
+        m_id for m_id, record in instance.scheduler_ownership.records.items()
+        if record.service == "demandresponse" and _record_start(record) == start
+    )
+
+
+def _flatten_prices(instance) -> None:
+    for item in instance.hass.states.state.attributes["prices"]:
+        item["price"] = 1.0
+
+
+def _kept(events: list[dict]) -> list[str]:
+    return [m for m in _messages(events) if m.startswith("Kept ")]
+
+
+@pytest.mark.asyncio
+async def test_own_charge_just_before_start_is_kept_and_planned_around(monkeypatch):
+    clock, instance, mutations, _, start = _binding_runtime(monkeypatch)
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    await controller.tick()
+    charge = _charge_id(instance, start)
+    created = len(mutations.created)
+
+    clock.now = start - timedelta(minutes=3)
+    await controller.tick()
+
+    assert charge not in mutations.deleted
+    assert charge in instance.scheduler_ownership.records
+    window_end = start + timedelta(hours=1)
+    assert controller.plan is not None and controller.plan.ready
+    assert all(a.end <= start or a.start >= window_end for a in controller.plan.actions)
+    assert all(
+        r.starttime >= window_end
+        or r.starttime + timedelta(seconds=r.duration_seconds) <= start
+        for r in mutations.created[created:]
+    )
+
+
+@pytest.mark.asyncio
+async def test_unprofitable_charge_just_before_start_is_kept_and_logged_once(monkeypatch):
+    clock, instance, mutations, events, start = _binding_runtime(monkeypatch)
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    await controller.tick()
+    charge = _charge_id(instance, start)
+
+    clock.now = start - timedelta(minutes=3)
+    _flatten_prices(instance)
+    await controller.tick()
+    clock.advance(1)
+    await controller.tick()
+
+    assert charge not in mutations.deleted
+    assert charge in instance.scheduler_ownership.records
+    assert len(_kept(events)) == 1
+
+
+@pytest.mark.asyncio
+async def test_unneeded_charge_long_before_start_is_still_removed(monkeypatch):
+    clock, instance, mutations, events, start = _binding_runtime(monkeypatch)
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    await controller.tick()
+    charge = _charge_id(instance, start)
+
+    clock.now = start - timedelta(minutes=30)
+    _flatten_prices(instance)
+    await controller.tick()
+
+    assert charge in mutations.deleted
+    assert _kept(events) == []
+
+
+@pytest.mark.asyncio
+async def test_authority_off_just_before_start_removes_the_binding_charge(monkeypatch):
+    clock, instance, mutations, _, start = _binding_runtime(monkeypatch)
+
+    async def stop_owned_price(m_id):
+        return SimpleNamespace(status=SchedulerTransactionStatus.OUTPUT_STOPPED, reason="")
+
+    mutations.stop_owned_price = stop_owned_price
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    await controller.tick()
+    charge = _charge_id(instance, start)
+    clock.now = start - timedelta(minutes=3)
+    await controller.tick()
+    assert charge not in mutations.deleted
+
+    problems = await controller.release_for_authority_off()
+
+    assert problems == []
+    assert charge in mutations.deleted
+
+
+@pytest.mark.asyncio
+async def test_binding_window_carries_its_energy_into_the_plan(monkeypatch):
+    from custom_components.pixiihome_controller.control.price_optimization import (
+        PriceDirection,
+        normalize_price_series,
+    )
+
+    clock, instance, _, _, start = _binding_runtime(monkeypatch)
+    clock.now = start - timedelta(minutes=3)
+    instance.scheduler_ownership.records[1000000000700] = _owned(
+        1000000000700, "demandresponse", start, {"pacref": 4000.0}
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    series = normalize_price_series(instance.hass.states.state.attributes, "SEK/kWh")
+    limits = controller._validated_limits()
+
+    plan = controller._build_plan(series, limits)
+    windows = controller._binding_windows(
+        {"now": clock.now, "minimum_lead_minutes": 5, "usable_capacity_kwh": 10.0,
+         "minimum_soc_percent": 10.0, "maximum_soc_percent": 90.0,
+         "usable_soc_percent": 50.0, "maximum_charge_kw": 10.0,
+         "maximum_discharge_kw": 10.0},
+        limits, None,
+    )
+
+    assert controller._binding_ids == {1000000000700}
+    assert len(windows) == 1
+    # 50 % + 4 kW * 1 h * sqrt(0.9) of 10 kWh.
+    assert windows[0].target_usable_soc_percent == pytest.approx(50 + 4 * 0.9**0.5 * 10)
+    assert plan.ready
+    assert all(a.start >= start + timedelta(hours=1) for a in plan.actions)
+    discharge = next(a for a in plan.actions if a.direction is PriceDirection.DISCHARGE)
+    assert discharge.start == start + timedelta(hours=2)
+    # Without the binding window the plan differs (it would charge on its own).
+    controller.runtime.scheduler_ownership.records.clear()
+    assert controller._build_plan(series, limits).fingerprint != plan.fingerprint
+
+
+def test_binding_window_targets_are_chained_and_clamped(monkeypatch):
+    clock, instance, _, _, start = _binding_runtime(monkeypatch)
+    clock.now = start - timedelta(minutes=3)
+    records = instance.scheduler_ownership.records
+    records[1] = _owned(1, "demandresponse", start, {"pacref": 10000.0})
+    records[2] = _owned(2, "peakshaving", start + timedelta(minutes=2), {"discharge_max": 9e3})
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    limits = controller._validated_limits()
+    eta = 0.9**0.5
+    arguments = {"now": clock.now, "minimum_lead_minutes": 5, "usable_capacity_kwh": 10.0,
+                 "minimum_soc_percent": 10.0, "maximum_soc_percent": 90.0,
+                 "usable_soc_percent": 50.0, "maximum_charge_kw": 10.0,
+                 "maximum_discharge_kw": 10.0}
+
+    charge, discharge = controller._binding_windows(arguments, limits, lambda s, e: 2.0)
+
+    assert charge.target_usable_soc_percent == pytest.approx(90.0)
+    # Self-consumption delivers at most the forecast 2 kW for one hour.
+    assert discharge.target_usable_soc_percent == pytest.approx(90 - 2 / eta * 10)
+    charge, discharge = controller._binding_windows(arguments, limits, None)
+    assert discharge.target_usable_soc_percent == pytest.approx(10.0)
+
+    # Stored power above what the battery and limits allow now is capped.
+    capped = {**arguments, "maximum_charge_kw": 2.0, "maximum_discharge_kw": 3.0}
+    charge, discharge = controller._binding_windows(capped, limits, None)
+    assert charge.target_usable_soc_percent == pytest.approx(50 + 2 * eta * 10)
+    assert discharge.target_usable_soc_percent == pytest.approx(50 + 2 * eta * 10 - 3 / eta * 10)
+
+    # An own export discharge (negative pacref) lowers the level, capped and floored.
+    records[2] = _owned(2, "demandresponse", start + timedelta(minutes=2), {"pacref": -9000.0})
+    charge, export = controller._binding_windows(capped, limits, None)
+    assert export.target_usable_soc_percent == pytest.approx(50 + 2 * eta * 10 - 3 / eta * 10)
+    charge, export = controller._binding_windows(arguments, limits, None)
+    assert export.target_usable_soc_percent == pytest.approx(10.0)
+
+
+@pytest.mark.asyncio
+async def test_binding_schedule_with_unknown_power_ends_the_plan_at_its_start(monkeypatch):
+    from custom_components.pixiihome_controller.control.price_optimization import (
+        normalize_price_series,
+    )
+
+    clock, instance, mutations, _, start = _binding_runtime(monkeypatch)
+    clock.now = start - timedelta(minutes=3)
+    instance.scheduler_ownership.records[1000000000701] = _owned(
+        1000000000701, "demandresponse", start, {"pacref": "x"}
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    series = normalize_price_series(instance.hass.states.state.attributes, "SEK/kWh")
+
+    plan = controller._build_plan(series, controller._validated_limits())
+
+    assert plan.actions == ()
+    assert not plan.ready
+    await controller.tick()
+    assert mutations.deleted == []
+    assert mutations.created == []
+
+
+@pytest.mark.asyncio
+async def test_whole_day_planner_keeps_own_charge_just_before_start(monkeypatch):
+    clock, instance, mutations, _, start = _binding_runtime(monkeypatch)
+    instance.energy_forecast = SimpleNamespace(
+        net_load_kw=lambda start, end, high=False: 1.0,
+        net_forecast=lambda start, end, high=False: (1.0, 0.0),
+    )
+    instance.operational_settings = instance.operational_settings.set(
+        "price_whole_day_planner", True
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    await controller.tick()
+    assert controller.planner_engine == "whole_day"
+    charge = _charge_id(instance, start)
+    created = len(mutations.created)
+
+    clock.now = start - timedelta(minutes=3)
+    await controller.tick()
+
+    assert controller.planner_engine == "whole_day"
+    assert charge not in mutations.deleted
+    assert charge in instance.scheduler_ownership.records
+    window_end = start + timedelta(hours=1)
+    assert controller.plan is not None and controller.plan.ready
+    assert all(a.end <= start or a.start >= window_end for a in controller.plan.actions)
+    assert all(
+        r.starttime >= window_end
+        or r.starttime + timedelta(seconds=r.duration_seconds) <= start
+        for r in mutations.created[created:]
+    )
+
+
+@pytest.mark.asyncio
+async def test_switch_off_just_before_start_removes_the_binding_charge(monkeypatch):
+    clock, instance, mutations, _, start = _binding_runtime(monkeypatch)
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    await controller.tick()
+    charge = _charge_id(instance, start)
+    clock.now = start - timedelta(minutes=3)
+    await controller.tick()
+    assert charge not in mutations.deleted
+
+    await controller.disable()
+
+    assert charge in mutations.deleted

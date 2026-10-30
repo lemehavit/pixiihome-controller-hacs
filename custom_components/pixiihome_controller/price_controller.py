@@ -8,12 +8,12 @@ from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from math import ceil, isfinite
+from math import ceil, isfinite, sqrt
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers.event import async_track_state_change_event
 
-from .activity import log_activity
+from .activity import clock, log_activity
 from .activity import span as time_span
 from .control.price_optimization import (
     CONF_PRICE_OPTIMIZATION,
@@ -27,7 +27,7 @@ from .control.price_optimization import (
     merge_adjacent_actions,
     normalize_price_series,
 )
-from .control.whole_day_planner import WholeDayResult, build_whole_day_plan
+from .control.whole_day_planner import SolarCharging, WholeDayResult, build_whole_day_plan
 from .price_guard import PriceSocGuard
 from .protocol.scheduler_readback import parse_scheduler_starttime
 from .reasons import reason_text
@@ -118,12 +118,20 @@ class PriceOptimizationController:
         self.standard_plan_margin_sek: float | None = None
         self.planner_engine = "standard"
         self._logged_plan: tuple[object, ...] | None = None
+        # The solar charging the whole-day plan last counted on (logged on change).
+        self.solar_charging: SolarCharging | None = None
+        self._solar_charging_logged = False
         self.problem_since: datetime | None = None
         self.problem_notified = False
         # True while one planning pass runs. A passing non-problem status
         # inside the pass must not restart the problem timer; the status the
         # pass ends with decides.
         self._in_tick = False
+        # Own verified schedules that start within the minimum lead time. The
+        # planners cannot plan them again, so they are kept as fixed windows.
+        self._binding_ids: frozenset[int] = frozenset()
+        # Binding schedules already logged as kept (logged once per id).
+        self._kept_logged: set[int] = set()
 
     @property
     def config(self) -> PriceOptimizationConfig:
@@ -270,6 +278,8 @@ class PriceOptimizationController:
                 "ready": whole_day.plan.ready,
                 "blockers": list(whole_day.plan.blockers),
                 "expected_margin_sek": round(whole_day.plan.expected_margin_sek, 2),
+                # Compatibility name: the baseline excludes our price actions
+                # but includes refills from fixed external SOC targets.
                 "cost_without_battery_sek": round(whole_day.baseline_cost_sek, 2),
                 "planned_cost_sek": round(whole_day.planned_cost_sek, 2),
                 "action_count": len(merge_adjacent_actions(whole_day.plan.actions)),
@@ -941,25 +951,31 @@ class PriceOptimizationController:
             grid_import_cost_sek_per_kwh=limits["grid_import_cost"],
             end_before=end_before,
         )
+        net_load_kw = (
+            None if forecast is None
+            else lambda start, end: forecast.net_load_kw(start, end, high=high)
+        )
+        # Own schedules about to start are fixed: plan around them and count
+        # on their energy instead of removing them just before they run.
+        windows = (*windows, *self._binding_windows(arguments, limits, net_load_kw))
         standard = build_price_plan(
             series,
             **arguments,
             external_windows=windows,
-            net_load_kw=(
-                None if forecast is None
-                else lambda start, end: forecast.net_load_kw(start, end, high=high)
-            ),
+            net_load_kw=net_load_kw,
         )
         self.standard_plan_margin_sek = standard.expected_margin_sek
         plan = standard
         self.whole_day = None
         if forecast is not None:
+            solar_charging = self._solar_charging(policy)
             try:
                 self.whole_day = build_whole_day_plan(
                     series,
                     **arguments,
                     external_windows=windows,
                     forecast=lambda start, end: forecast.net_forecast(start, end, high=high),
+                    solar_charging=solar_charging,
                 )
             except ValueError:
                 self.whole_day = None
@@ -978,6 +994,162 @@ class PriceOptimizationController:
         return replace(
             plan, actions=merge_adjacent_actions(plan.actions, policy.max_duration_seconds)
         )
+
+    def _solar_charging(self, policy: Any) -> SolarCharging:
+        """The solar charging that runs without a schedule, as the solar controller does it."""
+        settings = self.runtime.operational_settings
+        battery = self.runtime.battery
+        state = self.runtime.controller_state
+        switch_on = bool(state.automatic_solar_charging_enabled)
+        authorized = (
+            bool(policy.enabled)
+            and "automatic" in policy.allowed_operation_classes
+            and policy.max_duration_seconds > 0
+        )
+        # The same run-time holds that stop the solar controller (solar_controller.py).
+        calibrating = getattr(self.runtime, "battery_calibration_active", None)
+        hold: str | None = None
+        if calibrating is not None and calibrating():
+            hold = "battery calibration is running, so the solar controller waits"
+        elif state.adaptive_peak_shaving_enabled:
+            hold = "adaptive peak shaving is on, which blocks automatic solar charging"
+        elif not self.runtime.production_control_enabled():
+            hold = "production control is disabled, so the solar controller is blocked"
+        charge_limit_kw = (
+            max(0.0, battery.charge_power_limit_w / 1000)
+            if battery.charge_power_limit_w is not None else 0.0
+        )
+        defer_from: float | None = None
+        defer_until: datetime | None = None
+        solar = getattr(self.runtime, "solar_charging_controller", None)
+        decision = getattr(solar, "smart_decision", None)
+        if (
+            bool(getattr(solar, "_smart_deferring", False))
+            and decision is not None
+            and decision.defer
+            and decision.charge_price is not None
+            and decision.deadline is not None
+        ):
+            defer_from = decision.charge_price + float(
+                settings.get("solar_smart_min_advantage_sek_per_kwh")
+            )
+            defer_until = decision.deadline
+        limit = SolarCharging(
+            enabled=switch_on and authorized and hold is None,
+            maximum_kw=min(
+                float(settings.get("solar_max_charge_power_kw")),
+                charge_limit_kw,
+                float(policy.max_power_kw),
+            ),
+            maximum_soc_percent=min(
+                float(settings.get("solar_max_soc_percent")), float(policy.soc_max_percent)
+            ),
+            defer_from_price=defer_from,
+            defer_until=defer_until,
+            minimum_surplus_kw=float(settings.get("solar_export_start_threshold_kw")),
+        )
+        whole_day_enabled = bool(settings.get("price_whole_day_planner"))
+        if not whole_day_enabled:
+            self._solar_charging_logged = False
+        if limit != self.solar_charging or (whole_day_enabled and not self._solar_charging_logged):
+            if not switch_on:
+                why = "automatic solar charging is switched off, so the surplus is exported"
+            elif not authorized:
+                why = "the automation policy does not allow automatic control"
+            elif hold is not None:
+                why = hold
+            elif defer_until is not None:
+                why = (
+                    "smart solar charging exports now; no solar charging is counted before "
+                    f"{clock(defer_until)} in intervals priced at {defer_from or 0:.2f} "
+                    "kr/kWh or more"
+                )
+            else:
+                why = (
+                    f"automatic solar charging charges up to {limit.maximum_kw:.1f} kW "
+                    f"and {limit.maximum_soc_percent:.0f} % usable SOC, from a surplus "
+                    f"of {limit.minimum_surplus_kw:.1f} kW"
+                )
+            if whole_day_enabled:
+                log_activity(
+                    self.runtime, PRICE_STATUS,
+                    "Whole-day plan counts on solar charging "
+                    + ("up to its limits" if limit.enabled else "not at all"),
+                    f"Why: {why}. Charging beyond this needs a written price schedule "
+                    "that earns the minimum profit.",
+                )
+                self._solar_charging_logged = True
+            self.solar_charging = limit
+        return limit
+
+    def _binding_windows(
+        self,
+        arguments: Mapping[str, Any],
+        limits: Mapping[str, float],
+        net_load_kw: Callable[[datetime, datetime], float | None] | None,
+    ) -> tuple[ExternalWindow, ...]:
+        """Fixed windows for own verified schedules starting within the lead time.
+
+        Their expected resulting usable SOC is chained from the current SOC and
+        each schedule's own energy. An unreadable power gives a window with
+        unknown energy, so planning ends at its start. The ids are kept in
+        ``self._binding_ids`` so the same schedules are never removed.
+        """
+        now: datetime = arguments["now"]
+        lead = now + timedelta(minutes=int(arguments["minimum_lead_minutes"]))
+        capacity = float(arguments["usable_capacity_kwh"])
+        minimum = float(arguments["minimum_soc_percent"])
+        maximum = float(arguments["maximum_soc_percent"])
+        efficiency = sqrt(limits["efficiency"] / 100)
+        # A schedule cannot move more power than the battery and limits allow now.
+        charge_cap = float(arguments["maximum_charge_kw"])
+        discharge_cap = float(arguments["maximum_discharge_kw"])
+        binding: list[tuple[datetime, int, SchedulerOwnershipRecord]] = []
+        for record in self._price_records():
+            start = _record_start(record)
+            duration = record.intended_state.get("duration")
+            if (
+                start is None or type(duration) is not int or duration <= 0
+                or not now < start <= lead
+            ):
+                continue
+            binding.append((start, duration, record))
+        binding.sort(key=lambda item: (item[0], item[2].m_id))
+        self._binding_ids = frozenset(record.m_id for _, _, record in binding)
+        soc: float | None = float(arguments["usable_soc_percent"])
+        windows: list[ExternalWindow] = []
+        for start, duration, record in binding:
+            end = start + timedelta(seconds=duration)
+            hours = duration / 3600
+            values = record.intended_state.get("values", {})
+            values = values if isinstance(values, Mapping) else {}
+            charge_kw: float | None = None
+            delivered_kwh: float | None = None
+            if record.service == "demandresponse":
+                pacref = _finite_number(values.get("pacref"))
+                if pacref is not None and pacref >= 0:
+                    charge_kw = min(charge_cap, pacref / 1000)
+                elif pacref is not None:
+                    delivered_kwh = min(discharge_cap, -pacref / 1000) * hours
+            elif record.service == "peakshaving":
+                power = _finite_number(values.get("discharge_max"))
+                if power is not None and power >= 0:
+                    delivered_kw = min(discharge_cap, power / 1000)
+                    demand = None if net_load_kw is None else net_load_kw(start, end)
+                    if demand is not None and isfinite(demand):
+                        delivered_kw = min(delivered_kw, max(0.0, demand))
+                    delivered_kwh = delivered_kw * hours
+            if soc is not None and charge_kw is not None:
+                ceiling = max(maximum, soc)
+                soc = min(ceiling, soc + charge_kw * hours * efficiency / capacity * 100)
+            elif soc is not None and delivered_kwh is not None:
+                floor = min(minimum, soc)
+                soc = max(floor, soc - delivered_kwh / efficiency / capacity * 100)
+            else:
+                # Unknown energy: this and every later window end the plan.
+                soc = None
+            windows.append(ExternalWindow(start, end, soc))
+        return tuple(windows)
 
     def _validated_limits(self) -> dict[str, float]:
         settings = self.runtime.operational_settings
@@ -1577,12 +1749,27 @@ class PriceOptimizationController:
             return False
         desired = {_action_key(action): action for action in actions}
         existing = {_record_key(record): record for record in self._price_records()}
+        self._kept_logged &= {record.m_id for record in existing.values()}
         now = datetime.now(UTC)
         for key, record in tuple(existing.items()):
             if key in desired:
                 continue
             start = _record_start(record)
             if start is None or start <= now:
+                continue
+            if record.m_id in self._binding_ids:
+                if record.m_id not in self._kept_logged:
+                    self._kept_logged.add(record.m_id)
+                    lead = self.config.minimum_lead_minutes
+                    log_activity(
+                        self.runtime, PRICE_STATUS,
+                        f"Kept {_describe(record)}: it starts within {lead} min",
+                        "Who: price optimization. Why: its own schedule starts within "
+                        f"the minimum lead time ({lead} min), so it is no longer "
+                        "replanned or removed; the plan counts on its energy and "
+                        "plans around it. Turning the feature or control authority "
+                        "off still removes it.",
+                    )
                 continue
             if not await self._mutation_context_safe():
                 return False
@@ -1826,6 +2013,13 @@ def _freeze(value: object) -> object:
     return value
 
 
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if isfinite(number) else None
+
+
 def _price_at_epoch(series: PriceSeries, epoch: int) -> float | None:
     instant = datetime.fromtimestamp(epoch, UTC)
     for interval in series.intervals:
@@ -1839,7 +2033,12 @@ def _segments(result: WholeDayResult) -> list[dict[str, object]]:
     segments: list[dict[str, object]] = []
     for slot in result.slots:
         kind = slot.kind
-        if segments and segments[-1]["kind"] == kind and segments[-1]["end"] == slot.start:
+        if (
+            segments
+            and segments[-1]["kind"] == kind
+            and segments[-1]["performed_by"] == slot.performed_by
+            and segments[-1]["end"] == slot.start
+        ):
             last = segments[-1]
             last["end"] = slot.end
             last["energy_kwh"] = float(last["energy_kwh"]) + slot.battery_kw * (  # type: ignore[arg-type]
@@ -1851,6 +2050,7 @@ def _segments(result: WholeDayResult) -> list[dict[str, object]]:
             "start": slot.start,
             "end": slot.end,
             "kind": kind,
+            "performed_by": slot.performed_by,
             "energy_kwh": slot.battery_kw * (slot.end - slot.start).total_seconds() / 3600,
             "end_soc": round(slot.usable_soc_percent, 1),
         })
