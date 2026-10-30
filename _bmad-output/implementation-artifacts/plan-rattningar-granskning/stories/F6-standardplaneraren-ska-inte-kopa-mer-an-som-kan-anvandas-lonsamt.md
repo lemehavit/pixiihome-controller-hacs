@@ -3,8 +3,8 @@ title: Standardplaneraren ska inte köpa mer än som kan användas lönsamt
 type: bugfix
 created: 2026-10-29
 status: done
-baseline_revision: d423cdc48f50fe20ecc16f17e8443ab6ed408ebf
-review_loop_iteration: 1
+baseline_revision: 80e2ad876921a4ce4f5e595c02acdcdeed87c6b2
+review_loop_iteration: 2
 followup_review_recommended: false
 context: []
 warnings: []
@@ -63,9 +63,15 @@ deferred:
 **Execution:**
 - `custom_components/pixiihome_controller/control/price_optimization.py` — beräkna framtida lönsam levererbar energi inom aktuellt segment från prognostiserad nettolast eller export och begränsa laddning med befintlig energi avräknad; befintlig urladdningsberäkning ska fortsätta använda verklig planerad energi.
 - `custom_components/pixiihome_controller/control/price_optimization.py` — räkna bara av lagrad energi vars urladdningsbas kvalificerar i den framtida sloten; vid ett känt återställningsfönster följer avräkningen `charged_energy` och `stored_price` på samma sätt som urladdningsgrenen. Detta bevarar lönsamma billiga laddcykler när tidigare energi köptes dyrt.
+- `custom_components/pixiihome_controller/control/price_optimization.py` — spåra energi laddad i aktuellt segment separat även utan stängande fönster. Använd den billiga energins egen prisbas både vid framtida täckningsavräkning och faktisk urladdning; blanda inte in äldre dyr energi i dess prisbas. Om både ny och äldre energi kvalificerar ska båda kunna täcka samma framtida slot upp till prognostiserat behov.
+- `custom_components/pixiihome_controller/control/price_optimization.py` — fördela kvalificerade energidelar konsekvent mellan flera framtida lastslotar: en del som bara fungerar i den första sloten ska inte ersättas av en billigare del som behövs i den andra. Samma ordning ska användas i behovsberäkning och urladdning.
+- `custom_components/pixiihome_controller/control/price_optimization.py` — bevara schemats fulla urladdningseffekt vid egenförbrukning när prognosen är lägre än möjlig effekt; begränsa bara simulerad leverans, SOC och marginal till prognosen. Utan `net_load_kw` ska prisbas och åtgärder följa beteendet före denna fixrunda.
 - `custom_components/pixiihome_controller/price_controller.py` — logga med orsak när F6-begränsningen ändrar planbeslutet, utan att ändra externa scheman.
 - `tests/test_price_optimization.py` — verifiera matrisen numeriskt samt gränsen mellan externa fönster.
 - `tests/test_price_optimization.py` — lägg två numeriska regressioner: hög senaste kända prisbas 3,00 med SOC 50 %, last 2 kW, priser 0,20/0,20/3,00; och känt återställningsfönster i timme 3 med prisbas 3,00 och priser 0,20/0,20/3,00/3,00. Båda ska behålla lönsam laddning och urladdning.
+- `tests/test_price_optimization.py` — lägg BMA-40:s två öppna segment: bas 3,00, SOC 50 %, priser 0,20/0,20/2,40 och bas 3,00, SOC 30 %, priser 0,20/0,20/2,00; last 2 kW i sista timmen, export av. Kräv cirka 2/0,9 kWh laddning totalt en gång, planerad urladdning som levererar 2 kWh och positiv marginal. Lägg även ett stängt segment där billig och äldre lagrad energi tillsammans kvalificerar för samma slot; det får inte överladda.
+- `tests/test_price_optimization.py` — testa två skilda billiga laddpriser och kontrollera viktad urladdningsbas och marginal. Testa även initial prisbas 2,00, priser 0,20/3,00/2,50, SOC 20 % och 0,90 kW last i båda dyra timmarna: båda urladdningarna ska planeras och täcka prognosen.
+- `tests/test_price_optimization.py` — testa att låg prognos ger låg simulerad leverans men fortsatt full tillåten effekt i schemaåtgärden, och att samma fall utan prognos behåller tidigare prisbas och åtgärdsval.
 
 **Acceptance Criteria:**
 - Given rapportens tre priser och ingen framtida nettolast, when standardplanen byggs, then den har ingen laddningsåtgärd.
@@ -73,10 +79,19 @@ deferred:
 - Given saknad lastprognos, when samma plan byggs, then dess laddningsåtgärder följer tidigare headroom-beteende.
 - Given lagrad energi med prisbas 3,00 som inte kan säljas lönsamt i den dyra timmen, when standardplanen byggs med billig laddning 0,20 och 2 kW prognostiserad last, then planen laddar för den lönsamma cykeln och har positiv förväntad marginal.
 - Given ett känt återställningsfönster som ger prisbas 3,00 efter fönstret, when standardplanen byggs med priser 0,20/0,20/3,00/3,00 och 2 kW prognostiserad last, then planen laddar för den lönsamma cykeln före återställningen och har positiv förväntad marginal.
+- Given BMA-40:s två fall med dyr initial energi och billig laddning i ett öppet segment, when standardplanen byggs, then laddas ungefär 2/0,9 kWh totalt en gång, 2 kWh urladdas till lasten och marginalen är positiv.
+- Given ett segment före känt återställningsfönster där både nyladdad och initial energi kvalificerar, when två billiga intervall föregår en dyr lastslot, then sammanlagd laddning begränsas av kvarvarande behov efter båda energidelarna och ingen överladdning sker.
+- Given initial prisbas 2,00 och priser 0,20/3,00/2,50 med 0,90 kW last i båda dyra timmarna, when standardplanen byggs, then både första och andra urladdningen finns och levererar ungefär 0,90 kWh vardera.
+- Given laddning till två olika priser i samma segment, when batteriet urladdas, then visad referensprisbas och marginal motsvarar den energiviktade prisbasen för de använda energidelarna.
+- Given en nettolastprognos under möjlig urladdningseffekt, when en egenförbrukningsåtgärd skapas, then åtgärdens effekt förblir tillgänglig för högre verklig last medan planerad energi, SOC och marginal följer prognosen.
+- Given att lastprognos saknas, when standardplanen byggs för ett fall med dyr initial energi och billig laddning, then prisbas och åtgärdsval överensstämmer med beteendet före den tredje fixrundan.
 
 ## Spec Change Log
 
 - 2026-10-29: BMA-32 visade att `needed_stored_energy - available` räknar av även dyrt lagrad energi som inte kvalificerar för framtida urladdning. Specen kräver nu samma prisbasbedömning som urladdningsgrenen och två regressioner. Detta undviker att billig lönsam laddning kapas till noll. KEEP: F6:s prognos-, sol-, export- och segmentgränser samt avsaknad av live-anrop.
+- 2026-10-30: BMA-40 visade att en blandad `acquisition_price` i öppet segment döljer lönsam nyladdad energi och dubblerar billig laddning utan urladdning. Specen kräver separata prisbaser för ny och äldre energi i både täckning och urladdning, plus två exakta regressioner. Granskningen visade också att stängt segment måste kunna nyttja båda kvalificerade energidelarna. KEEP: selektiv avräkning per urladdningsläge, exportfallet, segmentgränser, prognosfallback och loggning med orsak.
+- 2026-10-30: Granskning av tredje rättningen visade att ny billig energi kan förbrukas i första lastslot trots att äldre energi bara är lönsam där; då saknas andra urladdningen. Specen kräver konsekvent prioritet för energidelarna mellan prognos och plan, plus test för två framtida lastslotar och viktad prisbas. KEEP: BMA-40:s exakta tvåfallstester, stängda fönstret och övriga F6-gränser.
+- 2026-10-30: Egen kontroll hittade två avvikelser mot F6:s befintliga kontrakt: ny kod minskade schemaeffekten till prognosen trots `build_price_plan`-dokumentation om full effekt, och separata energidelar kan ändra beteendet utan prognos. Specen kräver separata kontroller. KEEP: korrekt simulerad leverans, SOC och marginal samt prisbasprioritet när prognos finns.
 
 ## Review Triage Log
 
@@ -98,9 +113,33 @@ deferred:
   - `[low]` `[patch]` Loggens förklaring om kvalificerad prisbas saknade precis assertion — controller-testet kontrollerar nu den specifika klausulen.
   - `[medium]` `[patch]` Energi som bara är lönsam för egenförbrukning räknades av mot exportbehov — avräkningen kräver nu samma kvalificerade urladdningsläge som framtidssloten och en exportregression verifierar lönsam laddning.
 
+### 2026-10-30 — Tredje fixrundans första granskning
+- verdicts: 3 findings — high 1, medium 2, low 0, false 0, maybe-false 0
+- findings:
+  - `[medium]` `[bad_spec]` Testerna för dyr initial energi krävde bara positiv laddning — nu krävs cirka 2/0,9 kWh laddning och 2 kWh leverans i båda BMA-40-fallen.
+  - `[medium]` `[bad_spec]` I stängt segment kunde en framtidsslot inte täckas av både ny och initial kvalificerad energi — specen kräver båda lager i täckning och urladdning samt en regression mot överladdning.
+  - `[high]` `[bad_spec]` BMA-40:s öppna segment blandar ny billig och äldre dyr energi i `acquisition_price` — separata energidelar och prisbaser krävs för lönsam urladdning.
+
+### 2026-10-30 — Tredje fixrundans andra granskning
+- verdicts: 2 findings — high 1, medium 1, low 0, false 0, maybe-false 0
+- findings:
+  - `[medium]` `[bad_spec]` Två skilda billiga laddpriser saknade kontroll av viktad urladdningsbas — testkravet har lagts till.
+  - `[high]` `[bad_spec]` Prognosen reserverar äldre energi för första lastslot men urladdningen förbrukar billig ny energi där — reproducerat; specen kräver att båda slotarna faktiskt levereras.
+
+### 2026-10-30 — Egen kontroll före slutgranskning
+- verdicts: 2 findings — high 0, medium 2, low 0, false 0, maybe-false 0
+- findings:
+  - `[medium]` `[bad_spec]` Egenförbrukningsschemat fick prognosens effekt i stället för full tillåten effekt — kräver skild planerad leverans och schemalagd effekt.
+  - `[medium]` `[bad_spec]` Separata prisbaser kan ändra plan utan prognos — kräver ett numeriskt test mot tidigare beteende och bevarande av den vägen.
+
+### 2026-10-30 — Slutgranskning av tredje fixrundan
+- verdicts: inga nya high- eller mediumfynd i två oberoende granskningar.
+- findings:
+  - `[medium]` `[patch]` Okänt värde från en befintlig prognosfunktion kunde lämna den nya prisbaslogiken aktiv — hela planen återgår nu till tidigare beteende när prognosen är ofullständig; numeriskt test tillagt.
+
 ## Design Notes
 
-Beräkna behovet inom segmentet mellan externa återställningar. `net_load_kw` är redan last minus sol, så en separat solavräkning skulle dubbelräkna den. Räkna prognosens levererbara AC-energi baklänges genom RTE för att få nödvändig inköpt AC-energi. Dra bara av befintlig energi om den kan levereras lönsamt vid relevant framtida pris enligt `_qualifying_discharge` och samma bas som urladdningsgrenen: `acquisition_price` utan stängningsfönster, annars `charged_price`/`charged_energy` eller `stored_price`. Okänd prognos bevarar tidigare beteende. En hög basprisnivå får inte blockera ett nytt billigt lönsamt köp.
+Beräkna behovet inom segmentet mellan externa återställningar. `net_load_kw` är redan last minus sol, så en separat solavräkning skulle dubbelräkna den. Räkna prognosens levererbara AC-energi baklänges genom RTE för att få nödvändig inköpt AC-energi. Skilj energi som fanns vid segmentstart från energi laddad i segmentet när prognos finns; deras prisbaser är separata. Räkna av endast den del som kan levereras lönsamt i rätt urladdningsläge vid relevant framtida pris. När båda delar kvalificerar får båda användas till samma slot, men tillsammans aldrig mer än behovet. Använd samma prioritet i prognostäckning och faktisk urladdning. Den del som har högre prisbas har färre lönsamma framtida slotar och bör därför användas först när den kvalificerar, så att billigare energi finns kvar till senare slotar. Pris och marginal för en urladdning med två delar ska viktas efter förbrukad energi. Schemat behåller full effekt vid egenförbrukning; bara simulerad energi begränsas av prognosen. Utan prognos gäller tidigare blandade prisbas och åtgärdsval.
 
 ## Verification
 
@@ -136,3 +175,17 @@ Status: done
 **Verifiering:** `pytest -q tests/test_price_optimization.py`: 51 godkända. `pytest -q tests/test_price_controller.py`: 74 godkända. Riktad Ruff passerade, riktad Pyright gav 0 fel och 0 varningar, `git diff --check HEAD` passerade. Inga live-anrop gjordes.
 
 **Kvarvarande risk:** Framtida leverans uppskattas fortfarande snarare än att fullständigt simulera varje ovanlig urladdningsbana. F5-observationerna hanteras i F7b.
+
+### Tredje fixrundans resultat 2026-10-30
+
+Status: done
+
+**Sammanfattning:** I öppna och stängda segment har äldre lagrad energi och ny billig laddning nu skilda prisbaser när nettolastprognos finns. Prognosens behov och faktisk urladdning använder samma prioritet för energidelarna. Utan fullständig prognos används tidigare blandad prisbas och åtgärdsval.
+
+**Ändrade filer:** `control/price_optimization.py` håller isär och förbrukar energidelarna i konsekvent ordning; `tests/test_price_optimization.py` täcker BMA-40:s två fall, stängt återställningsfönster, två framtida lastslotar, viktat pris, schemaeffekt samt saknad eller okänd prognos.
+
+**Granskning:** Två slutgranskningar fann inga nya high- eller mediumfynd. Tidigare fynd i denna runda åtgärdades inom F6. Uppföljande granskning rekommenderas inte (`false`).
+
+**Verifiering:** `pytest -q tests/test_price_optimization.py`: 61 godkända. `pytest -q tests/test_price_controller.py`: 78 godkända. Riktad Ruff passerade; riktad Pyright gav 0 fel och 0 varningar; `git diff --check` passerade. Inga live-anrop gjordes.
+
+**Kvarvarande risk:** Planen använder fortfarande en pris- och lastprognos; verklig last eller sol kan avvika från prognosen. Full testsvit och CI kördes inte här.
