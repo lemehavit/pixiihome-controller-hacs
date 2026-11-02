@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.5.24 — 2026-11-02
+
+Rättningar efter den uppföljande granskningen av 0.5.22 (N1–N4, N6, N7). N5 och
+N8 försvann med F6, som görs om i en egen PR.
+
+- N1: En obekräftad DELETE av ett eget prisschema vars intervall har passerat
+  avskrivs som `expired_reserved` bara när den nyckelade GET:en saknar läsbart
+  svar eller visar samma, inaktiva schema. Ett läsbart svar med annan start,
+  längd eller andra värden, eller en tjänst som kör med tid kvar, behåller
+  konflikten (`recovery_readback_contradicts_ended_interval`). Bevisad frånvaro
+  avskriver fortfarande identiteten.
+- N6: Avstängning av styrbehörighet som redan är av kör ingen städning och tar
+  inte längre bort en tidigare städvarning. Aktivitetsloggen säger att
+  behörigheten redan var av och listar det som fortfarande är olöst.
+- N2: Dygnsplanen räknar bara solöverskottet ovanför **Solar export buffer** som
+  lagrat, som solregulatorn gör. Starttröskeln jämförs fortfarande med hela
+  överskottet.
+- N3: Automatisk solladdning räknas som ett flöde som sker av sig självt när
+  inget skrivet schema tar över. Planen kan inte längre "välja" att vänta eller
+  ta bara en del, inte heller där en urladdning föll bort på minsta vinst.
+- N4: En skriven laddning som lagrar solöverskott får inget importpåslag i den
+  senare urladdningens vinstkontroll; bara importerad energi får det.
+- N7: Dygnsplanen väljer 100–400 energinivåer utifrån kapacitet, intervallängd
+  och effekt (och små huslaster utan export), med begränsad beräkningsmängd. Låg
+  effekt med stora batterier och kvartspriser blir inte längre osynligt.
+  `whole_day_plan` visar `energy_levels` och `resolution_limited`; en kvarvarande
+  begränsning skrivs i aktivitetsloggen.
+- Oförändrat för 18,4 kWh / 10 kW med export på: 100 nivåer.
+- Ingen ny fysisk Gateway-validering har gjorts i denna version.
+
 ## 0.5.23 — 2026-11-02
 
 - Solladdning och effekttoppsutjämning journalför nu originalprioriteten innan

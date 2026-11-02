@@ -127,6 +127,7 @@ class PriceOptimizationController:
         # The solar charging the whole-day plan last counted on (logged on change).
         self.solar_charging: SolarCharging | None = None
         self._solar_charging_logged = False
+        self._resolution_limited_logged = False
         self.problem_since: datetime | None = None
         self.problem_notified = False
         # True while one planning pass runs. A passing non-problem status
@@ -289,6 +290,8 @@ class PriceOptimizationController:
                 "cost_without_battery_sek": round(whole_day.baseline_cost_sek, 2),
                 "planned_cost_sek": round(whole_day.planned_cost_sek, 2),
                 "action_count": len(merge_adjacent_actions(whole_day.plan.actions)),
+                "energy_levels": whole_day.energy_levels,
+                "resolution_limited": whole_day.resolution_limited,
                 "segments": _segments(whole_day),
             },
             "price_entity_id": config.price_entity_id,
@@ -1105,6 +1108,20 @@ class PriceOptimizationController:
                 )
             except ValueError:
                 self.whole_day = None
+            limited = self.whole_day is not None and self.whole_day.resolution_limited
+            if limited != getattr(self, "_resolution_limited_logged", False):
+                self._resolution_limited_logged = limited
+                if limited and bool(settings.get("price_whole_day_planner")):
+                    assert self.whole_day is not None
+                    log_activity(
+                        self.runtime, PRICE_STATUS,
+                        "Whole-day plan leaves out flows below its energy step",
+                        f"Why: with {self.whole_day.energy_levels} energy levels for "
+                        f"{float(arguments['usable_capacity_kwh']):.1f} kWh, some allowed "
+                        "charge or discharge in an interval is smaller than one level, so "
+                        "the plan leaves that flow out and may do less than the battery "
+                        "could.",
+                    )
         if (
             bool(settings.get("price_whole_day_planner"))
             and self.whole_day is not None
@@ -1173,6 +1190,7 @@ class PriceOptimizationController:
             defer_from_price=defer_from,
             defer_until=defer_until,
             minimum_surplus_kw=float(settings.get("solar_export_start_threshold_kw")),
+            export_buffer_kw=float(settings.get("solar_export_buffer_kw")),
         )
         whole_day_enabled = bool(settings.get("price_whole_day_planner"))
         if not whole_day_enabled:
@@ -1194,7 +1212,10 @@ class PriceOptimizationController:
                 why = (
                     f"automatic solar charging charges up to {limit.maximum_kw:.1f} kW "
                     f"and {limit.maximum_soc_percent:.0f} % usable SOC, from a surplus "
-                    f"of {limit.minimum_surplus_kw:.1f} kW"
+                    f"of {limit.minimum_surplus_kw:.1f} kW, and leaves "
+                    f"{limit.export_buffer_kw:.1f} kW to the grid as export buffer; "
+                    "it charges whenever no written schedule takes over, so the plan "
+                    "cannot postpone it"
                 )
             if whole_day_enabled:
                 log_activity(

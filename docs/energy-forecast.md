@@ -106,6 +106,29 @@ undone by the aggregator's next refill.
 If the forecast is missing, the standard plan is used and `planner_engine` shows
 `standard_whole_day_unavailable`.
 
+How the plan counts solar and energy:
+
+- **Automatic solar charging is not a choice of the plan.** When the solar
+  controller may run (switch on, not deferring, surplus above the start
+  threshold), it charges as soon as there is surplus unless a written price
+  schedule takes over. The plan therefore counts on that charging in every such
+  interval and cannot "wait" for cheaper hours. Only **Smart solar charging**
+  can make it wait.
+- **Export buffer:** the solar controller leaves **Solar export buffer** to the
+  grid, so only the surplus above the buffer is counted as stored. The start
+  threshold still looks at the whole surplus.
+- **Import cost only on imported energy:** a written charge that stores solar
+  surplus (for example with automatic solar charging off) costs the price that
+  energy could have been sold for, without **Grid import cost**. Only the part
+  bought from the grid pays the import cost when a later discharge is checked
+  against the minimum profit.
+- **Energy steps:** the battery is split into 100 to 400 energy levels, chosen
+  from capacity, the shortest price interval and the power limits (without export
+  also small house loads), within a bounded amount of work. The attribute
+  `whole_day_plan` shows `energy_levels`. If an allowed flow is still smaller
+  than one level, `resolution_limited` is `true` and the activity log says so;
+  the plan then leaves that flow out.
+
 ## Other additions
 
 - **Battery savings today** (kr): grid cost without the battery minus the actual
