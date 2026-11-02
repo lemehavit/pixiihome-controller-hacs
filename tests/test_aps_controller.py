@@ -242,3 +242,59 @@ async def test_foreign_aps_is_not_adopted() -> None:
 
     assert controller.reason == "foreign_adaptive_peak_shaving_active"
     assert runtime.writes == []
+
+@pytest.mark.asyncio
+async def test_verified_actual_discharge_persists_context_and_debounces_price_wakes():
+    runtime = FakeRuntime()
+    now = [10.0]
+    runtime.battery = replace(runtime.battery, power_w=-1500)
+    runtime.telemetry.service = 105
+    controller = _controller(runtime, now)
+    controller._message_id, controller._lease_deadline = 8001, 1000
+    request = controller._build_request()
+    controller._applied_payload = tuple(sorted(request.payload.items()))
+    saved, wakes = [], []
+
+    async def save(key, context):
+        saved.append((key, context))
+
+    runtime.async_save_aps_state = save
+    runtime.price_optimization_controller = SimpleNamespace(request_refresh=lambda: wakes.append(1))
+    await controller.tick()
+    await controller.tick()
+    assert len(saved) == len(wakes) == 1
+    assert runtime.verifications == [8001]
+    assert saved[0][1]["usable_soc_percent"] == 50
+    assert saved[0][1]["expires_at"] - saved[0][1]["observed_at"] == 86400
+    now[0] += 60
+    await controller.tick()
+    assert len(saved) == len(wakes) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("condition", ["foreign", "charging", "stale", "unverified", "disabled"])
+async def test_discharge_context_requires_owned_fresh_actual_discharge(condition):
+    runtime = FakeRuntime()
+    runtime.battery = replace(runtime.battery, power_w=-1000)
+    runtime.telemetry.service = 105
+    controller = _controller(runtime, [10.0])
+    controller._message_id, controller._lease_deadline = 8001, 1000
+    controller._applied_payload = tuple(sorted(controller._build_request().payload.items()))
+    if condition == "foreign":
+        controller._message_id, controller._lease_deadline = None, 0
+    if condition == "charging":
+        runtime.battery = replace(runtime.battery, power_w=1000)
+    if condition == "stale":
+        runtime.telemetry.is_fresh = lambda family: family != "battery"
+    if condition == "unverified":
+        async def verify(message_id):
+            return {"successful": False}
+        runtime.async_verify_aps_lease = verify
+    if condition == "disabled":
+        runtime.controller_state = ControllerState()
+    saved = []
+    async def save(key, value):
+        saved.append(value)
+    runtime.async_save_aps_state = save
+    await controller.tick()
+    assert saved == []

@@ -306,6 +306,7 @@ async def test_idle_phase_support_yields_to_all_existing_services_and_does_not_r
     controller.gateway = PhaseGateway()
     controller.lease = None
     controller._lock = asyncio.Lock()
+    controller._priority_lock = asyncio.Lock()
     controller.targets = controller.previous = controller.last_tick = None
     controller.runtime = SimpleNamespace()
     async def persist(lease):
@@ -360,6 +361,7 @@ def _policy_controller(monkeypatch, configured, *, soc, grid_w):
     controller.gateway = PhaseGateway()
     controller.lease = None
     controller._lock = asyncio.Lock()
+    controller._priority_lock = asyncio.Lock()
     controller.targets = controller.previous = controller.last_tick = None
     controller.status, controller.reason = "standby", None
     runtime = SimpleNamespace(

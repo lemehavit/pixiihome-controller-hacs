@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 from .activity import log_activity
+from .aps_priority import priority_attributes
 from .control.models import ControlOperation
-from .control.phase_gateway import PhaseGateway
 from .control.policy import AutomationPolicy
 from .control.production import ProductionAdapterRequest
 from .control.settings import OperationalSettings
@@ -131,6 +131,7 @@ class SolarChargingController:
             "usable_soc_percent": self.runtime.battery.usable_soc,
             "maximum_usable_soc_percent": settings.get("solar_max_soc_percent"),
             "current_service": self.current_service,
+            **priority_attributes(self.runtime),
             "priority_verified": self.priority_verified,
             "priority_configured": self.priority_configured,
             "service_priority": list(self.priority_list),
@@ -198,13 +199,9 @@ class SolarChargingController:
         scheduler = self.runtime.gateway_scheduler
         if scheduler is None:
             raise ValueError("solar_gateway_connection_required")
-        gateway = PhaseGateway(scheduler.client)
-        priority = await gateway.read(100)
-        if priority.get("enabled") != 1:
-            raise ValueError("solar_service_priority_disabled")
-        priority_list, must_configure = self.priority_with_aps(priority.get("used_list"))
-        if must_configure:
-            await gateway.priority(list(priority_list))
+        priority_list, must_configure = await self.runtime.aps_priority.acquire(
+            "solar", self.priority_with_aps
+        )
         self.priority_list = priority_list
         self.priority_configured = must_configure
         self.priority_verified = True
@@ -230,6 +227,10 @@ class SolarChargingController:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        await self._release_effects()
+
+    async def _release_effects(self) -> None:
+        """Retire our lease and priority without cancelling the running tick."""
         if self._message_id is not None and self.clock() < self._lease_deadline:
             try:
                 result = await self.runtime.async_execute_solar_lease(
@@ -241,6 +242,14 @@ class SolarChargingController:
             if result is not None and result.get("successful") is True:
                 self._message_id = None
                 self._lease_deadline = 0.0
+        self.priority_verified = False
+        manager = getattr(self.runtime, "aps_priority", None)
+        if manager is not None:
+            try:
+                await manager.release("solar")
+            except Exception as error:
+                self._publish("recovery_required", str(error) or "aps_priority_restore_failed")
+                raise
         self.disable()
 
     def disable(self) -> None:
@@ -258,11 +267,16 @@ class SolarChargingController:
                 await self.tick()
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                self._publish("blocked", "solar_controller_failed")
+            except Exception as error:
+                self._publish(
+                    "blocked" if self.runtime.controller_state.automatic_solar_charging_enabled
+                    else "recovery_required", str(error) or "aps_priority_restore_failed"
+                )
             interval = int(
                 self.runtime.operational_settings.get("solar_update_interval_seconds")
             )
+            if not self.runtime.controller_state.automatic_solar_charging_enabled:
+                interval = max(60, interval)
             await asyncio.sleep(interval)
 
     async def tick(self) -> None:
@@ -277,7 +291,10 @@ class SolarChargingController:
             self._message_id = None
         enabled = self.runtime.controller_state.automatic_solar_charging_enabled
         if not enabled:
-            self.disable()
+            manager = getattr(self.runtime, "aps_priority", None)
+            if manager is not None:
+                await manager.release("solar")
+            self._publish("disabled")
             return
         # The simulator runtime has no calibration hold.
         calibrating = getattr(self.runtime, "battery_calibration_active", None)
@@ -289,6 +306,7 @@ class SolarChargingController:
             self._publish("blocked", "solar_conflicts_with_adaptive_peak_shaving")
             return
         if not self.runtime.production_control_enabled():
+            await self._release_effects()
             self._publish("blocked", "production_control_disabled")
             return
         policy = self.runtime._automation_policy()
@@ -298,6 +316,7 @@ class SolarChargingController:
             or policy.max_duration_seconds <= 0
             or policy.max_power_kw <= 0
         ):
+            await self._release_effects()
             self._publish("blocked", "automation_policy_not_authorized")
             return
         if not self.priority_verified:

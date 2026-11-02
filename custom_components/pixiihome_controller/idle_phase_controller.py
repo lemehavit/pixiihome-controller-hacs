@@ -42,6 +42,7 @@ class IdlePhaseLoadBalancer:
         self.previous: tuple[float, ...] | None = None
         self.last_tick: float | None = None
         self._lock = asyncio.Lock()
+        self._priority_lock = getattr(runtime, "native_priority_lock", asyncio.Lock())
 
     def attributes(self) -> dict[str, Any]:
         return {
@@ -96,7 +97,7 @@ class IdlePhaseLoadBalancer:
         await self.release()
 
     async def prepare(self) -> None:
-        async with self._lock:
+        async with self._priority_lock, self._lock:
             await self._recover()
             if self.gateway is None:
                 scheduler = self.runtime.gateway_scheduler
@@ -246,7 +247,7 @@ class IdlePhaseLoadBalancer:
         return plan.powers_w
 
     async def tick(self) -> None:
-        async with self._lock:
+        async with self._priority_lock, self._lock:
             if self.gateway is None:
                 self.status, self.reason = "blocked", "load_balancing_rearm_required"
                 return
@@ -396,7 +397,7 @@ class IdlePhaseLoadBalancer:
         )
 
     async def stop(self) -> None:
-        async with self._lock:
+        async with self._priority_lock, self._lock:
             try:
                 await self.release()
             except ValueError as error:

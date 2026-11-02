@@ -35,6 +35,21 @@ configured. Preparation checks native priority and can add APS below Scheduler
 when it is absent from the active priority list. It does not acquire an unrelated
 APS operation merely because service 105 is already running.
 
+Before adding APS, the integration saves the original and intended priority lists
+and the feature that owns the change in its verified primary/backup control
+journal. Switching off either feature restores its own added entry even when no
+lease started. Unload, restart and withdrawal of control authority also attempt
+this cleanup. Service 129 phase support is restored first when its temporary
+priority list depends on the APS list.
+
+Restoration requires the live list to match the saved list exactly. An external
+priority change or failed read leaves the original journal intact and exposes
+`aps_priority_status: recovery_required` with `aps_priority_reason`; it is never
+overwritten blindly. No historical original configuration is guessed. An APS
+entry that was already present is retained (`preexisting`). Removing the app's
+only APS cause lets the Gateway return to Idle; an active schedule or another
+native function can continue instead. No global Idle command is sent.
+
 ### Smart solar charging
 
 Switch **Smart solar charging** lets the controller sell surplus during
@@ -101,7 +116,15 @@ activation as its own.
 Check **Adaptive peak shaving status**, `reason`, the signed limit attributes,
 `priority_verified`, `owned_message_id` and `lease_seconds_remaining`. `active`
 does not imply continuous charging/discharging: no response may be needed inside
-the band. Use the controller switch to disable it; the separate one-shot Start
+the band.
+
+Actual discharge under a keyed, verified APS lease and fresh battery power/SOC
+measurements records a recharge context for at most 24 hours. This can wake price
+planning once per minute (with its normal change debounce). It does not by itself
+authorize any aggregator change; see [price optimization](price-optimization.md).
+Solar's charge-only lease and foreign/manual APS never create this context.
+
+Use the controller switch to disable it; the separate one-shot Start
 button uses a different duration contract described under [manual control](manual-control.md).
 
 [← Manual control](manual-control.md) · [Next: load balancing →](load-balancing.md)

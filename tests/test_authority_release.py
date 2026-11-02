@@ -70,6 +70,7 @@ async def test_authority_off_releases_owned_control_before_closing_the_gate(monk
     )
     fake = SimpleNamespace(
         _require_admin=admin,
+        start_aps_recovery=lambda: None,
         production_control_enabled=lambda: True,
         _async_release_owned_control=release,
         meter_limit_load_balancer=None,
@@ -140,6 +141,7 @@ async def test_authority_off_persists_after_load_balancing_restore_failure(
     )
     fake = SimpleNamespace(
         _require_admin=admin,
+        start_aps_recovery=lambda: None,
         production_control_enabled=lambda: True,
         _async_release_owned_control=release,
         meter_limit_load_balancer=SimpleNamespace(lease=lease, deactivate=deactivate),

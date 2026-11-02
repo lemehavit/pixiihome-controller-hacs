@@ -19,6 +19,7 @@ from homeassistant.helpers.storage import Store
 from .activity import log_activity
 from .allocator import MessageIdAllocator
 from .aps_controller import AdaptivePeakShavingController, build_aps_lease_request
+from .aps_priority import APS_RECHARGE, ApsPriority
 from .battery import BatteryModel, BatteryReading
 from .battery_activity import BatteryActivityTracker
 from .capabilities import CapabilityRegistry
@@ -178,6 +179,9 @@ class RuntimeData:
         default=None,
     )
     _allocator_flush_error: Exception | None = field(init=False, repr=False, default=None)
+    native_priority_lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock)
+    aps_priority: ApsPriority = field(init=False)
+    aps_recharge_context: dict[str, Any] | None = field(init=False, default=None)
     control_state_error: str | None = field(init=False, default=None)
     scheduler_mutation_config_error: str | None = field(init=False, default=None)
     scheduler_ownership: SchedulerOwnershipStore | None = field(init=False, default=None)
@@ -237,6 +241,7 @@ class RuntimeData:
     )
 
     def __post_init__(self) -> None:
+        self.aps_priority = ApsPriority(self)
         self.transport = PixiiMqttTransport(self.hass, self.serial, self.handle_message)
         allocator = self._build_allocator()
         self.command_manager = CommandManager(
@@ -430,6 +435,7 @@ class RuntimeData:
                 loaded_from_backup or recovery_blocked or journal_store_ambiguous
             )
             resume = original_controller_state.get(RESUME_AFTER_RECOVERY)
+            self.aps_recharge_context = original_controller_state.get(APS_RECHARGE)
             calibration_until = original_controller_state.get(BATTERY_CALIBRATION_UNTIL)
             self.lowered_external_targets = _lowered_targets_from(
                 original_controller_state.get(LOWERED_EXTERNAL_TARGETS)
@@ -458,6 +464,7 @@ class RuntimeData:
                 controller_state = ControllerState()
             elif not authority.enabled and (
                 controller_state.automatic_solar_charging_enabled
+                or controller_state.adaptive_peak_shaving_enabled
                 or controller_state.load_balancing_enabled
                 or controller_state.automatic_price_optimization_enabled
             ):
@@ -755,6 +762,8 @@ class RuntimeData:
             self.production_authority = authority
             self.controller_state = controller_state
             self.release_gate.live_writes_enabled = enabled
+            if not enabled:
+                self.start_aps_recovery()
             self.release_gate.blocked_reasons = (
                 set()
                 if enabled
@@ -809,6 +818,15 @@ class RuntimeData:
                  if not problem.startswith("load_balancing Service 120 (")],
                 persisted=getattr(self, "_authority_cleanup_persisted", True),
             )
+
+    def start_aps_recovery(self) -> None:
+        """Reuse disabled controller loops for exact-list recovery only."""
+        for owner, controller in (
+            ("solar", self.solar_charging_controller),
+            ("aps", self.adaptive_peak_shaving_controller),
+        ):
+            if controller is not None and self.aps_priority.pending(owner):
+                controller.start()
 
     async def _async_release_owned_control(self) -> list[str]:
         """Stop integration-owned leases and price schedules; report, never raise."""
@@ -1136,9 +1154,12 @@ class RuntimeData:
                     await solar_controller.prepare()
                 else:
                     await solar_controller.stop()
-            except ValueError as error:
-                solar_controller.status, solar_controller.reason = "blocked", str(error)
-                raise HomeAssistantError(str(error)) from error
+            except Exception as error:  # Disable persists even if owned recovery is still pending.
+                solar_controller.status, solar_controller.reason = (
+                    "blocked" if enabled else "recovery_required", str(error)
+                )
+                if enabled:
+                    raise HomeAssistantError(str(error)) from error
         if key == "adaptive_peak_shaving_enabled":
             if aps_controller is None:
                 raise HomeAssistantError("adaptive_peak_shaving_controller_unavailable")
@@ -1149,9 +1170,12 @@ class RuntimeData:
                     await aps_controller.prepare()
                 else:
                     await aps_controller.stop()
-            except ValueError as error:
-                aps_controller.status, aps_controller.reason = "blocked", str(error)
-                raise HomeAssistantError(str(error)) from error
+            except Exception as error:  # Disable persists even if owned recovery is still pending.
+                aps_controller.status, aps_controller.reason = (
+                    "blocked" if enabled else "recovery_required", str(error)
+                )
+                if enabled:
+                    raise HomeAssistantError(str(error)) from error
         if key == "load_balancing_enabled":
             if controller is None:
                 raise HomeAssistantError("load_balancing_configuration_required")
@@ -1188,6 +1212,10 @@ class RuntimeData:
             )
             await self._persist_product_controller_state_locked(controller_state=updated)
             self.controller_state = updated
+        if not enabled and key in {
+            "automatic_solar_charging_enabled", "adaptive_peak_shaving_enabled"
+        }:
+            self.start_aps_recovery()
         if key == "automatic_solar_charging_enabled" and enabled:
             assert solar_controller is not None
             solar_controller.start()
@@ -1444,28 +1472,33 @@ class RuntimeData:
                 "kalibreringstiden (battery_calibration_conflicts_with_schedule)"
             )
 
-    async def async_save_lowered_targets(
-        self, lowered: dict[tuple[int, int, int, int], float]
-    ) -> None:
-        """Remember lowered aggregator targets across restarts (best effort)."""
-        self.lowered_external_targets = dict(lowered)
+    async def async_save_aps_state(self, key: str, value: Any) -> None:
+        """Commit APS ownership/evidence to both verified journal copies."""
         async with self._control_journal_lock:
             journal = self.control_journal
             if journal is None:
-                return
+                raise ValueError("aps_priority_journal_unavailable")
             candidate = journal.with_product_state(
-                controller_state={
-                    **journal.controller_state,
-                    LOWERED_EXTERNAL_TARGETS: [
-                        [*key, reference] for key, reference in sorted(lowered.items())
-                    ],
-                }
+                controller_state={**journal.controller_state, key: value}
             )
             try:
                 await self._save_control_journal_verified(candidate)
-                self.control_journal = candidate
-            except Exception:  # noqa: BLE001 - kept in memory; raising waits for evidence
-                pass
+            except Exception:
+                self._fail_closed_control_state("control_journal_persistence_failed")
+                raise
+            self.control_journal = candidate
+            if key == APS_RECHARGE:
+                self.aps_recharge_context = value
+
+    async def async_save_lowered_targets(
+        self, lowered: dict[tuple[int, int, int, int], float]
+    ) -> None:
+        """Save original aggregator references durably before APS target writes."""
+        await self.async_save_aps_state(
+            LOWERED_EXTERNAL_TARGETS,
+            [[*key, reference] for key, reference in sorted(lowered.items())],
+        )
+        self.lowered_external_targets = dict(lowered)
 
     async def _start_calibration_hold(
         self,
