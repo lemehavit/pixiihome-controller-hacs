@@ -535,6 +535,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     if runtime.scheduler_coordinator is not None:
         await runtime.scheduler_coordinator.async_start()
+    try:
+        await runtime.aps_priority.release()
+    except Exception as error:  # Keep durable ownership and show unresolved startup recovery.
+        for aps_owner in (
+            runtime.solar_charging_controller, runtime.adaptive_peak_shaving_controller
+        ):
+            aps_owner.status, aps_owner.reason = "recovery_required", str(error)
     if runtime.controller_state.load_balancing_enabled:
         try:
             await runtime.meter_limit_load_balancer.prepare()
@@ -582,6 +589,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             runtime.adaptive_peak_shaving_controller.status = "blocked"
             runtime.adaptive_peak_shaving_controller.reason = str(error)
             runtime.adaptive_peak_shaving_controller.start()
+    runtime.start_aps_recovery()
     if runtime.controller_state.automatic_price_optimization_enabled:
         try:
             await runtime.price_optimization_controller.prepare()
@@ -590,9 +598,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             runtime.price_optimization_controller.status = "blocked"
             runtime.price_optimization_controller.reason = str(error)
             runtime.price_optimization_controller.start()
-    elif runtime.price_optimization_controller.needs_post_check():
-        # Switched off (for example held off by a restart), but an own
-        # schedule's removal is unconfirmed: run only the read-only check.
+    elif (
+        runtime.price_optimization_controller.needs_post_check()
+        or runtime.lowered_external_targets
+    ):
+        # A disabled controller still checks uncertain deletes and attempts
+        # restoration of its remembered original aggregator targets.
         runtime.price_optimization_controller.start()
     runtime.load_balancing_observer.start()
     try:

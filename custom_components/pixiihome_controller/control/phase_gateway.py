@@ -98,7 +98,8 @@ class PhaseGateway:
         await self.message(
             [1, 0, 6, 3, 255, 2, 100, 200, 0, 33, 1, 0], {"used_list": used, "enabled": 1}
         )
-        if (await self.read(100))["used_list"] != used:
+        readback = await self.read(100)
+        if readback.get("enabled") != 1 or readback.get("used_list") != used:
             raise ValueError("phase_priority_changed")
 
     async def switch(self, on: bool) -> None:

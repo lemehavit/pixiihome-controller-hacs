@@ -1894,3 +1894,319 @@ async def test_switch_off_just_before_start_removes_the_binding_charge(monkeypat
     await controller.disable()
 
     assert charge in mutations.deleted
+
+
+def _aps_recharge_day(instance, *, whole_day=False):
+    """Two aggregator charges, with no possible own price discharge."""
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+    instance.hass.states.state.attributes = {
+        "unit_of_measurement": "SEK/kWh", "prices": [
+            {"start": (start + timedelta(hours=i)).isoformat(),
+             "end": (start + timedelta(hours=i + 1)).isoformat(), "price": price}
+            for i, price in enumerate((3.0, 3.0, 0.2, 0.2))
+        ],
+    }
+    expensive = external_schedule(start)
+    cheap = replace(external_schedule(start + timedelta(hours=2), service_no=301), sch_index=4)
+    instance.scheduler_manager.normalized_schedules = [expensive, cheap]
+    instance.battery = replace(instance.battery, usable_soc=50,
+                               effective_min_soc=0, effective_max_soc=100,
+                               discharge_power_limit_w=0)
+    instance.operational_settings = instance.operational_settings.set(
+        "price_adjust_external_target_soc", True
+    ).set("price_whole_day_planner", whole_day)
+    if whole_day:
+        instance.energy_forecast = SimpleNamespace(
+            net_load_kw=lambda start, end, high=False: 0.0,
+            net_forecast=lambda start, end, high=False: (0.0, 0.0),
+        )
+    instance.telemetry.is_fresh = lambda family: True
+    now = datetime.now(UTC).timestamp()
+    instance.aps_recharge_context = {"owner": "aps", "message_id": 8001,
+                                     "observed_at": now - 60, "expires_at": now + 24 * 3600 - 60,
+                                     "usable_soc_percent": 50}
+    targets, calls, saved = {300: 100.0, 301: 100.0}, [], []
+    instance.lowered_external_targets = {}
+
+    async def read_target(service_no):
+        return {"reference": targets[service_no]}
+
+    async def set_target(**kwargs):
+        calls.append(kwargs)
+        targets[kwargs["expected_service_no"]] = kwargs["new_reference"]
+        return {"status": "adjusted"}
+
+    async def save(lowered):
+        saved.append(lowered)
+        instance.lowered_external_targets = dict(lowered)
+
+    instance.gateway_scheduler = SimpleNamespace(
+        client=SimpleNamespace(read_target_soc=read_target), set_external_target_soc=set_target,
+    )
+    instance.async_save_lowered_targets = save
+    return expensive, cheap, targets, calls, saved
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("whole_day", [False, True])
+async def test_actual_aps_discharge_holds_expensive_target_without_own_discharge(whole_day):
+    instance, _ = runtime()
+    expensive, cheap, targets, calls, saved = _aps_recharge_day(instance, whole_day=whole_day)
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    assert controller.plan is not None
+    assert not any(a.direction is PriceDirection.DISCHARGE for a in controller.plan.actions)
+    assert controller.planner_engine == ("whole_day" if whole_day else "standard")
+    assert len(calls) == 1
+    assert calls[0]["sch_index"] == expensive.sch_index
+    assert calls[0]["new_reference"] == 50  # The actual level, rather than the 10% reserve.
+    assert calls[0]["allow_delete"] is False and calls[0]["delete"] is False
+    assert targets[cheap.service_no] == 100
+    assert saved[0]  # Original reference saved before lowering.
+    assert controller.aps_recharge_reason == "verified_aps_discharge_cheaper_recharge_later"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("whole_day", [False, True])
+@pytest.mark.parametrize("restart", [False, True])
+async def test_aps_target_restores_original_when_price_advantage_disappears(whole_day, restart):
+    instance, _ = runtime()
+    _, _, targets, calls, _ = _aps_recharge_day(instance, whole_day=whole_day)
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    assert targets[300] == 50
+    if restart:
+        controller = PriceOptimizationController(instance)
+    # Retain the hold across another pass/restart while the advantage remains.
+    await controller.tick()
+    assert targets[300] == 50
+    for item in instance.hass.states.state.attributes["prices"]:
+        item["price"] = 0.2
+    await controller.tick()
+    assert targets[300] == 100
+    assert calls[-1]["new_reference"] == 100
+    assert not calls[-1]["delete"]
+    assert instance.lowered_external_targets == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("condition", ["no_context", "expired", "foreign", "no_permission",
+                                       "no_writes", "stale_soc", "too_short", "unpriced"])
+async def test_aps_context_alone_does_not_authorize_unsafe_deferral(condition):
+    instance, _ = runtime()
+    _, cheap, _, calls, _ = _aps_recharge_day(instance)
+    if condition == "no_context":
+        instance.aps_recharge_context = None
+    elif condition == "expired":
+        instance.aps_recharge_context["expires_at"] = datetime.now(UTC).timestamp() - 1
+    elif condition == "foreign":
+        instance.aps_recharge_context["owner"] = "foreign"
+    elif condition == "no_permission":
+        instance.operational_settings = instance.operational_settings.set(
+            "price_adjust_external_target_soc", False)
+    elif condition == "no_writes":
+        instance.operational_settings = instance.operational_settings.set(
+            "price_schedule_writes_enabled", False)
+    elif condition == "stale_soc":
+        instance.telemetry.is_fresh = lambda family: False
+    elif condition == "too_short":
+        instance.scheduler_manager.normalized_schedules[1] = replace(
+            cheap, duration_seconds=60, end_epoch=cheap.start_epoch + 60)
+    elif condition == "unpriced":
+        instance.hass.states.state.attributes["prices"] = (
+            instance.hass.states.state.attributes["prices"][:2])
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_aps_deferral_does_not_change_a_target_within_lead_time():
+    instance, _ = runtime()
+    expensive, _, _, calls, _ = _aps_recharge_day(instance)
+    now = datetime.now(UTC)
+    instance.scheduler_manager.normalized_schedules[0] = replace(
+        expensive, start_epoch=int((now + timedelta(minutes=2)).timestamp()),
+        end_epoch=int((now + timedelta(minutes=2, hours=1)).timestamp()))
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    assert calls == []
+    assert controller.aps_targets_within_lead_time == 1
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("condition", ["expired", "no_permission", "no_writes", "disabled"])
+async def test_existing_aps_hold_restores_original_when_conditions_end(condition):
+    instance, _ = runtime()
+    _, _, targets, calls, _ = _aps_recharge_day(instance)
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    assert targets[300] == 50
+    if condition == "expired":
+        instance.aps_recharge_context["expires_at"] = datetime.now(UTC).timestamp() - 1
+    elif condition == "no_permission":
+        instance.operational_settings = instance.operational_settings.set(
+            "price_adjust_external_target_soc", False)
+    elif condition == "no_writes":
+        instance.operational_settings = instance.operational_settings.set(
+            "price_schedule_writes_enabled", False)
+    elif condition == "disabled":
+        instance.controller_state = ControllerState()
+    await controller.tick()
+    assert targets[300] == 100
+    assert calls[-1]["allow_delete"] is False
+    assert instance.lowered_external_targets == {}
+
+
+@pytest.mark.asyncio
+async def test_aps_target_original_must_be_saved_before_lowering():
+    instance, _ = runtime()
+    _, _, targets, calls, _ = _aps_recharge_day(instance)
+
+    async def fail_save(lowered):
+        raise ValueError("disk_failure")
+
+    instance.async_save_lowered_targets = fail_save
+    controller = PriceOptimizationController(instance)
+    with pytest.raises(ValueError, match="disk_failure"):
+        await controller.tick()
+    assert calls == []
+    assert targets[300] == 100
+
+@pytest.mark.asyncio
+async def test_aps_hold_never_uses_an_already_suppressed_recharge_window():
+    from custom_components.pixiihome_controller.control.price_optimization import (
+        ExternalWindow,
+        PricePlan,
+        normalize_price_series,
+    )
+    instance, _ = runtime()
+    early, cheap, _, _, _ = _aps_recharge_day(instance)
+    controller = PriceOptimizationController(instance)
+    windows = (
+        ExternalWindow(datetime.fromtimestamp(early.start_epoch, UTC),
+                       datetime.fromtimestamp(early.end_epoch, UTC), 100),
+        ExternalWindow(datetime.fromtimestamp(cheap.start_epoch, UTC),
+                       datetime.fromtimestamp(cheap.end_epoch, UTC), 100, adjustable=True),
+    )
+    controller._external_meta = ((early, 100), (cheap, 100))
+    series = normalize_price_series(instance.hass.states.state.attributes, "SEK/kWh")
+    result = controller._with_aps_targets(
+        series, controller._validated_limits(), windows, [True, True],
+        PricePlan((), (), "test", 50, 50, 0),
+    )
+    assert not result[0].adjustable
+    assert controller._aps_held_starts == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("condition", ["missing", "unavailable", "stale", "invalid"])
+@pytest.mark.parametrize("writes", [False, True])
+async def test_original_cleanup_does_not_require_a_working_price_source(condition, writes):
+    instance, _ = runtime()
+    _, _, targets, _, _ = _aps_recharge_day(instance)
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    assert targets[300] == 50
+    if condition == "missing":
+        instance.hass.states.state = None
+    elif condition == "unavailable":
+        instance.hass.states.state.state = "unavailable"
+    elif condition == "stale":
+        instance.hass.states.state.last_updated -= timedelta(days=3)
+    else:
+        instance.hass.states.state.attributes = {"prices": []}
+    instance.operational_settings = instance.operational_settings.set(
+        "price_schedule_writes_enabled", writes)
+    await controller.tick()
+    assert targets[300] == 100
+    assert instance.lowered_external_targets == {}
+
+
+@pytest.mark.asyncio
+async def test_partial_recharge_durably_consumes_old_aps_context():
+    from custom_components.pixiihome_controller.aps_priority import APS_RECHARGE
+    instance, _ = runtime()
+    _, _, targets, calls, _ = _aps_recharge_day(instance)
+    saved = []
+    async def save(key, value):
+        saved.append((key, value))
+        instance.aps_recharge_context = value
+    instance.async_save_aps_state = save
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    assert targets[300] == 50
+    instance.battery = replace(instance.battery, usable_soc=60)
+    await controller.tick()
+    assert saved == [(APS_RECHARGE, None)]
+    assert targets[300] == 100
+    before = len(calls)
+    instance.battery = replace(instance.battery, usable_soc=40)
+    await controller.tick()
+    assert len(calls) == before and targets[300] == 100
+
+
+@pytest.mark.asyncio
+async def test_disable_keeps_only_cleanup_retries_for_pending_originals(monkeypatch):
+    instance, mutations = runtime()
+    _, _, targets, _, _ = _aps_recharge_day(instance)
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    async def refused(**kwargs):
+        return {"status": "refused", "reason": "temporarily_unavailable"}
+    setter = instance.gateway_scheduler.set_external_target_soc
+    instance.gateway_scheduler.set_external_target_soc = refused
+    starts = []
+    def start(*, cleanup_only=False):
+        starts.append(cleanup_only)
+        controller._cleanup_only = cleanup_only
+    monkeypatch.setattr(controller, "start", start)
+    await controller.disable()
+    assert starts == [True]
+    instance.controller_state = ControllerState()
+    instance.gateway_scheduler.set_external_target_soc = setter
+    created = len(mutations.created)
+    await controller.tick()
+    assert targets[300] == 100 and not instance.lowered_external_targets
+    assert len(mutations.created) == created
+
+
+def test_reenable_price_planning_wakes_an_existing_cleanup_loop():
+    instance, _ = runtime()
+    controller = PriceOptimizationController(instance)
+    controller._cleanup_only = True
+    existing_task = object()
+    controller._task = existing_task  # type: ignore[assignment]
+
+    controller.start()
+
+    assert controller._task is existing_task
+    assert not controller._cleanup_only
+    assert controller._wake.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["expired", "absent", "out_of_scope", "partial"])
+async def test_cleanup_retires_only_expired_or_scoped_confirmed_absent_identities(state):
+    from custom_components.pixiihome_controller.price_controller import _target_key
+    instance, _ = runtime()
+    early, _, _, calls, _ = _aps_recharge_day(instance)
+    key = _target_key(early)
+    if state == "expired":
+        key = (key[0], key[1], int(datetime.now(UTC).timestamp()) - 7200, 3600)
+    instance.lowered_external_targets = {key: 100}
+    instance.controller_state = ControllerState()
+    instance.scheduler_manager.normalized_schedules = []
+    original = instance.scheduler_coordinator.async_refresh
+    if state in {"out_of_scope", "partial"}:
+        async def refresh():
+            snapshot = await original()
+            if state == "partial":
+                snapshot.data_status = "partial"
+            else:
+                snapshot.window_end_epoch = early.start_epoch - 1
+            return snapshot
+        instance.scheduler_coordinator.async_refresh = refresh
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    assert bool(instance.lowered_external_targets) == (state in {"out_of_scope", "partial"})
+    assert calls == []

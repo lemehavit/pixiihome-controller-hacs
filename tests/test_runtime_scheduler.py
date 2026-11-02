@@ -1488,3 +1488,224 @@ async def test_switches_are_not_remembered_when_authority_was_off(
 
     assert await restarted.async_resume_after_recovery() is False
     assert restarted.production_control_enabled() is False
+
+@pytest.mark.asyncio
+async def test_aps_priority_and_recharge_context_use_both_verified_journal_copies(monkeypatch):
+    from custom_components.pixiihome_controller.aps_priority import APS_PRIORITY, APS_RECHARGE
+
+    runtime, entry, _, _ = await _configured_runtime(monkeypatch)
+    priority = {"owner": "aps", "original": [101, 107], "owned": [101, 105, 107],
+                "status": "owned"}
+    context = {"owner": "aps", "message_id": 8001, "observed_at": 12345,
+               "expires_at": 12345 + 86400, "usable_soc_percent": 50}
+    await runtime.async_save_aps_state(APS_PRIORITY, priority)
+    await runtime.async_save_aps_state(APS_RECHARGE, context)
+    assert runtime.control_store is not None and runtime.control_backup_store is not None
+    primary = await runtime.control_store.async_load()
+    assert primary == await runtime.control_backup_store.async_load()
+    assert primary["controller_state"][APS_PRIORITY] == priority
+    restarted, _, _, _ = await _configured_runtime(monkeypatch, data=entry.data)
+    assert restarted.aps_recharge_context == context
+    assert restarted.control_journal.controller_state[APS_PRIORITY] == priority
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("controller_name, switch", [
+    ("solar_charging_controller", "automatic_solar_charging_enabled"),
+    ("adaptive_peak_shaving_controller", "adaptive_peak_shaving_enabled"),
+])
+async def test_failed_priority_cleanup_still_persists_feature_switch_off(
+    monkeypatch, controller_name, switch,
+):
+    from custom_components.pixiihome_controller.control.settings import ControllerState
+
+    runtime, _, _, _ = await _configured_runtime(monkeypatch)
+    runtime.controller_state = ControllerState.from_mapping({switch: True})
+
+    async def fail_stop():
+        raise ValueError("aps_priority_recovery_conflict")
+
+    controller = SimpleNamespace(stop=fail_stop)
+    setattr(runtime, controller_name, controller)
+    await runtime._async_set_controller_enabled_locked(switch, False)
+    assert getattr(runtime.controller_state, switch) is False
+    assert runtime.control_journal.controller_state["controller_state"][switch] is False
+    assert controller.status == "recovery_required"
+
+async def _setup_with_owned_recovery(monkeypatch, *, owner=None, lowered=False, fail_read=False):
+    """Run actual async_setup_entry and its real disabled controller task."""
+    from datetime import timedelta
+
+    from custom_components.pixiihome_controller.aps_priority import APS_PRIORITY
+    from custom_components.pixiihome_controller.battery import BatteryReading
+    from custom_components.pixiihome_controller.control.models import PlantHealth
+    from custom_components.pixiihome_controller.control.production import ProductionControlAuthority
+    from custom_components.pixiihome_controller.price_controller import PriceOptimizationController
+    from custom_components.pixiihome_controller.scheduler.models import (
+        NormalizedRecurrence,
+        NormalizedSchedule,
+        ScheduleCompleteness,
+        ScheduleConsistency,
+        SchedulerOwnership,
+    )
+
+    source, entry, _, _ = await _configured_runtime(monkeypatch)
+    if owner is not None:
+        await source.async_save_aps_state(APS_PRIORITY, {
+            "owner": owner, "original": [101, 107], "owned": [101, 105, 107], "status": "owned",
+        })
+    start = int((datetime.now(UTC) + timedelta(hours=2)).timestamp())
+    schedule = NormalizedSchedule(
+        3, start, 3600, start + 3600, 300, 107, True, None, None, 7,
+        NormalizedRecurrence(False, ()), SchedulerOwnership(),
+        ScheduleCompleteness.COMPLETE, ScheduleConsistency.CONSISTENT,
+    )
+    if lowered:
+        await source.async_save_lowered_targets({(3, 300, start, 3600): 100})
+        await source.async_save_aps_state(
+            "production_control_authority", ProductionControlAuthority(enabled=True).as_dict())
+    restored = asyncio.Event()
+    calls = []
+
+    class Gateway:
+        used = [101, 105, 107]
+        failures = int(fail_read)
+        async def read(self, service):
+            if self.failures:
+                self.failures -= 1
+                raise ValueError("temporarily_unavailable")
+            return {"enabled": 1, "used_list": list(self.used)}
+        async def priority(self, used):
+            self.used = list(used)
+            calls.append(("priority", list(used)))
+            restored.set()
+        async def read_target_soc(self, service):
+            return {"reference": 50}
+    gateway = Gateway()
+    monkeypatch.setattr("custom_components.pixiihome_controller.aps_priority.PhaseGateway",
+                        lambda client: client)
+    async def setter(**kwargs):
+        calls.append(("target", kwargs))
+        restored.set()
+        return {"status": "adjusted"}
+    async def noop(*args, **kwargs):
+        return None
+    original_initialize = RuntimeData.async_initialize_scheduler
+    async def initialize(runtime):
+        await original_initialize(runtime)
+        runtime.gateway_scheduler = SimpleNamespace(client=gateway, set_external_target_soc=setter)
+        now = int(datetime.now(UTC).timestamp())
+        snapshot = SimpleNamespace(
+            data_status="current", schedules=(schedule,) if lowered else (),
+            evaluated_at_epoch=now, window_start_epoch=now - 3600, window_end_epoch=now + 86400,
+        )
+        async def refresh():
+            return snapshot
+        runtime.scheduler_coordinator = SimpleNamespace(
+            async_start=noop, async_refresh=refresh, last_good_snapshot=snapshot,
+            add_listener=lambda callback: lambda: None,
+        )
+    monkeypatch.setattr(RuntimeData, "async_initialize_scheduler", initialize)
+    monkeypatch.setattr(RuntimeData, "start", noop)
+    monkeypatch.setattr(RuntimeData, "battery", property(lambda self: BatteryReading(
+        usable_soc=50, effective_min_soc=0, effective_max_soc=100)))
+    monkeypatch.setattr(RuntimeData, "plant_health", lambda self: PlantHealth(
+        True, True, True, True, True, ()))
+    async def priority_safe(self):
+        return True
+    monkeypatch.setattr(PriceOptimizationController, "_priority_allows_mutation", priority_safe)
+    monkeypatch.setattr(integration_module, "async_wait_for_mqtt_client", lambda _: asyncio.sleep(
+        0, result=True))
+    monkeypatch.setattr(integration_module, "remove_retired_entities", lambda *args: None)
+    monkeypatch.setattr(integration_module.LoadBalancingObserver, "start", lambda self: None)
+    monkeypatch.setattr(integration_module.EnergyForecastService, "start", noop)
+    monkeypatch.setattr(integration_module.BatteryActivityTracker, "start", lambda self: None)
+    from custom_components.pixiihome_controller.price_guard import PriceSocGuard
+    monkeypatch.setattr(PriceSocGuard, "start", lambda self: None)
+    hass = _executor_hass()
+    hass.data = {}
+    tasks = []
+    def background(coro, name):
+        task = asyncio.create_task(coro)
+        tasks.append(task)
+        return task
+    hass.async_create_background_task = background
+    hass.config_entries = SimpleNamespace(
+        async_forward_entry_setups=noop,
+        async_update_entry=lambda entry, *, data: setattr(entry, "data", data),
+    )
+    entry.async_on_unload = lambda callback: None
+    entry.add_update_listener = lambda callback: callback
+    try:
+        assert await integration_module.async_setup_entry(hass, entry)
+        await asyncio.wait_for(restored.wait(), 1)
+        # Allow durable post-write clearing to finish before asserting.
+        await asyncio.sleep(0)
+        runtime = hass.data[DOMAIN][entry.entry_id]
+        assert not runtime.controller_state.automatic_solar_charging_enabled
+        assert not runtime.controller_state.adaptive_peak_shaving_enabled
+        assert not runtime.controller_state.automatic_price_optimization_enabled
+        if lowered:
+            assert not runtime.lowered_external_targets
+            assert calls[0][0] == "target" and calls[0][1]["new_reference"] == 100
+        else:
+            assert not runtime.aps_priority.pending(owner)
+            assert calls == [("priority", [101, 107])]
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["solar", "aps"])
+@pytest.mark.parametrize("fail_read", [False, True])
+async def test_real_disabled_startup_restores_persisted_aps_priority(monkeypatch, owner, fail_read):
+    await _setup_with_owned_recovery(monkeypatch, owner=owner, fail_read=fail_read)
+
+
+@pytest.mark.asyncio
+async def test_real_disabled_price_startup_restores_remembered_target(monkeypatch):
+    await _setup_with_owned_recovery(monkeypatch, lowered=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_store", ["control_journal", "control_journal_backup"])
+async def test_real_aps_state_commit_failure_closes_authority_and_recovers_after_restart(
+    monkeypatch, failed_store,
+):
+    from custom_components.pixiihome_controller.aps_priority import APS_PRIORITY
+    from custom_components.pixiihome_controller.control.production import ProductionControlAuthority
+    runtime, entry, _, _ = await _configured_runtime(monkeypatch)
+    runtime.production_authority = ProductionControlAuthority(enabled=True)
+    await runtime.async_save_aps_state("production_control_authority",
+                                     runtime.production_authority.as_dict())
+    save = MemoryStore.async_save
+    failed = []
+    async def fail_once(store, value):
+        if store.key.endswith("." + failed_store) and not failed:
+            failed.append(store.key)
+            raise OSError("disk_failure")
+        await save(store, value)
+    monkeypatch.setattr(MemoryStore, "async_save", fail_once)
+    record = {"owner": "aps", "original": [101, 107], "owned": [101, 105, 107],
+              "status": "restore_pending"}
+    with pytest.raises(OSError, match="disk_failure"):
+        await runtime.async_save_aps_state(APS_PRIORITY, record)
+    assert not runtime.production_control_enabled()
+    assert runtime.control_state_error == "control_journal_persistence_failed"
+    restarted, _, _, _ = await _configured_runtime(monkeypatch, data=entry.data)
+    assert not restarted.production_control_enabled()
+    assert restarted.control_journal.controller_state[APS_PRIORITY] == record
+    gateway = SimpleNamespace(used=[101, 105, 107])
+    async def read(service):
+        return {"enabled": 1, "used_list": list(gateway.used)}
+    async def priority(used):
+        gateway.used = list(used)
+    gateway.read, gateway.priority = read, priority
+    restarted.gateway_scheduler = SimpleNamespace(client=gateway)
+    monkeypatch.setattr("custom_components.pixiihome_controller.aps_priority.PhaseGateway",
+                        lambda client: client)
+    await restarted.aps_priority.release()
+    assert gateway.used == [101, 107]
+    assert not restarted.aps_priority.pending()

@@ -112,6 +112,34 @@ cycle cost `0.10` give delivered cost `1.10 SEK/kWh`, self-consumption profit
 `1.30`, and export profit `0.90`. A self-consumption floor of `0.50` passes; an
 export floor of `1.00` fails. Enabling export does not suppress eligible self-use.
 
+## Recharge after adaptive peak shaving
+
+Verified actual APS discharge can justify holding an earlier expensive aggregator
+Target SOC until a later cheaper aggregator charge, even when the price plan has
+no discharge actions of its own. The APS observation expires after 24 hours and
+survives restart until fresh SOC rises above the observed discharged level;
+even partial recharge retires the old context. Fresh current SOC and a ready price plan remain required.
+The later slot must have complete prices and enough time, permitted charging
+power and battery capacity to refill the energy within the policy and planning
+horizon. The price difference must exceed the configured minimum difference.
+
+This requires **Automatic price optimization**, **Allow creating schedules** and
+**Allow changing aggregator schedules**, as well as production authority and the
+normal policy/identity checks. No APS-based hold is added for missing/stale
+observations, foreign APS, incomplete prices or an infeasible cheaper slot.
+The target is held at measured/projected SOC, bounded by the configured reserve;
+it is not arbitrarily lowered to minimum SOC. The later cheap target is retained.
+Original targets are restored, never raised above the aggregator's own value,
+when replanning no longer justifies a hold, including after restart.
+
+`aps_recharge_reason` explains eligibility, missing evidence or insufficient price
+advantage, and `aps_held_target_count` shows current APS-based holds. Targets
+already running or within the default five-minute lead time are not changed;
+`aps_targets_within_lead_time` shows how many targets have this restriction.
+APS observations wake planning instead of waiting for the default hourly pass,
+but an observation arriving after the lead-time boundary cannot guarantee a
+change. Check the live schedule and status.
+
 ## Allow live schedules
 
 After reviewing proposals, turning on **Allow creating schedules** permits its guarded reconciliation. It is not an immediate manual
@@ -160,10 +188,13 @@ schedules instead of being refilled by each of them:
 - A lowered target is restored to its original value when the plan no longer
   needs it. Originals are saved in the control journal
   (`lowered_external_targets`) and read back after a Home Assistant restart,
-  so a target can still be restored. Saving is best effort; if the journal
-  cannot be written, check the scheduler view after a restart.
-- At most one aggregator schedule is changed per planning pass. If a window
-  cannot be held, nothing after it is written.
+  so a target can still be restored. Original references for APS-based holds
+  must be saved durably before lowering; a storage failure blocks the write.
+- Each adjustment pass changes at most one aggregator schedule. Cleanup may run
+  several bounded restoration passes for remembered originals, and keeps retrying
+  safely while the feature is off. Expired or completely inventoried absent
+  one-shot identities are retired without sending a command. If a window cannot
+  be held, nothing after it is written.
 
 Raise the price optimizer's minimum SOC if you want more energy left for
 support services while targets are lowered. Whether changing an aggregator's

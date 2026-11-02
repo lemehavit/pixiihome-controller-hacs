@@ -10,8 +10,8 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from .activity import log_activity
+from .aps_priority import APS_RECHARGE, priority_attributes, retire_recharged_context
 from .control.models import ControlOperation
-from .control.phase_gateway import PhaseGateway
 from .control.policy import AutomationPolicy
 from .control.production import ProductionAdapterRequest
 from .control.settings import OperationalSettings
@@ -118,6 +118,7 @@ class AdaptivePeakShavingController:
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
         self._listeners: list[Callable[[], None]] = []
+        self._recharge_observed_at = float("-inf")
 
     def add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
         self._listeners.append(listener)
@@ -163,6 +164,7 @@ class AdaptivePeakShavingController:
             "maximum_discharge_w": float(settings.get("aps_max_discharge_kw")) * 1000,
             "maximum_limit_change_w": float(settings.get("aps_max_limit_change_kw")) * 1000,
             "keep_active": False,
+            **priority_attributes(self.runtime),
             "priority_verified": self.priority_verified,
             "priority_configured": self.priority_configured,
             "service_priority": list(self.priority_list),
@@ -214,13 +216,9 @@ class AdaptivePeakShavingController:
         scheduler = self.runtime.gateway_scheduler
         if scheduler is None:
             raise ValueError("aps_gateway_connection_required")
-        gateway = PhaseGateway(scheduler.client)
-        priority = await gateway.read(100)
-        if priority.get("enabled") != 1:
-            raise ValueError("aps_service_priority_disabled")
-        priority_list, must_configure = self.priority_with_aps(priority.get("used_list"))
-        if must_configure:
-            await gateway.priority(list(priority_list))
+        priority_list, must_configure = await self.runtime.aps_priority.acquire(
+            "aps", self.priority_with_aps
+        )
         self.priority_list = priority_list
         self.priority_configured = must_configure
         self.priority_verified = True
@@ -245,6 +243,10 @@ class AdaptivePeakShavingController:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        await self._release_effects()
+
+    async def _release_effects(self) -> None:
+        """Retire our lease and priority without cancelling the running tick."""
         if self._message_id is not None and self.clock() < self._lease_deadline:
             try:
                 result = await self.runtime.async_execute_peak_shaving_lease(
@@ -256,6 +258,14 @@ class AdaptivePeakShavingController:
             if result is not None and result.get("successful") is True:
                 self._message_id = None
                 self._lease_deadline = 0.0
+        self.priority_verified = False
+        manager = getattr(self.runtime, "aps_priority", None)
+        if manager is not None:
+            try:
+                await manager.release("aps")
+            except Exception as error:
+                self._publish("recovery_required", str(error) or "aps_priority_restore_failed")
+                raise
         self._applied_payload = None
         self._publish("disabled")
 
@@ -267,11 +277,15 @@ class AdaptivePeakShavingController:
                 await self.tick()
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                self._publish("blocked", "aps_controller_failed")
-            await asyncio.sleep(
-                int(self.runtime.operational_settings.get("aps_update_interval_seconds"))
-            )
+            except Exception as error:
+                self._publish(
+                    "blocked" if self.runtime.controller_state.adaptive_peak_shaving_enabled
+                    else "recovery_required", str(error) or "aps_priority_restore_failed"
+                )
+            interval = int(self.runtime.operational_settings.get("aps_update_interval_seconds"))
+            if not self.runtime.controller_state.adaptive_peak_shaving_enabled:
+                interval = max(60, interval)
+            await asyncio.sleep(interval)
 
     def _build_request(self) -> ProductionAdapterRequest:
         battery = self.runtime.battery
@@ -295,11 +309,15 @@ class AdaptivePeakShavingController:
 
     async def _tick_locked(self) -> None:
         now = self.clock()
+        await retire_recharged_context(self.runtime)
         if self._message_id is not None and now >= self._lease_deadline:
             self.runtime.release_aps_lease_identity(self._message_id)
             self._message_id = None
             self._applied_payload = None
         if not self.runtime.controller_state.adaptive_peak_shaving_enabled:
+            manager = getattr(self.runtime, "aps_priority", None)
+            if manager is not None:
+                await manager.release("aps")
             self._publish("disabled")
             return
         # The simulator runtime has no calibration hold.
@@ -311,6 +329,7 @@ class AdaptivePeakShavingController:
             self._publish("blocked", "aps_conflicts_with_automatic_solar_charging")
             return
         if not self.runtime.production_control_enabled():
+            await self._release_effects()
             self._publish("blocked", "production_control_disabled")
             return
         policy = self.runtime._automation_policy()
@@ -321,6 +340,7 @@ class AdaptivePeakShavingController:
             or policy.max_duration_seconds <= 0
             or policy.max_power_kw <= 0
         ):
+            await self._release_effects()
             self._publish("blocked", "automation_policy_not_authorized")
             return
         if not self.priority_verified:
@@ -366,6 +386,7 @@ class AdaptivePeakShavingController:
             self._publish("starting", "waiting_for_adaptive_peak_shaving_readback")
             return
         if owns_active_aps:
+            await self._observe_discharge()
             lease_seconds = int(request.payload["duration_seconds"])
             changed = desired_payload != self._applied_payload
             if changed or self._lease_deadline - now <= lease_seconds / 2:
@@ -381,6 +402,31 @@ class AdaptivePeakShavingController:
                 self._publish("active")
             return
         await self._write_lease(request, renewal=False)
+
+    async def _observe_discharge(self) -> None:
+        """A live keyed APS lease and fresh discharge telemetry are both required."""
+        battery = self.runtime.battery
+        soc, power = battery.usable_soc, battery.power_w
+        if (self._message_id is None or soc is None or power is None
+                or not isfinite(soc) or not 0 <= soc <= 100
+                or not isfinite(power) or power >= -200
+                or not self.runtime.telemetry.is_fresh("core")
+                or not self.runtime.telemetry.is_fresh("battery")
+                or self.clock() - self._recharge_observed_at < 60):
+            return
+        evidence = await self.runtime.async_verify_aps_lease(self._message_id)
+        if evidence.get("successful") is not True:
+            return
+        observed = datetime.now(UTC).timestamp()
+        await self.runtime.async_save_aps_state(APS_RECHARGE, {
+            "owner": "aps", "message_id": self._message_id,
+            "observed_at": observed, "expires_at": observed + 24 * 3600,
+            "usable_soc_percent": soc,
+        })
+        self._recharge_observed_at = self.clock()
+        price = getattr(self.runtime, "price_optimization_controller", None)
+        if price is not None:
+            price.request_refresh()
 
     async def _write_lease(
         self,

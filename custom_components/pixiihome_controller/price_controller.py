@@ -15,6 +15,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 
 from .activity import clock, log_activity
 from .activity import span as time_span
+from .aps_priority import retire_recharged_context
 from .control.price_optimization import (
     CONF_PRICE_OPTIMIZATION,
     ExternalWindow,
@@ -92,6 +93,11 @@ class PriceOptimizationController:
         # Original references of foreign targets this controller lowered.
         self._lowered: dict[tuple[int, int, int, int], float] = {}
         self._lowered_loaded = False
+        self._aps_held_starts: set[datetime] = set()
+        self.aps_recharge_reason: str | None = None
+        self.aps_targets_within_lead_time = 0
+        self._restoring_targets = False
+        self._cleanup_only = False
         # Foreign targets the Gateway side refused to change, with the reason.
         # They are planned as fixed until they end, and logged once.
         self._refused_targets: dict[tuple[int, int, int, int], str] = {}
@@ -335,6 +341,9 @@ class PriceOptimizationController:
             "adjusts_external_target_soc": bool(
                 settings.get("price_adjust_external_target_soc")
             ),
+            "aps_recharge_reason": self.aps_recharge_reason,
+            "aps_targets_within_lead_time": self.aps_targets_within_lead_time,
+            "aps_held_target_count": len(self._aps_held_starts),
             "external_target_adjust_count": self.external_target_adjust_count,
             "external_target_delete_count": self.external_target_delete_count,
             "lowered_external_targets": len(self._lowered),
@@ -395,7 +404,8 @@ class PriceOptimizationController:
         if publish:
             self._publish("ready")
 
-    def start(self) -> None:
+    def start(self, *, cleanup_only: bool = False) -> None:
+        self._cleanup_only = cleanup_only
         if self._task is None:
             self._stopping = False
             if self.config.price_entity_id is not None:
@@ -411,6 +421,8 @@ class PriceOptimizationController:
                 self._run(),
                 "pixiihome_controller automatic price optimization",
             )
+        else:
+            self.request_refresh()
 
     async def stop(self) -> None:
         for unsubscribe in self._unsubscribers:
@@ -433,26 +445,34 @@ class PriceOptimizationController:
         """Stop planning and remove only future price-owned schedules."""
         await self.stop()
         async with self._lock:
-            manager = self.runtime.scheduler_mutation_manager
-            if manager is None:
-                self._publish("blocked", "price_scheduler_mutation_unavailable")
-                return
-            now = datetime.now(UTC)
-            for record in self._price_records():
-                start = _record_start(record)
-                if start is None or start <= now:
-                    continue
-                result = await manager.delete(record.m_id)
-                if result.status is not SchedulerTransactionStatus.SUCCESS:
-                    self._report_blocked(f"remove {_describe(record)}", result)
-                    self._publish("blocked", f"price_delete_{result.reason}")
+            try:
+                await self._restore_external_targets_locked()
+                manager = self.runtime.scheduler_mutation_manager
+                if manager is None:
+                    self._publish("blocked", "price_scheduler_mutation_unavailable")
                     return
-                self.delete_count += 1
-                log_activity(self.runtime, PRICE_STATUS, f"Removed {_describe(record)} "
-                             "(price optimization turned off)",
-                             "Who: price optimization. Why: the switch Automatic price "
-                             "optimization was turned off, so its own schedules are removed.")
-            self._publish("disabled")
+                now = datetime.now(UTC)
+                for record in self._price_records():
+                    start = _record_start(record)
+                    if start is None or start <= now:
+                        continue
+                    result = await manager.delete(record.m_id)
+                    if result.status is not SchedulerTransactionStatus.SUCCESS:
+                        self._report_blocked(f"remove {_describe(record)}", result)
+                        self._publish("blocked", f"price_delete_{result.reason}")
+                        return
+                    self.delete_count += 1
+                    log_activity(self.runtime, PRICE_STATUS, f"Removed {_describe(record)} "
+                                 "(price optimization turned off)",
+                                 "Who: price optimization. Why: the switch Automatic price "
+                                 "optimization was turned off, so its own schedules are removed.")
+                if self._lowered:
+                    self._publish("blocked", "price_external_target_restore_pending")
+                else:
+                    self._publish("disabled")
+            finally:
+                if self._pending_originals():
+                    self.start(cleanup_only=True)
 
     async def release_for_authority_off(self) -> list[str]:
         """Remove every live price-owned effect while Gateway writes are still allowed.
@@ -463,6 +483,9 @@ class PriceOptimizationController:
         await self.stop()
         problems: list[str] = []
         async with self._lock:
+            await self._restore_external_targets_locked()
+            if self._lowered:
+                problems.append("price_external_target_restore_pending")
             manager = self.runtime.scheduler_mutation_manager
             if manager is None:
                 problems.append("price_scheduler_mutation_unavailable")
@@ -499,6 +522,76 @@ class PriceOptimizationController:
             else:
                 self._publish("disabled", "production_control_disabled")
         return problems
+
+    def _pending_originals(self) -> bool:
+        return bool(self._lowered or getattr(self.runtime, "lowered_external_targets", {}))
+
+    async def _retire_resolved_originals(self, snapshot: Any) -> None:
+        """Retire expired or provably absent one-shot identities, without writes."""
+        saved = getattr(self.runtime, "lowered_external_targets", {})
+        for key, reference in saved.items():
+            self._lowered.setdefault(key, reference)
+        self._lowered_loaded = True
+        now = datetime.now(UTC).timestamp()
+        evaluated = getattr(snapshot, "evaluated_at_epoch", 0)
+        if (snapshot.data_status != "current" or not now - 60 <= evaluated <= now + 5):
+            return
+        before = dict(self._lowered)
+        for key in before:
+            index, service, start, duration = key
+            end = start + duration
+            scope = (getattr(snapshot, "window_start_epoch", now + 1) <= start
+                     and getattr(snapshot, "window_end_epoch", 0) >= end)
+            present = any(
+                item.sch_index == index and item.service_no == service
+                and item.start_epoch == start and item.duration_seconds == duration
+                for item in snapshot.schedules
+            )
+            if end <= min(now, evaluated) or scope and not present:
+                self._lowered.pop(key, None)
+        if self._lowered != before:
+            await self.runtime.async_save_lowered_targets(dict(self._lowered))
+
+    async def restore_external_targets(self) -> None:
+        """Undo remembered target changes without creating any new price effects."""
+        async with self._lock:
+            await self._restore_external_targets_locked()
+
+    async def _restore_external_targets_locked(self) -> None:
+        saved = getattr(self.runtime, "lowered_external_targets", {})
+        if not self._lowered and not saved:
+            return
+        coordinator = self.runtime.scheduler_coordinator
+        if coordinator is None:
+            self._publish("blocked", "price_external_target_restore_pending")
+            return
+        snapshot = await coordinator.async_refresh()
+        if snapshot is None or snapshot.data_status != "current":
+            self._publish("blocked", "price_external_target_restore_pending")
+            return
+        await self._retire_resolved_originals(snapshot)
+        if not self._lowered:
+            return
+        await self._load_external_windows(())
+        self._restoring_targets = True
+        try:
+            # The existing mutation path retains identity, originals and lead
+            # time. Its one-write bound applies to each restoration pass too.
+            for _ in range(max(len(self._lowered), len(saved))):
+                before = len(self._lowered) + len(saved)
+                await self._apply_external_targets(
+                    self._external_windows,
+                    PricePlan((), (), "restore-original-targets", 0, 100, 0),
+                    {"min_soc": self.runtime._automation_policy().soc_min_percent},
+                )
+                saved = getattr(self.runtime, "lowered_external_targets", {})
+                if len(self._lowered) + len(saved) >= before:
+                    break
+        finally:
+            self._restoring_targets = False
+        self._aps_held_starts.clear()
+        if self._lowered:
+            self._publish("blocked", "price_external_target_restore_pending")
 
     def request_refresh(self) -> None:
         """Wake the planner after a setting or price-entity change."""
@@ -636,7 +729,18 @@ class PriceOptimizationController:
         # Read-only, so it also runs while the switches are off: after a
         # restart they stay off until every unconfirmed outcome is settled.
         await self._settle_unconfirmed_deletes()
-        if not self.runtime.controller_state.automatic_price_optimization_enabled:
+        recharged = await retire_recharged_context(self.runtime)
+        if self._pending_originals() and (
+            recharged
+            or not self.runtime.operational_settings.get("price_schedule_writes_enabled")
+            or not self.runtime.operational_settings.get("price_adjust_external_target_soc")
+        ):
+            await self._restore_external_targets_locked()
+        if (self._cleanup_only
+                or not self.runtime.controller_state.automatic_price_optimization_enabled):
+            await self._restore_external_targets_locked()
+            if self._lowered:
+                return
             self._publish("disabled")
             return
         # The simulator runtime has no calibration hold.
@@ -647,6 +751,8 @@ class PriceOptimizationController:
         try:
             await self.prepare(publish=False)
         except ValueError as error:
+            if self._pending_originals():
+                await self._restore_external_targets_locked()
             reason = str(error)
             self._publish(
                 "waiting_prices"
@@ -676,9 +782,13 @@ class PriceOptimizationController:
         assert config.price_entity_id is not None
         state = self.runtime.hass.states.get(config.price_entity_id)
         if state is None or state.state in {"unknown", "unavailable"}:
+            if self._pending_originals():
+                await self._restore_external_targets_locked()
             self._publish("waiting_prices", "price_entity_unavailable")
             return
         if datetime.now(UTC) - state.last_updated.astimezone(UTC) > timedelta(hours=36):
+            if self._pending_originals():
+                await self._restore_external_targets_locked()
             self._publish("waiting_prices", "price_entity_stale")
             return
         try:
@@ -723,6 +833,8 @@ class PriceOptimizationController:
             policy = self.runtime._automation_policy()
             plan = self._build_plan(series, limits)
         except ValueError as error:
+            if self._pending_originals():
+                await self._restore_external_targets_locked()
             self._publish("blocked", str(error))
             return
         if self.plan is None or not plan.ready:
@@ -748,6 +860,8 @@ class PriceOptimizationController:
             default=None,
         )
         if not plan.ready:
+            if self._pending_originals():
+                await self._restore_external_targets_locked()
             self._publish("waiting_prices", plan.blockers[0])
             return
         if any(action.duration_seconds > policy.max_duration_seconds for action in plan.actions):
@@ -788,6 +902,7 @@ class PriceOptimizationController:
         if not bool(
             self.runtime.operational_settings.get("price_schedule_writes_enabled")
         ):
+            await self._restore_external_targets_locked()
             await self._load_external_windows(plan.actions)
             self.plan = self._build_plan(series, limits, windows=self._external_windows)
             self._log_plan(self.plan, series)
@@ -803,6 +918,9 @@ class PriceOptimizationController:
             self.runtime.operational_settings.get("price_adjust_external_target_soc")
         )
         self._prune_refused_targets()
+        if not adjust:
+            self._aps_held_starts.clear()
+            self.aps_recharge_reason = "aggregator_changes_not_permitted"
         # A refused target is planned as fixed from then on, so plan again
         # around it instead of dropping everything after it.
         for _ in range(3):
@@ -867,6 +985,14 @@ class PriceOptimizationController:
 
     async def _mutation_context_safe(self) -> bool:
         """Recheck source, mode and authority before every individual mutation."""
+        if self._restoring_targets:
+            health = self.runtime.plant_health()
+            return bool(
+                self.runtime.production_control_enabled()
+                and health.telemetry_fresh and health.system_safe and health.battery_safe
+                and health.grid_safe and health.system_events_clear
+                and await self._priority_allows_mutation()
+            )
         entity_id = self.config.price_entity_id
         state = self.runtime.hass.states.get(entity_id) if entity_id else None
         health = self.runtime.plant_health()
@@ -1477,7 +1603,13 @@ class PriceOptimizationController:
         the next planned charge (or the last discharge) stay adjustable; the
         rest keep refilling the battery as the aggregator intends.
         """
+        self._aps_held_starts = set()
+        self.aps_recharge_reason = None
         lead = datetime.now(UTC) + timedelta(minutes=self.config.minimum_lead_minutes)
+        self.aps_targets_within_lead_time = sum(
+            meta is not None and window.start <= lead
+            for window, meta in zip(self._external_windows, self._external_meta, strict=True)
+        )
         eligible = [
             meta is not None and meta[1] is not None and window.start > lead
             and _target_key(meta[0]) not in self._refused_targets
@@ -1488,11 +1620,12 @@ class PriceOptimizationController:
             for window, flag in zip(self._external_windows, eligible, strict=True)
         )
         if not any(eligible):
+            self.aps_recharge_reason = "target_active_or_within_lead_time"
             return self._external_windows
         first = self._build_plan(series, limits, windows=trial)
         discharges = [a for a in first.actions if a.direction is PriceDirection.DISCHARGE]
         if not first.ready or not discharges:
-            return self._external_windows
+            return self._with_aps_targets(series, limits, self._external_windows, eligible, first)
         recharge = next(
             (a for a in first.actions
              if a.direction is PriceDirection.CHARGE and a.start >= discharges[0].end),
@@ -1511,10 +1644,101 @@ class PriceOptimizationController:
                 min(later, key=lambda w: (_window_price(series, w), w.start)).start
                 if later else last
             )
-        return tuple(
+        held = tuple(
             replace(window, adjustable=flag and discharges[0].start <= window.start < until)
             for window, flag in zip(self._external_windows, eligible, strict=True)
         )
+        return self._with_aps_targets(series, limits, held, eligible, first)
+
+    def _with_aps_targets(
+        self, series: PriceSeries, limits: dict[str, float],
+        windows: tuple[ExternalWindow, ...], eligible: list[bool], plan: PricePlan,
+    ) -> tuple[ExternalWindow, ...]:
+        """Hold expensive recharge only after real owned APS discharge.
+
+        A later aggregator target must have enough time and charging power to
+        recover the energy. Complete price coverage is required for both slots.
+        """
+        context = getattr(self.runtime, "aps_recharge_context", None)
+        now = datetime.now(UTC).timestamp()
+        battery = self.runtime.battery
+        if not isinstance(context, dict) or context.get("owner") != "aps":
+            self.aps_recharge_reason = "verified_aps_discharge_unavailable"
+            return windows
+        observed = _finite_number(context.get("observed_at"))
+        expires = _finite_number(context.get("expires_at"))
+        measured = _finite_number(context.get("usable_soc_percent"))
+        if (observed is None or expires is None or measured is None
+                or not 0 <= measured <= 100 or not observed <= now < expires
+                or expires - observed > 24 * 3600
+                or type(context.get("message_id")) is not int):
+            self.aps_recharge_reason = "aps_discharge_context_expired_or_invalid"
+            return windows
+        fresh = getattr(self.runtime.telemetry, "is_fresh", None)
+        if not callable(fresh) or not fresh("battery") or not fresh("core"):
+            self.aps_recharge_reason = "aps_recharge_soc_not_fresh"
+            return windows
+        soc = battery.usable_soc
+        if soc is not None and isfinite(soc) and soc > measured + 0.5:
+            self.aps_recharge_reason = "aps_discharge_context_recharged"
+            return windows
+        if soc is None or not isfinite(soc) or not plan.ready:
+            self.aps_recharge_reason = "aps_recharge_plan_unavailable"
+            return windows
+        policy = self.runtime._automation_policy()
+        power = min(limits["charge_kw"], policy.max_power_kw,
+                    max(0.0, (battery.charge_power_limit_w or 0) / 1000))
+        efficiency = sqrt(limits["efficiency"] / 100)
+        maximum = min(limits["max_soc"], policy.soc_max_percent)
+        projected = dict(plan.window_socs)
+        result = list(windows)
+        self.aps_recharge_reason = "no_feasible_cheaper_recharge"
+        for index in reversed(range(len(windows))):
+            window, flag = windows[index], eligible[index]
+            if not flag or window.adjustable:
+                continue
+            price = _covered_window_price(series, window)
+            meta = self._external_meta[index]
+            originals = getattr(self.runtime, "lowered_external_targets", {})
+            original = None if meta is None else self._lowered.get(
+                _target_key(meta[0]), originals.get(_target_key(meta[0]))
+            )
+            target = window.target_usable_soc_percent
+            if (original is not None and battery.effective_min_soc is not None
+                    and battery.effective_max_soc is not None
+                    and battery.effective_max_soc > battery.effective_min_soc):
+                target = (original - battery.effective_min_soc) * 100 / (
+                    battery.effective_max_soc - battery.effective_min_soc
+                )
+            at_start = max(soc, projected.get(window.start, soc))
+            if price is None or target is None or target <= at_start:
+                continue
+            for later in result[index + 1:]:
+                later_price = _covered_window_price(series, later)
+                later_target = later.target_usable_soc_percent
+                if (later.adjustable or later.start < window.end
+                        or later.end.timestamp() > min(
+                            expires, now + self.config.planning_horizon_hours * 3600
+                        )
+                        or later_price is None
+                        or later_target is None or later_target < min(target, maximum)
+                        or price - later_price <= limits["difference"]):
+                    continue
+                hours = (later.end - later.start).total_seconds() / 3600
+                recharge_soc = min(soc, at_start, projected.get(later.start, soc))
+                need = max(0, min(target, maximum) - recharge_soc) / 100 * limits["capacity"]
+                if power * hours * efficiency < need or policy.bounded_duration(
+                    later.start, int(hours * 3600)
+                ) < hours * 3600:
+                    continue
+                # Unknown intervening energy cannot underwrite delayed recharge.
+                if any(not w.known for w in windows[index + 1:] if w.start < later.start):
+                    continue
+                result[index] = replace(window, adjustable=True)
+                self._aps_held_starts.add(window.start)
+                self.aps_recharge_reason = "verified_aps_discharge_cheaper_recharge_later"
+                break
+        return tuple(result)
 
     async def _apply_external_targets(
         self,
@@ -1585,6 +1809,7 @@ class PriceOptimizationController:
             key = _target_key(schedule)
             replace_window = (
                 window.adjustable
+                and window.start not in self._aps_held_starts
                 and window.start < replace_until
                 and any(
                     action.start < window.end and window.start < action.end
@@ -1595,7 +1820,10 @@ class PriceOptimizationController:
                 # The plan uses this time itself: remove the aggregator target.
                 desired, allow_delete = reference, True
             elif window.adjustable:
-                usable = max(floor, planned.get(window.start, floor))
+                fallback = (battery.usable_soc if window.start in self._aps_held_starts else floor)
+                if fallback is None:
+                    return window.start
+                usable = max(floor, planned.get(window.start, fallback))
                 desired = float(min(100, ceil(battery.effective_min_soc + usable * span / 100)))
                 original = self._lowered.get(key)
                 if desired >= reference - 0.5:
@@ -1609,7 +1837,7 @@ class PriceOptimizationController:
                         continue
                     allow_delete = False
                 else:
-                    allow_delete = True
+                    allow_delete = window.start not in self._aps_held_starts
             elif key in self._lowered:
                 desired, allow_delete = self._lowered[key], False
                 if desired <= reference + 0.5:
@@ -1622,6 +1850,11 @@ class PriceOptimizationController:
                 # Stop here; a held window that was not adjusted ends the plan.
                 return (failed_from or window.start) if window.adjustable else failed_from
             writes += 1
+            if window.start in self._aps_held_starts and desired < reference:
+                self._lowered.setdefault(key, reference)
+                save = getattr(self.runtime, "async_save_lowered_targets", None)
+                if save is not None:
+                    await save(dict(self._lowered))
             try:
                 apply_target: Any = setter
                 result = await apply_target(
@@ -1658,10 +1891,11 @@ class PriceOptimizationController:
                     self.external_target_adjust_count += 1
                     log_activity(self.runtime, PRICE_STATUS,
                                  f"Lowered aggregator Target SOC {when} from {reference:.0f} % "
-                                 f"to {desired:.0f} % to keep the planned discharge",
+                                 f"to {desired:.0f} % to postpone more expensive recharge",
                                  "Who: price optimization, with Allow changing aggregator "
                                  "schedules on. Why: the aggregator target would recharge "
-                                 "from the grid between a planned discharge and the next "
+                                 "from the grid after verified APS discharge or between a "
+                                 "planned discharge and the next "
                                  "planned charge; it is lowered to the planned level, never "
                                  "below your minimum SOC.")
                 else:
@@ -1897,6 +2131,22 @@ _LASTING_TARGET_REFUSALS = frozenset({
 
 def _lasting_refusal(reason: str) -> bool:
     return any(part.strip() in _LASTING_TARGET_REFUSALS for part in reason.split(","))
+
+
+def _covered_window_price(series: PriceSeries, window: ExternalWindow) -> float | None:
+    """Duration-weighted price only when every second of a window is priced."""
+    cursor, total = window.start, 0.0
+    for item in sorted(series.intervals, key=lambda item: item.start):
+        if item.end <= cursor:
+            continue
+        if item.start > cursor:
+            return None
+        end = min(window.end, item.end)
+        total += (end - cursor).total_seconds() * item.price_sek_per_kwh
+        cursor = end
+        if cursor >= window.end:
+            return total / (window.end - window.start).total_seconds()
+    return None
 
 
 def _window_price(series: PriceSeries, window: ExternalWindow) -> float:

@@ -291,6 +291,17 @@ class BatteryActivityTracker:
         external = self._external_schedule(service, now)
         if external is not None:
             return external
+        priority = getattr(runtime, "aps_priority", None)
+        if service == 105 and priority is not None:
+            if priority.status == "recovery_required":
+                return Cause("Gateway native APS", "APS priority restoration needs recovery: "
+                             + str(priority.reason))
+            if priority.status == "preexisting":
+                return Cause("Gateway native APS", "APS was already in the Gateway priority list; "
+                             "turning off solar charging or peak shaving does not remove it")
+            if priority.status == "owned":
+                return Cause("Gateway native APS", "APS is in the priority list added by this "
+                             "integration; no owned active lease is verified")
         return Cause(
             "not started by this integration",
             "no matching schedule in the Gateway list (Gateway's own control, "

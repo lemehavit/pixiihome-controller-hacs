@@ -94,6 +94,8 @@ async def test_price_optimization_waits_while_calibration_runs() -> None:
             controller_state=SimpleNamespace(automatic_price_optimization_enabled=True),
             battery_calibration_active=lambda: True,
         ),
+        _pending_originals=lambda: False,
+        _cleanup_only=False,
         _publish=lambda status, reason=None: published.append((status, reason)),
     )
 

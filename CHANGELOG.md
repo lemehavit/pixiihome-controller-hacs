@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.5.23 — 2026-11-02
+
+- Solladdning och effekttoppsutjämning journalför nu originalprioriteten innan
+  de lägger till APS i Gatewayen. Appens egen prioritetsändring återställs vid
+  avstängning, omstart och avstängd styrbehörighet, även utan startad laddlease.
+  Pågående scheman och externt ändrad prioritet skrivs inte över.
+- Återhämtning efter tillfälliga fel fortsätter när funktionen är avstängd.
+  Fasstödet samordnas med APS så att en äldre prioritetslista inte återinförs.
+  Aktivitetsloggen visar ägare, originalprioritet och återställningsutfall.
+- Prisoptimeringen kan hålla tillbaka dyr återladdning efter verifierad faktisk
+  APS-urladdning, även utan en egen planerad prisurladdning. Ett dyrare
+  aggregatormål kan sänkas till uppmätt/prognostiserad SOC tills ett senare
+  billigare aggregatorschema med tillräcklig laddtid och effekt.
+- Funktionen kräver prisoptimering, schemaskrivning och tillstånd att ändra
+  aggregatorns scheman. SOC-reserv, prisfördel, färska mätvärden och ledtid
+  kontrolleras. Redan aktiva mål eller mål inom ledtiden ändras inte.
+- Återladdningsunderlaget sparas över omstart, gäller högst 24 timmar och
+  avslutas vid uppmätt återladdning. Tidigare sänkta mål återställs när
+  förutsättningarna för uppskjutning försvinner, även utan tillgängliga priser.
+  Återaktivering väcker prisplaneringen direkt.
+- Regressionstester täcker båda prisplanerarna, verklig uppstartsåterhämtning,
+  lagringsfel och samspelet mellan regulatorerna. 1 622 tester passerar lokalt.
+
+Begränsningar:
+
+- En APS-prioritet som redan fanns före uppgraderingen saknar ofta sparat
+  original. Den tas inte bort automatiskt; ursprunglig konfiguration måste
+  bekräftas separat. Uppdateringen gör inget globalt Idle-stopp.
+- Äldre återställningslogik för aggregatormål kan fortfarande återställa ett
+  historiskt original trots en senare extern måländring. Full återställning
+  efter misslyckad aktiveringslagring är också fortsatt separat arbete.
+- Ingen ny fysisk Gateway-validering har genomförts i denna version.
+
 ## 0.5.22 — 2026-10-29
 
 - F3c: Regressionstester täcker en laddgräns under 0,05 kW och en filtrerad
