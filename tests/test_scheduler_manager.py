@@ -1125,16 +1125,27 @@ def _move_start(store: Any, start: datetime) -> datetime:
     return start.replace(microsecond=0)
 
 
+def _ended_get(store: Any, **changes: Any):
+    # The keyed GET for the moved schedule: same time and values, idle.
+    starttime = store.records[M_ID].intended_state["starttime"]
+    return replace(
+        _demandresponse_get(
+            starttime=starttime, service_status=2, service_duration_left=0, **changes
+        ),
+        service_status=2, service_duration_left=0,
+    )
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("readback", [TimeoutError(), "present"])
+@pytest.mark.parametrize("readback", [TimeoutError(), "idle"])
 async def test_unconfirmed_price_delete_settles_once_its_interval_has_ended(readback) -> None:
     # 28 Oct: a 15:30 charge's DELETE was never confirmed and the keyed GET
     # kept failing, so every price write stayed blocked long after it ended.
-    get = _demandresponse_get() if readback == "present" else readback
-    executor, store, allocator, manager_instance = _timed_out_price_delete([get])
+    executor, store, allocator, manager_instance = _timed_out_price_delete([])
     await manager_instance.delete(M_ID)
     assert store.records[M_ID].lifecycle is OwnershipLifecycle.CONFLICTED
     start = _move_start(store, datetime.now(UTC) - timedelta(hours=2))
+    executor.gets = [_ended_get(store) if readback == "idle" else readback]
 
     recovered = await manager_instance.recover_conflicted_price_delete(M_ID)
 
@@ -1148,6 +1159,50 @@ async def test_unconfirmed_price_delete_settles_once_its_interval_has_ended(read
     assert isinstance(journal, InMemoryJournalPort)
     assert journal.journal.transactions[-1].phase is JournalPhase.RECONCILED
     assert not store.has_unresolved_records()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("readback", ["moved_to_future", "longer", "running", "changed_values"])
+async def test_ended_price_delete_stays_conflicted_when_gateway_disagrees(readback) -> None:
+    # N1: a readable reply that contradicts the local end time (another
+    # start, a longer duration, a service still running with time left or
+    # changed values) is evidence, not a missing answer. Keep the conflict.
+    executor, store, allocator, manager_instance = _timed_out_price_delete([])
+    await manager_instance.delete(M_ID)
+    _move_start(store, datetime.now(UTC) - timedelta(hours=2))
+    gets = {
+        "moved_to_future": lambda: _demandresponse_get(),  # START is ahead
+        "longer": lambda: replace(_ended_get(store, duration=4 * 3600), duration=4 * 3600),
+        "running": lambda: replace(
+            _ended_get(store), service_status=5, service_duration_left=3590,
+            values={**_ended_get(store).values, "service_status": 5,
+                    "service_duration_left": 3590},
+        ),
+        "changed_values": lambda: _ended_get(store, pacref=-3000),
+    }
+    executor.gets = [gets[readback]()]
+
+    recovered = await manager_instance.recover_conflicted_price_delete(M_ID)
+
+    assert recovered.status is not SchedulerTransactionStatus.SUCCESS
+    assert recovered.reason == "recovery_readback_contradicts_ended_interval"
+    assert store.records[M_ID].lifecycle is OwnershipLifecycle.CONFLICTED
+    assert store.has_unresolved_records()
+    assert M_ID in allocator.owned_ids
+    assert len(executor.mutation_commands) == 1  # nothing re-sent
+
+
+@pytest.mark.asyncio
+async def test_ended_price_delete_still_settles_on_proven_absence() -> None:
+    absent = replace(get_ack(), response=11, m_id=M_ID, service="demandresponse")
+    executor, store, allocator, manager_instance = _timed_out_price_delete([absent])
+    await manager_instance.delete(M_ID)
+    _move_start(store, datetime.now(UTC) - timedelta(hours=2))
+
+    recovered = await manager_instance.recover_conflicted_price_delete(M_ID)
+
+    assert recovered.status is SchedulerTransactionStatus.SUCCESS
+    assert store.records[M_ID].lifecycle is OwnershipLifecycle.ORPHANED
 
 
 @pytest.mark.asyncio

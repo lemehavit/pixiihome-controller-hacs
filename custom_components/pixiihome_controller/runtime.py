@@ -683,6 +683,11 @@ class RuntimeData:
         if type(enabled) is not bool:
             raise HomeAssistantError("Production authority state is invalid")
         cleanup_problems: list[str] = []
+        # Turning off an authority that is already off runs no cleanup, so it
+        # is no evidence that earlier problems were solved: they stay reported.
+        already_off = not enabled and not self.production_control_enabled()
+        if already_off:
+            cleanup_problems = list(getattr(self, "_authority_cleanup_problems", []))
         if not enabled and self.production_control_enabled():
             # Gateway writes are still authorized here. Remove what the
             # integration created before closing the gate; afterwards even the
@@ -697,7 +702,12 @@ class RuntimeData:
                 await self.meter_limit_load_balancer.deactivate()
             except Exception as error:  # noqa: BLE001 - persist authority off despite cleanup failure
                 reason = str(error) or "meter_limitation_restore_failed"
-                cleanup_problems.append(f"load_balancing Service 120 ({reason})")
+                problem = f"load_balancing Service 120 ({reason})"
+                cleanup_problems = [
+                    item for item in cleanup_problems
+                    if not item.startswith("load_balancing Service 120 (")
+                ]
+                cleanup_problems.append(problem)
         async with self._control_journal_lock:
             journal = self.control_journal
             if journal is None:
@@ -769,7 +779,17 @@ class RuntimeData:
                 if enabled
                 else {"production_control_disabled", "state_changing_control_not_live_validated"}
             )
-        if not enabled:
+        if not enabled and already_off:
+            log_activity(
+                self, "price_optimization_status",
+                "Control authority was already off; no cleanup was run"
+                + (f"; still unresolved: {', '.join(cleanup_problems)}" if cleanup_problems
+                   else ""),
+                cause="Administrator turned off production control again; an already "
+                "closed authority gives no new evidence, so earlier cleanup problems "
+                "stay reported",
+            )
+        elif not enabled:
             log_activity(
                 self, "price_optimization_status",
                 "Control authority turned off"
