@@ -265,9 +265,11 @@ def test_discharge_money_is_one_cycle_after_the_energy_cost() -> None:
 def test_discharge_before_a_fixed_target_is_valued_at_its_refill_price() -> None:
     from custom_components.pixiihome_controller.control.whole_day_planner import _basis
 
-    assert _basis(2.0, 0.0, 0.0, 1.5) == 2.0
-    assert _basis(None, 3.0, 2.0, 9.0) == 1.5
-    assert _basis(None, 0.0, 0.0, 1.7) == 1.7
+    assert _basis((2.0, 1.0), 0.0, 0.0, 0.0, 1.5) == (2.0, 1.0)
+    assert _basis(None, 3.0, 2.0, 2.0, 9.0) == (1.5, 1.0)
+    # Energy a written charge stored from solar pays no import cost.
+    assert _basis(None, 3.0, 2.0, 0.5, 9.0) == (1.5, 0.25)
+    assert _basis(None, 0.0, 0.0, 0.0, 1.7) == (1.7, 1.0)
 
 
 def test_discharge_before_a_planned_charge_is_valued_at_that_charge_price() -> None:
@@ -587,15 +589,49 @@ def test_without_a_solar_limit_the_plan_counts_the_whole_surplus() -> None:
 
     unlimited = _plan(_series(prices), forecast, maximum_charge_kw=4.0)
     explicit = _plan(_series(prices), forecast, maximum_charge_kw=4.0, solar_charging=None)
-    loose = _plan(
-        _series(prices), forecast, maximum_charge_kw=4.0,
-        solar_charging=SolarCharging(True, 10.0, 100.0),
-    )
     assert explicit == unlimited
-    assert loose.plan == unlimited.plan
-    assert [s.battery_kw for s in loose.slots] == [s.battery_kw for s in unlimited.slots]
     solar = [slot for slot in unlimited.slots if slot.kind == "solar"]
     assert solar and all(slot.performed_by == "automatic_solar_charging" for slot in solar)
+
+
+def test_active_solar_controller_charges_as_soon_as_there_is_surplus() -> None:
+    # N3: with smart deferral off, the solar controller charges in hours 1-2
+    # already. The plan must not count on waiting for the cheap hours and
+    # selling the expensive solar power first: nothing would make it wait.
+    prices = [1.5, 1.4, 0.3, 0.2, 1.3, 1.2, 2.5, 2.5]
+
+    def forecast(start: datetime, end: datetime) -> tuple[float, float]:
+        hour = int((start - NOW).total_seconds() // 3600) - 1
+        return (1.0, 5.0 if hour < 6 else 0.0)
+
+    result = _plan(
+        _series(prices), forecast, maximum_charge_kw=4.0,
+        solar_charging=SolarCharging(True, 4.0, 90.0),
+    )
+    first, second, third = result.slots[:3]
+    assert first.performed_by == second.performed_by == "automatic_solar_charging"
+    assert first.battery_kw == pytest.approx(4.0, abs=0.15)
+    assert first.usable_soc_percent > 40.0
+    assert second.usable_soc_percent > first.usable_soc_percent
+    # The cap is reached on the controller's own schedule, never later.
+    assert third.usable_soc_percent == pytest.approx(90.0, abs=1.0)
+    assert [a for a in result.plan.actions if a.direction is PriceDirection.CHARGE] == []
+
+
+def test_filtered_discharge_in_a_sunny_hour_leaves_solar_charging_running() -> None:
+    # Without a written action the solar controller takes the surplus, also
+    # where DP had planned a discharge that the minimum profit then dropped.
+    def forecast(start: datetime, end: datetime) -> tuple[float, float]:
+        return (1.0, 3.0)
+
+    result = _plan(
+        _series([1.0, 1.0]), forecast, usable_soc_percent=50.0,
+        solar_charging=SolarCharging(True, 10.0, 90.0),
+        minimum_difference_sek_per_kwh=5.0,
+    )
+    assert result.plan.actions == ()
+    assert all(slot.performed_by == "automatic_solar_charging" for slot in result.slots)
+    assert result.slots[0].battery_kw == pytest.approx(2.0, abs=0.15)
 
 
 def test_solar_charge_after_a_filtered_discharge_stops_at_the_solar_cap() -> None:
@@ -610,6 +646,7 @@ def test_solar_charge_after_a_filtered_discharge_stops_at_the_solar_cap() -> Non
     result = _plan(
         series, forecast, usable_soc_percent=80.0,
         solar_charging=SolarCharging(True, 10.0, 80.0),
+        minimum_difference_sek_per_kwh=1.0,
     )
     third = result.slots[2]
     assert third.battery_kw == pytest.approx(0.0)
@@ -622,27 +659,26 @@ def test_solar_charge_after_a_filtered_discharge_stops_at_the_solar_cap() -> Non
 
 
 def test_written_charge_after_a_filtered_discharge_refills_only_what_was_used() -> None:
-    # DP plans 30 -> 15 % at 0.8, 15 -> 10 % at 1.1 and a refill to 38 % in
-    # the sunny last hour (partly beyond the 1 kW solar limit, so written).
-    # The 0.8 discharge is below the minimum profit and stays unwritten; the
-    # written charge must then stop at DP's 38 %, not also refill the 15 %
-    # that was never discharged.
+    # DP plans 30 -> 15 % at 0.8, 15 -> 10 % at 1.1 and a refill in the last
+    # hour: 1 kW from the solar controller plus a written grid charge. The 0.8
+    # discharge is below the minimum profit and stays unwritten; the written
+    # charge must then stop at DP's level, not also refill the 15 % that was
+    # never discharged, so the sun alone is enough and nothing is bought.
     def forecast(start: datetime, end: datetime) -> tuple[float, float]:
         hour = int((start - NOW).total_seconds() // 3600) - 1
-        return [(2.0, 0.0), (0.5, 0.0), (0.5, 0.0), (0.0, 3.0)][hour]
+        return [(2.0, 0.0), (0.5, 0.0), (0.5, 0.0), (0.0, 1.0)][hour]
 
     series = _series([0.8, 1.1, 0.1, 0.3])
     result = _plan(
         series, forecast, usable_soc_percent=30.0,
-        solar_charging=SolarCharging(True, 1.0, 80.0),
+        solar_charging=SolarCharging(True, 1.0, 80.0), levels=100,
     )
     assert result.slots[0].performed_by == "none"
     assert result.slots[1].usable_soc_percent == pytest.approx(25.0)
     last = result.slots[-1]
-    assert last.performed_by == "price_schedule"
-    assert last.usable_soc_percent == pytest.approx(38.0)
-    charge = [a for a in result.plan.actions if a.direction is PriceDirection.CHARGE]
-    assert len(charge) == 1 and charge[0].power_kw == pytest.approx(1.4)
+    assert last.performed_by == "automatic_solar_charging"
+    assert last.usable_soc_percent == pytest.approx(34.0)
+    assert [a for a in result.plan.actions if a.direction is PriceDirection.CHARGE] == []
 
 
 def test_surplus_below_the_start_threshold_is_not_solar_charged() -> None:
@@ -658,3 +694,124 @@ def test_surplus_below_the_start_threshold_is_not_solar_charged() -> None:
         solar_charging=SolarCharging(True, 10.0, 90.0, minimum_surplus_kw=0.4),
     )
     assert any(slot.performed_by == "automatic_solar_charging" for slot in started.slots)
+
+
+def test_solar_export_buffer_is_not_counted_as_stored_energy() -> None:
+    # N2: the solar controller leaves the export buffer to the grid. With a
+    # 1 kW surplus and a 2 kW buffer it stores nothing at all.
+    def forecast(start: datetime, end: datetime) -> tuple[float, float]:
+        return (0.0, 1.0)
+
+    buffered = _plan(
+        _series([1.0] * 4), forecast, usable_soc_percent=50.0,
+        solar_charging=SolarCharging(True, 10.0, 90.0, export_buffer_kw=2.0),
+    )
+    assert all(slot.battery_kw == pytest.approx(0.0) for slot in buffered.slots)
+    assert all(slot.usable_soc_percent == pytest.approx(50.0) for slot in buffered.slots)
+    assert buffered.plan.actions == ()
+    # Part of the surplus left: only what is above the buffer is stored.
+    partial = _plan(
+        _series([1.0] * 4), lambda start, end: (0.0, 3.0), usable_soc_percent=50.0,
+        solar_charging=SolarCharging(True, 10.0, 90.0, export_buffer_kw=2.0),
+    )
+    assert partial.slots[0].free_solar_kw == pytest.approx(1.0)
+
+
+def test_start_threshold_still_looks_at_the_raw_surplus() -> None:
+    # A 1.5 kW surplus passes a 1.0 kW start threshold even though only
+    # 1.3 kW is left after a 0.2 kW buffer.
+    result = _plan(
+        _series([1.0] * 2), lambda start, end: (0.0, 1.5), usable_soc_percent=50.0,
+        solar_charging=SolarCharging(
+            True, 10.0, 90.0, minimum_surplus_kw=1.0, export_buffer_kw=0.2,
+        ),
+    )
+    assert result.slots[0].free_solar_kw == pytest.approx(1.3)
+
+
+def test_written_charge_from_solar_pays_no_import_cost() -> None:
+    # N4: solar charging is off, so storing the 3 kW surplus needs a written
+    # charge. That energy is not imported: the later discharge costs
+    # 0.50 / 0.9, not (0.50 + 0.65) / 0.9, and passes the 0.80 minimum.
+    def forecast(start: datetime, end: datetime) -> tuple[float, float]:
+        return (0.0, 3.0) if start == NOW + timedelta(hours=1) else (2.0, 0.0)
+
+    result = _plan(
+        _series([0.50, 0.90]), forecast,
+        solar_charging=SolarCharging(False, 10.0, 90.0),
+        grid_import_cost_sek_per_kwh=0.65, minimum_difference_sek_per_kwh=0.80,
+    )
+    charge = [a for a in result.plan.actions if a.direction is PriceDirection.CHARGE]
+    discharge = [a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE]
+    assert len(charge) == 1 and len(discharge) == 1
+    assert discharge[0].net_profit_sek_per_kwh == pytest.approx(
+        (0.90 + 0.65) - 0.50 / 0.9, abs=1e-6
+    )
+    assert result.planned_cost_sek < result.baseline_cost_sek
+
+
+def test_written_grid_charge_still_pays_the_import_cost() -> None:
+    def forecast(start: datetime, end: datetime) -> tuple[float, float]:
+        return (0.0, 0.0) if start == NOW + timedelta(hours=1) else (2.0, 0.0)
+
+    result = _plan(
+        _series([0.20, 2.00]), forecast,
+        solar_charging=SolarCharging(False, 10.0, 90.0),
+        grid_import_cost_sek_per_kwh=0.65, minimum_difference_sek_per_kwh=0.80,
+    )
+    discharge = [a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE]
+    assert len(discharge) == 1
+    assert discharge[0].net_profit_sek_per_kwh == pytest.approx(
+        (2.00 + 0.65) - (0.20 + 0.65) / 0.9, abs=1e-6
+    )
+
+
+def test_energy_grid_is_fine_enough_for_low_power_and_large_batteries() -> None:
+    # N7: 40 kWh with 1 kW in 15-minute intervals is 0.24 kWh per interval,
+    # less than one of 100 levels (0.4 kWh). The cycle must still be found.
+    series = _series([0.2] * 4 + [3.0] * 4, minutes=15)
+    arguments = dict(
+        usable_capacity_kwh=40.0, maximum_charge_kw=1.0, maximum_discharge_kw=1.0,
+    )
+    coarse = _plan(series, lambda start, end: (1.0, 0.0), levels=100, **arguments)
+    assert coarse.plan.actions == ()
+    assert coarse.resolution_limited
+    result = _plan(series, lambda start, end: (1.0, 0.0), **arguments)
+    kinds = [a.direction for a in result.plan.actions]
+    assert kinds.count(PriceDirection.CHARGE) >= 1
+    assert kinds.count(PriceDirection.DISCHARGE) >= 1
+    assert result.energy_levels > 100
+    assert not result.resolution_limited
+    assert result.plan.expected_margin_sek > 1.5
+
+
+def test_energy_grid_resolves_small_house_loads_without_export() -> None:
+    # Without export a discharge only follows the house: a 0.5 kW load in
+    # 15 minutes must be coverable with an 18.4 kWh battery.
+    series = _series([0.2] * 8 + [3.0] * 8, minutes=15)
+    result = _plan(
+        series, lambda start, end: (0.5, 0.0), usable_capacity_kwh=18.4,
+        maximum_charge_kw=10.0, maximum_discharge_kw=10.0, export_allowed=False,
+    )
+    expensive = [s for s in result.slots if s.price_sek_per_kwh == 3.0]
+    assert all(s.kind == "self_consumption" for s in expensive)
+    assert not result.resolution_limited
+
+
+def test_energy_grid_stays_bounded_for_long_quarter_hour_horizons() -> None:
+    from custom_components.pixiihome_controller.control.whole_day_planner import (
+        MAXIMUM_ENERGY_LEVELS,
+    )
+
+    series = _series([1.0 + (i % 8) * 0.3 for i in range(192)], minutes=15)
+    result = _plan(
+        series, lambda start, end: (0.6, 0.0), usable_capacity_kwh=18.4,
+        maximum_charge_kw=10.0, maximum_discharge_kw=10.0, export_allowed=False,
+    )
+    assert 100 <= result.energy_levels <= MAXIMUM_ENERGY_LEVELS
+    exported = _plan(
+        series, lambda start, end: (0.6, 0.0), usable_capacity_kwh=18.4,
+        maximum_charge_kw=10.0, maximum_discharge_kw=10.0, export_allowed=True,
+    )
+    # With export and 10 kW, 100 levels already resolve every flow.
+    assert exported.energy_levels == 100

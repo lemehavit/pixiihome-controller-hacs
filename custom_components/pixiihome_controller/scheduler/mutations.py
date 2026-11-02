@@ -245,6 +245,25 @@ PriceStopVerifier = Callable[[datetime, datetime | None], Awaitable[bool]]
 _ENDED_DELETE_MARGIN = timedelta(minutes=5)
 
 
+def _ended_schedule_readback_is_idle(
+    readback: MqttAck, expected: SchedulerExpectedState
+) -> bool:
+    """Whether a keyed GET agrees that an ended one-shot schedule cannot run.
+
+    The reply must show the exact schedule (same identity, time and values)
+    and no running service with time left. A changed start or duration, or an
+    active service, means the Gateway disagrees with the local end time.
+    """
+    if reconcile_scheduler_get(readback, expected).status is not (
+        SchedulerReconciliationStatus.MATCH
+    ):
+        return False
+    status = readback.service_status
+    running = type(status) is int and 5 <= status <= 11
+    left = readback.time_left
+    return not running and (left is None or left == 0)
+
+
 @dataclass(slots=True)
 class SchedulerMutationManager:
     """Serialize offline scheduler transactions through injected boundaries."""
@@ -531,6 +550,9 @@ class SchedulerMutationManager:
             # A one-shot schedule whose whole interval has passed can no longer
             # run, whether or not the DELETE took. Keep its identity reserved
             # (never reused, never re-sent) instead of blocking writes forever.
+            # Only a missing answer or the unchanged, idle schedule allows this:
+            # a readable reply showing another time or a running service
+            # contradicts the local end time and keeps the conflict.
             ended_at = expected.starttime + timedelta(seconds=expected.duration)
             if (
                 datetime.now(UTC) >= ended_at + _ENDED_DELETE_MARGIN
@@ -541,6 +563,12 @@ class SchedulerMutationManager:
                     is not SchedulerReconciliationStatus.ABSENT
                 )
             ):
+                if (
+                    failure is None and readback is not None
+                    and not _ended_schedule_readback_is_idle(readback, expected)
+                ):
+                    return self._local_failure(operation, record.m_id, record.service, record,
+                                               "recovery_readback_contradicts_ended_interval")
                 return self._finish(await self._persist_recovery_result(
                     record,
                     replace(record, lifecycle=OwnershipLifecycle.EXPIRED_RESERVED,

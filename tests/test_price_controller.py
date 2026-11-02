@@ -2210,3 +2210,31 @@ async def test_cleanup_retires_only_expired_or_scoped_confirmed_absent_identitie
     await controller.tick()
     assert bool(instance.lowered_external_targets) == (state in {"out_of_scope", "partial"})
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_whole_day_plan_uses_the_solar_export_buffer() -> None:
+    # N2 through the price controller: 1 kW surplus and a 2 kW export buffer.
+    # The solar controller then stores nothing, so the plan must not rise.
+    instance, mutations = runtime(schedule_writes=False)
+    _sunny_flat_day(instance, solar_charging=True)
+    instance.energy_forecast = SimpleNamespace(
+        net_load_kw=lambda start, end, high=False: -1.0,
+        net_forecast=lambda start, end, high=False: (0.0, 1.0),
+    )
+    instance.operational_settings = (
+        instance.operational_settings.set("solar_export_buffer_kw", 2.0)
+        .set("solar_export_start_threshold_kw", 0.5)
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert controller.solar_charging is not None
+    assert controller.solar_charging.export_buffer_kw == pytest.approx(2.0)
+    attributes = controller.attributes()
+    assert attributes["planner_engine"] == "whole_day"
+    assert attributes["maximum_projected_usable_soc"] == pytest.approx(50.0)
+    assert attributes["whole_day_plan"]["energy_levels"] >= 100
+    assert attributes["whole_day_plan"]["resolution_limited"] is False
+    assert mutations.created == []

@@ -435,3 +435,71 @@ async def test_journal_save_failure_warns_about_service_120_and_keeps_original_e
         assert "could not be saved" in notifications[0]
     if reporting_error != "activity":
         assert activity[-1][1]["cause"] == "load_balancing Service 120 (Gateway read failed)"
+
+
+@pytest.mark.asyncio
+async def test_repeated_authority_off_keeps_unresolved_cleanup_warning(monkeypatch) -> None:
+    # N6: the second turn-off runs no cleanup, so it must not dismiss the
+    # warning about a price schedule the first turn-off could not remove.
+    from homeassistant.components import persistent_notification
+
+    from custom_components.pixiihome_controller import runtime as runtime_module
+
+    enabled = {"value": True}
+    releases: list[str] = []
+    created: list[str] = []
+    dismissed: list[str] = []
+    activity: list[tuple[str, str]] = []
+
+    async def admin(_user_id):
+        return None
+
+    async def release():
+        releases.append("price")
+        return ["price_1_ack_timeout"]
+
+    async def save(candidate):
+        enabled["value"] = candidate.controller_state[
+            "production_control_authority"
+        ]["enabled"]
+
+    journal = SimpleNamespace(
+        controller_state={},
+        with_product_state=lambda controller_state: SimpleNamespace(
+            controller_state=controller_state,
+            with_product_state=journal.with_product_state,
+        ),
+    )
+    monkeypatch.setattr(
+        persistent_notification, "async_create",
+        lambda hass, message, **kwargs: created.append(message),
+    )
+    monkeypatch.setattr(
+        persistent_notification, "async_dismiss",
+        lambda hass, notification_id: dismissed.append(notification_id),
+    )
+    monkeypatch.setattr(
+        runtime_module, "log_activity",
+        lambda _runtime, _key, message, *, cause: activity.append((message, cause)),
+    )
+    fake = SimpleNamespace(
+        _require_admin=admin, start_aps_recovery=lambda: None,
+        production_control_enabled=lambda: enabled["value"],
+        _async_release_owned_control=release, meter_limit_load_balancer=None,
+        _control_journal_lock=asyncio.Lock(), control_journal=journal,
+        production_authority=SimpleNamespace(revision=1),
+        _save_control_journal_verified=save, controller_state=None,
+        release_gate=SimpleNamespace(live_writes_enabled=True, blocked_reasons=set()),
+        hass=object(), serial="GATEWAY",
+    )
+
+    await RuntimeData.async_set_production_control_enabled(fake, False, None)  # type: ignore[arg-type]
+    fake.production_authority = SimpleNamespace(revision=2)
+    await RuntimeData.async_set_production_control_enabled(fake, False, None)  # type: ignore[arg-type]
+
+    assert releases == ["price"]  # cleanup ran once
+    assert dismissed == []
+    assert fake._authority_cleanup_problems == ["price_1_ack_timeout"]
+    assert len(created) == 2 and all("price_1_ack_timeout" in text for text in created)
+    assert "already off" in activity[-1][0]
+    assert "price_1_ack_timeout" in activity[-1][0]
