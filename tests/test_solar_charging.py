@@ -361,3 +361,81 @@ async def test_foreign_aps_and_maximum_usable_soc_fail_closed() -> None:
     await controller.tick()
     assert controller.status == "soc_limit"
     assert runtime.writes == []
+
+
+class _Priority:
+    def __init__(self) -> None:
+        self.owned = True
+        self.releases = 0
+
+    def pending(self, owner: str | None = None) -> bool:
+        return self.owned
+
+    async def release(self, owner: str | None = None) -> None:
+        self.releases += 1
+        self.owned = False
+
+    async def acquire(self, owner, build):
+        self.owned = True
+        return (102, 101, 105, 107), True
+
+    def attributes(self) -> dict[str, object]:
+        return {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["soc_limit", "no_surplus", "native_aps"])
+async def test_aps_leaves_the_priority_list_while_solar_is_not_charging(case) -> None:
+    # 4 Nov: at the SOC limit APS stayed in the list all day and the
+    # Gateway's own APS discharged the battery between aggregator schedules.
+    runtime = FakeRuntime()
+    priority = _Priority()
+    runtime.aps_priority = priority  # type: ignore[attr-defined]
+    if case == "soc_limit":
+        runtime.battery = replace(runtime.battery, usable_soc=95)
+    elif case == "no_surplus":
+        runtime.telemetry.meter_w = 300
+    else:
+        runtime.telemetry.service = 105
+    controller = _controller(runtime, [0.0])
+
+    await controller.tick()
+
+    assert priority.releases == 1
+    assert controller.priority_verified is False
+    assert runtime.writes == []
+
+
+@pytest.mark.asyncio
+async def test_aps_is_added_again_just_before_the_next_lease() -> None:
+    runtime = FakeRuntime()
+    priority = _Priority()
+    priority.owned = False
+    runtime.aps_priority = priority  # type: ignore[attr-defined]
+    runtime.gateway_scheduler = object()  # type: ignore[attr-defined]
+    runtime.operational_settings = runtime.operational_settings.set(
+        "solar_start_debounce_seconds", 0
+    )
+    controller = _controller(runtime, [0.0])
+    controller.priority_verified = False
+
+    await controller.tick()
+
+    assert priority.owned is True and priority.releases == 0
+    assert controller.status == "active"
+    assert len(runtime.writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_own_live_lease_keeps_aps_in_the_priority_list() -> None:
+    runtime = FakeRuntime()
+    priority = _Priority()
+    runtime.aps_priority = priority  # type: ignore[attr-defined]
+    controller = _controller(runtime, [0.0])
+    controller._message_id = 9001
+    controller._lease_deadline = 120
+    runtime.telemetry.service = 105
+
+    await controller.tick()
+
+    assert priority.releases == 0

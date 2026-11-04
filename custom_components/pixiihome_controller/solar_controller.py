@@ -285,6 +285,35 @@ class SolarChargingController:
             await self._tick_locked()
 
     async def _tick_locked(self) -> None:
+        await self._evaluate()
+        await self._park_priority()
+
+    async def _park_priority(self) -> None:
+        """Take APS out of the native priority list while no own lease runs.
+
+        Left in the list, the Gateway runs its own stored APS settings between
+        schedules, which may discharge the battery to cover the house load.
+        Solar charging adds the entry again just before its next lease.
+        """
+        enabled = self.runtime.controller_state.automatic_solar_charging_enabled
+        if not enabled or self.owns_live_lease():
+            return
+        manager = getattr(self.runtime, "aps_priority", None)
+        if manager is None or not manager.pending("solar"):
+            return
+        await manager.release("solar")
+        self.priority_verified = False
+        log_activity(
+            self.runtime, "solar_charging_status",
+            "Solar charging removed APS from the Gateway priority list while it "
+            "is not charging",
+            "Who: automatic solar charging. Why: with APS left in the list the "
+            f"Gateway's own peak shaving could discharge the battery ({self.status}"
+            f"{', ' + self.reason if self.reason else ''}); it is added again just "
+            "before the next solar charging lease.",
+        )
+
+    async def _evaluate(self) -> None:
         now = self.clock()
         if self._message_id is not None and now >= self._lease_deadline:
             self.runtime.release_solar_lease_identity(self._message_id)
@@ -319,13 +348,6 @@ class SolarChargingController:
             await self._release_effects()
             self._publish("blocked", "automation_policy_not_authorized")
             return
-        if not self.priority_verified:
-            try:
-                await self.prepare()
-            except Exception as error:
-                self._publish("blocked", str(error) if isinstance(error, ValueError)
-                              else "solar_scheduler_priority_unverified")
-                return
         health = self.runtime.plant_health()
         if not (
             health.telemetry_fresh
@@ -444,6 +466,14 @@ class SolarChargingController:
         if now - self._surplus_since < int(settings.get("solar_start_debounce_seconds")):
             self._publish("waiting_surplus", "solar_start_debounce")
             return
+        if not self.priority_verified:
+            # APS enters the priority list only for the lease that needs it.
+            try:
+                await self.prepare()
+            except Exception as error:
+                self._publish("blocked", str(error) if isinstance(error, ValueError)
+                              else "solar_scheduler_priority_unverified")
+                return
         await self._write_lease(renewal=False)
 
     def _smart_defers(self, max_soc: float) -> bool:

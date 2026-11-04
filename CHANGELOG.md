@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.25 — 2026-11-04
+
+- Automatisk solladdning tar bort APS ur Gatewayens prioritetslista så fort den
+  inte själv har en aktiv lease (SOC-gräns, inget överskott, väntar, smart
+  solladdning väntar eller Gatewayens egen APS kör). Tidigare låg APS kvar hela
+  dagen, och Gatewayens egna APS-inställningar laddade då ur batteriet mot
+  husets förbrukning mellan aggregatorns scheman. APS läggs in igen precis före
+  nästa lease, och båda stegen syns i aktivitetsloggen.
+- Prisoptimering med fullt batteri och aggregatorns Target SOC-timmar: när den
+  första provplanen (alla timmar hållna) inte ger någon urladdning, eftersom
+  energin då värderas till medelpriset, provas en plan där batteriet fylls i det
+  billigaste aggregatorfönstret och timmarna före det hålls. Kvällstopp före en
+  billig natt laddas då ur.
+
 ## 0.5.24 — 2026-11-02
 
 Rättningar efter den uppföljande granskningen av 0.5.22 (N1–N4, N6, N7). N5 och

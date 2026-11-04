@@ -35,6 +35,12 @@ configured. Preparation checks native priority and can add APS below Scheduler
 when it is absent from the active priority list. It does not acquire an unrelated
 APS operation merely because service 105 is already running.
 
+The added APS entry is only kept while solar charging holds its own lease. At
+the SOC ceiling, without surplus, while waiting or deferring, the controller
+restores the original list, because the Gateway would otherwise run its own
+stored APS settings between schedules and could discharge the battery. It adds
+the entry again just before the next lease.
+
 Before adding APS, the integration saves the original and intended priority lists
 and the feature that owns the change in its verified primary/backup control
 journal. Switching off either feature restores its own added entry even when no
