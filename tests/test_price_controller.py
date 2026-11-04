@@ -1372,6 +1372,56 @@ def test_without_an_own_recharge_targets_are_held_up_to_the_cheapest_refill(chea
                                            else [True, False, False])
 
 
+def test_full_battery_holds_targets_up_to_the_cheapest_refill():
+    # 4 Nov: SOC 98 %, 5.0 kr in the evening, 2.4 kr at night and aggregator
+    # Target SOC 100 % every other hour. With every window held and no own
+    # recharge, a discharge was valued at the horizon mean and dropped, so no
+    # window was ever held. Plan again with the cheapest window refilling.
+    from custom_components.pixiihome_controller.control.price_optimization import (
+        ExternalWindow,
+        PriceDirection,
+        PriceInterval,
+        PricePlan,
+        PricePlanAction,
+        PriceSeries,
+    )
+
+    instance, _ = runtime()
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    base = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=3)
+    prices = [5.2, 5.1, 4.7, 4.0, 3.2, 2.5, 2.4, 2.35, 2.4, 3.0]
+    series = PriceSeries(tuple(
+        PriceInterval(base + timedelta(hours=h), base + timedelta(hours=h + 1), p)
+        for h, p in enumerate(prices)
+    ), "SEK/kWh", "prices", "fingerprint")
+    windows = tuple(
+        ExternalWindow(base + timedelta(hours=h), base + timedelta(hours=h + 1), 100.0)
+        for h in (1, 3, 5, 7, 9)
+    )
+    controller._external_windows = windows
+    controller._external_meta = tuple(  # type: ignore[assignment]
+        (external_schedule(w.start, service_no=300 + i), 100.0) for i, w in enumerate(windows)
+    )
+    discharge = PricePlanAction(
+        base, base + timedelta(hours=1), PriceDirection.DISCHARGE, 10.0, "peakshaving",
+        {}, None, 5.2, 2.35, 2.85, 90.0, 1.5, 1.5,
+    )
+    seen: list[list[bool]] = []
+
+    def plan(*_a, windows=(), **_k):
+        held = [w.adjustable for w in windows]
+        seen.append(held)
+        actions = () if all(held) else (discharge,)
+        return PricePlan(actions, (), "fp", 90.0, 100.0, 1.5)
+
+    controller._build_plan = plan  # type: ignore[method-assign]
+
+    held = controller._with_adjustable_targets(series, {})
+
+    assert seen[:2] == [[True] * 5, [True, True, True, False, False]]
+    assert [w.adjustable for w in held] == [True, True, True, False, False]
+
+
 class _Clock:
     """Simulated clock for the price controller module."""
 

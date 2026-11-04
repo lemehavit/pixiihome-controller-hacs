@@ -1645,6 +1645,30 @@ class PriceOptimizationController:
             return self._external_windows
         first = self._build_plan(series, limits, windows=trial)
         discharges = [a for a in first.actions if a.direction is PriceDirection.DISCHARGE]
+        if first.ready and not discharges:
+            # With every window held and no own recharge needed (a full
+            # battery), a discharge is valued at the horizon's mean price and
+            # rarely meets the minimum. Try once more with the battery refilled
+            # by the cheapest aggregator window instead, holding those before it.
+            known = [w for w in self._external_windows if w.known]
+            first_eligible = next(
+                (w.start for w, flag in zip(self._external_windows, eligible, strict=True)
+                 if flag),
+                None,
+            )
+            later = [w for w in known if first_eligible is not None and w.start > first_eligible]
+            if later:
+                cut = min(later, key=lambda w: (_window_price(series, w), w.start)).start
+                refill = tuple(
+                    replace(window, adjustable=flag and window.start < cut)
+                    for window, flag in zip(self._external_windows, eligible, strict=True)
+                )
+                second = self._build_plan(series, limits, windows=refill)
+                second_discharges = [
+                    a for a in second.actions if a.direction is PriceDirection.DISCHARGE
+                ]
+                if second.ready and second_discharges:
+                    first, discharges = second, second_discharges
         if not first.ready or not discharges:
             return self._with_aps_targets(series, limits, self._external_windows, eligible, first)
         recharge = next(
