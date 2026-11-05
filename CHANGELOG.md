@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.26 — 2026-11-05
+
+- Dygnsplaneraren lägger minimivinsten på urladdningen i stället för på
+  laddningen och aggregatorns påfyllning, alltså samma sak som filtret för
+  skrivna åtgärder kontrollerar. Tidigare hoppade den över nattladdningen när
+  batteriet var fullt, och då räknades varje urladdning mot medelpriset och
+  ströks. Den 5 november gav det 0 åtgärder trots 2,78 kr i natt och 5,1–5,5 kr
+  i morgon kväll. Nu planeras urladdning 15–19 i morgon (1,1–1,5 kr/kWh).
+- Lagrad energi som inte fylls på igen inom horisonten räknas till samma värde
+  som planen ger energi som finns kvar i slutet. Energi som bara skulle köpas
+  för att sluta fullare värderas lägre med minimivinsten, så planen laddar
+  aldrig bara för att ha mer kvar i slutet.
+
 ## 0.5.25 — 2026-11-04
 
 - Automatisk solladdning tar bort APS ur Gatewayens prioritetslista så fort den

@@ -9,8 +9,9 @@ Economics per interval, with battery AC power ``b`` (+ charge, − discharge)
 and forecast net load ``n`` = load − solar:
 
 * grid = n + b; import costs price + variable import cost, export earns price;
-* energy charged from the grid must earn the minimum net profit, so each such
-  kWh carries that profit as a decision cost;
+* every discharged kWh must earn the minimum net profit, so it carries that
+  profit as a decision cost (charges carry none: they pay off only through the
+  discharges they make possible, the same cycle the written-action filter checks);
 * battery energy exported beyond house load must additionally reach the export
   minimum; every discharged kWh pays the cycle cost;
 * without export permission the battery never discharges beyond house load.
@@ -19,7 +20,8 @@ Known external Target SOC windows reset stored energy to their target; the
 missing energy is bought at the window's price. Adjustable windows are
 planned as free time: their target is lowered to the planned level, or the
 window is deleted when the plan uses its time. Energy left at the end is valued at the
-horizon's mean import price after discharge losses.
+horizon's mean import price after discharge losses; a discharge that no
+charge or refill follows is checked against that same value.
 
 Automatic solar charging is not a choice of the plan: when no written
 schedule takes over, the solar controller charges whatever surplus it is
@@ -304,6 +306,10 @@ def build_whole_day_plan(
         next_refill.append(upcoming)
     next_refill.reverse()
     terminal_value = max(0.0, (mean_price + gic) * eta - cycle_cost_sek_per_kwh)
+    # Energy already stored, with no charge or refill planned for it, costs
+    # what the plan values it at when kept (``terminal_value`` per stored kWh).
+    # As a price basis: (basis + gic) / rt + cycle == terminal / eta + cycle.
+    stored_basis = terminal_value * eta - gic
 
     def slot_cost(index: int, delta: int, *, decision: bool) -> tuple[float, float]:
         """(cost, battery_kw) of moving ``delta`` energy levels in slot ``index``."""
@@ -324,7 +330,11 @@ def build_whole_day_plan(
             cost += -battery * hours * cycle_cost_sek_per_kwh
         # A charge's minimum-profit hurdle depends on the stored energy (the
         # solar SOC cap), so the DP adds it per level.
+        # The minimum profit is a hurdle on what a discharge delivers, the same
+        # thing the written-action filter checks. Charges carry none of their
+        # own: they only pay off through the discharges they make possible.
         if decision and battery < 0:
+            cost += -battery * hours * minimum_difference_sek_per_kwh
             cost += max(0.0, -battery - max(0.0, net)) * hours * export_extra
         return cost, battery
 
@@ -351,21 +361,25 @@ def build_whole_day_plan(
         ])
 
     infinity = float("inf")
+    # Energy kept at the end is worth ``terminal_value``. Energy beyond what
+    # the battery holds now was bought for nothing but keeping: it is worth
+    # less by the minimum profit, so the plan never charges just to end fuller.
+    base_level = max(idx_min, resets[0][0] if 0 in resets else start_index)
+    bought_value = max(0.0, terminal_value - eta * minimum_difference_sek_per_kwh)
     value = [
-        -terminal_value * max(0, level - idx_min) * step for level in range(levels + 1)
+        -(terminal_value * max(0, min(level, base_level) - idx_min)
+          + bought_value * max(0, level - base_level)) * step
+        for level in range(levels + 1)
     ]
     choice: list[list[int]] = [[0] * (levels + 1) for _ in range(count)]
     for index in range(count - 1, -1, -1):
         if index + 1 in resets:
             target, price = resets[index + 1]
             after = value[target]
-            # The refill is a grid charge like the plan's own: it carries the
-            # same minimum-profit hurdle, so the plan never counts on a
-            # discharge that the minimum would keep from being written.
+            # The refill is bought at the window's price; the discharge that
+            # emptied the battery already carries the minimum-profit hurdle.
             value = [
-                after + max(0, target - level) * step * (
-                    (price + gic) / eta + eta * minimum_difference_sek_per_kwh
-                )
+                after + max(0, target - level) * step * (price + gic) / eta
                 for level in range(levels + 1)
             ]
         updated = [infinity] * (levels + 1)
@@ -392,12 +406,6 @@ def build_whole_day_plan(
                     continue
                 if delta < 0 and nxt < floor_level:
                     continue
-                if battery > 0:
-                    # Charging beyond the solar charging that runs on its own
-                    # is a written grid charge: it must earn the minimum profit.
-                    cost += max(0.0, battery - free) * hours * rt * (
-                        minimum_difference_sek_per_kwh
-                    )
                 total = cost + value[nxt]
                 if total < best - 1e-12:
                     best, best_delta = total, delta
@@ -481,7 +489,7 @@ def build_whole_day_plan(
         if refill is None and fixed_refill is not None:
             refill = (fixed_refill, 1.0)
         reference, import_share = _basis(
-            refill, charged_cost, charged_energy, charged_import, mean_price,
+            refill, charged_cost, charged_energy, charged_import, stored_basis,
         )
         action = _action(
             item, load, solar, battery, projected_soc,
@@ -719,14 +727,14 @@ def _basis(
     charged_cost: float,
     charged_energy: float,
     charged_import: float,
-    mean_price: float,
+    stored_basis: float,
 ) -> tuple[float, float]:
     """(price, share of it that pays the import cost) of the energy discharged."""
     if refill is not None:
         return refill
     if charged_energy > 0:
         return charged_cost / charged_energy, charged_import / charged_energy
-    return mean_price, 1.0
+    return stored_basis, 1.0
 
 
 def _blocked(series: PriceSeries, blocker: str, soc: float) -> WholeDayResult:

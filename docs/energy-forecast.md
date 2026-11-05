@@ -122,6 +122,14 @@ How the plan counts solar and energy:
   energy could have been sold for, without **Grid import cost**. Only the part
   bought from the grid pays the import cost when a later discharge is checked
   against the minimum profit.
+- **Minimum profit on the discharge:** every discharged kWh must earn the
+  minimum net profit inside the plan, the same check that decides whether a
+  discharge is written. A grid charge carries no hurdle of its own; it is only
+  planned when the discharges it pays for earn the minimum. Energy that is
+  already stored and not refilled later in the horizon is valued at what the
+  plan gives energy kept at the end (the horizon's mean price after losses), so
+  a full battery is still used in tomorrow's peak. Charging only to end the
+  horizon fuller is never planned.
 - **Energy steps:** the battery is split into 100 to 400 energy levels, chosen
   from capacity, the shortest price interval and the power limits (without export
   also small house loads), within a bounded amount of work. The attribute
