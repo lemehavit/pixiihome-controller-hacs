@@ -100,9 +100,10 @@ shown in the attribute `whole_day_plan` of **Price optimization status** next to
 the standard plan's margin. Compare the two before turning it on. Aggregator
 Target SOC schedules are handled as in the standard plan: with **Allow changing
 aggregator schedules** off they refill the battery and are planned around; with
-it on, those between a planned discharge and the next planned charge are
-lowered to the planned level (never below the minimum SOC), so a sale is not
-undone by the aggregator's next refill.
+it on, the plan ignores them and every target it would collide with is
+lowered to the planned level (never below the minimum SOC) or replaced where
+the plan uses the time, so a sale is not undone by the aggregator's next
+refill.
 If the forecast is missing, the standard plan is used and `planner_engine` shows
 `standard_whole_day_unavailable`.
 
@@ -127,8 +128,9 @@ How the plan counts solar and energy:
   discharge is written. A grid charge carries no hurdle of its own; it is only
   planned when the discharges it pays for earn the minimum. Energy that is
   already stored and not refilled later in the horizon is valued at what the
-  plan gives energy kept at the end (the horizon's mean price after losses), so
-  a full battery is still used in tomorrow's peak. Charging only to end the
+  plan gives energy kept at the end: the horizon's mean price after losses, but
+  never more than buying it back at the horizon's cheapest price, so a full
+  battery is used in every peak that pays against that refill. Charging only to end the
   horizon fuller is never planned.
 - **Energy steps:** the battery is split into 100 to 400 energy levels, chosen
   from capacity, the shortest price interval and the power limits (without export

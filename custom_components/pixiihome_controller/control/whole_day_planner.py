@@ -305,7 +305,15 @@ def build_whole_day_plan(
             upcoming = resets[index + 1][1]
         next_refill.append(upcoming)
     next_refill.reverse()
-    terminal_value = max(0.0, (mean_price + gic) * eta - cycle_cost_sek_per_kwh)
+    # Energy kept at the end is worth what it would earn later (the mean
+    # price after losses), but never more than buying it back at the
+    # horizon's cheapest price would cost: a full battery is not kept for its
+    # own sake when it can be refilled more cheaply.
+    cheapest = min(item.price_sek_per_kwh for item in candidates)
+    terminal_value = max(0.0, min(
+        (mean_price + gic) * eta - cycle_cost_sek_per_kwh,
+        (cheapest + gic) / eta,
+    ))
     # Energy already stored, with no charge or refill planned for it, costs
     # what the plan values it at when kept (``terminal_value`` per stored kWh).
     # As a price basis: (basis + gic) / rt + cycle == terminal / eta + cycle.

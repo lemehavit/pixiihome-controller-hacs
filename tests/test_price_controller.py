@@ -1174,6 +1174,10 @@ async def test_lowered_target_is_restored_when_no_longer_held():
     controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
     key = (window.sch_index, window.service_no, window.start_epoch, window.duration_seconds)
     controller._lowered[key] = 90.0
+    # With changes allowed every target is held; switching that off ends it.
+    instance.operational_settings = instance.operational_settings.set(
+        "price_adjust_external_target_soc", False
+    )
 
     await controller.tick()
 
@@ -1329,7 +1333,7 @@ async def test_a_passing_safety_refusal_is_tried_again_next_pass():
 
 
 @pytest.mark.parametrize("cheap_later", [True, False])
-def test_without_an_own_recharge_targets_are_held_up_to_the_cheapest_refill(cheap_later):
+def test_with_changes_allowed_every_eligible_target_is_held(cheap_later):
     # 29 Oct: after the 17-18 peak the aggregator refilled at 20-21 (4.36 kr)
     # and again at 22-23 (3.58). Only 18-19 was held, so the export was
     # valued against 4.36 and dropped. Hold up to the cheapest refill instead.
@@ -1368,8 +1372,9 @@ def test_without_an_own_recharge_targets_are_held_up_to_the_cheapest_refill(chea
 
     held = controller._with_adjustable_targets(series, {})
 
-    assert [w.adjustable for w in held] == ([True, True, False] if cheap_later
-                                           else [True, False, False])
+    # 5 Nov: with changes allowed the plan ignores the aggregator targets, so
+    # every eligible window is held, wherever the cheapest refill is.
+    assert [w.adjustable for w in held] == [True, True, True]
 
 
 def test_full_battery_holds_targets_up_to_the_cheapest_refill():
@@ -1909,6 +1914,9 @@ async def test_whole_day_planner_keeps_own_charge_just_before_start(monkeypatch)
     instance.operational_settings = instance.operational_settings.set(
         "price_whole_day_planner", True
     )
+    # Nearly empty, so the 3.0 hour needs the cheap charge (a fuller battery
+    # covers it from stored energy and charges nothing).
+    instance.battery = replace(instance.battery, usable_soc=15)
     controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
     await controller.tick()
     assert controller.planner_engine == "whole_day"
