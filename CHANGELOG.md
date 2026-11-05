@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.27 — 2026-11-05
+
+- Med **Allow changing aggregator schedules** på planerar prisoptimeringen som
+  om aggregatorns Target SOC-fönster inte fanns. Den hittar alla laddningar och
+  urladdningar som klarar minimivinsten och sänker sedan varje mål som står i
+  vägen till planerad nivå, eller ersätter fönstret där planen använder tiden.
+  Aldrig under minsta SOC, ett mål per planeringsvarv. Tidigare hölls bara
+  fönstren mellan första urladdningen och nästa laddning.
+- Energi som finns kvar i slutet av horisonten värderas aldrig högre än vad det
+  kostar att köpa tillbaka den till horisontens lägsta pris. Ett fullt batteri
+  sparas därför inte i onödan. 5 november gav det 9 urladdningar (1,1–1,9
+  kr/kWh, cirka 7 kr) i stället för en kvart.
+
 ## 0.5.26 — 2026-11-05
 
 - Dygnsplaneraren lägger minimivinsten på urladdningen i stället för på

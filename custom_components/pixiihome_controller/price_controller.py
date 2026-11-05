@@ -1617,12 +1617,13 @@ class PriceOptimizationController:
     def _with_adjustable_targets(
         self, series: PriceSeries, limits: dict[str, float]
     ) -> tuple[ExternalWindow, ...]:
-        """Mark foreign Target SOC windows between own discharge and recharge.
+        """Plan as if the aggregator's Target SOC windows were not there.
 
-        A first plan treats every future, readable Target SOC window as one the
-        controller may hold. Only windows from the first planned discharge up to
-        the next planned charge (or the last discharge) stay adjustable; the
-        rest keep refilling the battery as the aggregator intends.
+        Every future, readable Target SOC window is one the controller may
+        hold: the plan finds every charge and discharge that meets your
+        minimum profit, and each window is then lowered to the planned level
+        (or replaced where the plan uses its time). Windows where the plan
+        keeps at least the target need no change.
         """
         self._aps_held_starts = set()
         self.aps_recharge_reason = None
@@ -1645,6 +1646,8 @@ class PriceOptimizationController:
             return self._external_windows
         first = self._build_plan(series, limits, windows=trial)
         discharges = [a for a in first.actions if a.direction is PriceDirection.DISCHARGE]
+        second_plan: PricePlan | None = None
+        refill_windows = trial
         if first.ready and not discharges:
             # With every window held and no own recharge needed (a full
             # battery), a discharge is valued at the horizon's mean price and
@@ -1669,30 +1672,16 @@ class PriceOptimizationController:
                 ]
                 if second.ready and second_discharges:
                     first, discharges = second, second_discharges
+                    second_plan, refill_windows = second, refill
         if not first.ready or not discharges:
             return self._with_aps_targets(series, limits, self._external_windows, eligible, first)
-        recharge = next(
-            (a for a in first.actions
-             if a.direction is PriceDirection.CHARGE and a.start >= discharges[0].end),
-            None,
-        )
-        if recharge is not None:
-            until = recharge.start
+        if first is not second_plan:
+            # The plan is made as if no aggregator target existed; every
+            # target it would collide with is lowered to the planned level
+            # or, where the plan uses the time itself, replaced.
+            held = trial
         else:
-            # No own charge: the battery is refilled by a later aggregator
-            # window. Hold the windows up to the cheapest of them, so the
-            # energy is bought back there instead of at the first, often
-            # still expensive one.
-            last = max(a.end for a in discharges)
-            later = [w for w in self._external_windows if w.start >= last]
-            until = (
-                min(later, key=lambda w: (_window_price(series, w), w.start)).start
-                if later else last
-            )
-        held = tuple(
-            replace(window, adjustable=flag and discharges[0].start <= window.start < until)
-            for window, flag in zip(self._external_windows, eligible, strict=True)
-        )
+            held = refill_windows
         return self._with_aps_targets(series, limits, held, eligible, first)
 
     def _with_aps_targets(

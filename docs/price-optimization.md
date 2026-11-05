@@ -171,10 +171,12 @@ schedules instead of being refilled by each of them:
 
 - Only future, one-shot Target SOC schedules whose parameter record is not
   shared with another schedule are touched.
-- Only windows between the first planned discharge and the next planned charge
-  (or the last planned discharge) are changed. Their target is lowered to the
-  planned state of charge at that time, never below the price optimizer's
-  minimum usable SOC (or the automation policy's minimum).
+- The plan is made as if those targets were not there: it finds every charge
+  and discharge that meets your minimum profit. Each window where the plan
+  keeps less energy than the target is then lowered to the planned state of
+  charge at that time, never below the price optimizer's minimum usable SOC
+  (or the automation policy's minimum). Windows where the plan keeps at least
+  the target are left alone. One target is changed per planning pass.
 - The plan may also use the time of such a window itself (for example to sell
   in the day's most expensive hour). That window is then **deleted** (replaced
   by the price plan's own schedule), verified by a fresh schedule list. A

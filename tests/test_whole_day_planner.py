@@ -103,7 +103,9 @@ def test_solar_surplus_fills_the_battery_in_the_cheapest_sunny_hours() -> None:
     result = _plan(_series(prices), forecast, maximum_charge_kw=4.0)
     kinds = [slot.kind for slot in result.slots]
     assert kinds[0] == "idle" and kinds[1] == "idle"  # export the expensive sun
-    assert kinds[2] == "solar" and kinds[3] == "solar"
+    # Only what the evening uses is stored, in the cheapest sunny hour; more
+    # would only be kept at the end, worth no more than buying it back.
+    assert kinds[3] == "solar" and kinds[4] == "idle"
     assert kinds[6] == "self_consumption"
     # Solar-only charging needs no Gateway schedule.
     assert all(a.direction is not PriceDirection.CHARGE for a in result.plan.actions)
@@ -171,7 +173,7 @@ def test_rounding_past_the_house_load_follows_the_load_instead_of_exporting() ->
     result = _plan(
         series, lambda start, end: (0.6, 0.0), usable_soc_percent=90.0,
         usable_capacity_kwh=18.4, export_allowed=True,
-        export_minimum_difference_sek_per_kwh=1.5, minimum_lead_minutes=0,
+        export_minimum_difference_sek_per_kwh=5.0, minimum_lead_minutes=0,
     )
     assert result.slots[1].battery_kw < -0.65
     discharge = [a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE]
@@ -216,7 +218,7 @@ def test_standard_plan_caps_self_consumption_energy_by_forecast_load() -> None:
 
 
 def test_adjacent_identical_actions_merge_within_the_policy_duration() -> None:
-    series = _series([0.2, 0.2, 0.2, 3.0], minutes=15)
+    series = _series([0.2, 0.2, 0.2, 3.0, 3.0, 3.0], minutes=15)
     result = _plan(series, lambda start, end: (8.0, 0.0), usable_soc_percent=10.0)
     charges = [a for a in result.plan.actions if a.direction is PriceDirection.CHARGE]
     merged = merge_adjacent_actions(result.plan.actions)
