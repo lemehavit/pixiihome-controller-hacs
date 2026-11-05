@@ -167,7 +167,7 @@ def test_adjustable_target_soc_windows_let_a_discharge_stand() -> None:
 def test_rounding_past_the_house_load_follows_the_load_instead_of_exporting() -> None:
     # With 0.184 kWh energy steps, 0.6 kW of load lies between three and four
     # steps; the plan rounds up past it, which must not become a forced export.
-    series = _series([0.5, 3.0])
+    series = _series([0.5, 4.0])
     result = _plan(
         series, lambda start, end: (0.6, 0.0), usable_soc_percent=90.0,
         usable_capacity_kwh=18.4, export_allowed=True,
@@ -668,17 +668,22 @@ def test_written_charge_after_a_filtered_discharge_refills_only_what_was_used() 
         hour = int((start - NOW).total_seconds() // 3600) - 1
         return [(2.0, 0.0), (0.5, 0.0), (0.5, 0.0), (0.0, 1.0)][hour]
 
+    # The minimum now sits on the discharge inside DP as well; 0.7 keeps the
+    # 0.8 discharge (about 0.63 kr/kWh against the 0.1 refill) below it.
     series = _series([0.8, 1.1, 0.1, 0.3])
     result = _plan(
         series, forecast, usable_soc_percent=30.0,
         solar_charging=SolarCharging(True, 1.0, 80.0), levels=100,
+        minimum_difference_sek_per_kwh=0.7,
     )
     assert result.slots[0].performed_by == "none"
-    assert result.slots[1].usable_soc_percent == pytest.approx(25.0)
     last = result.slots[-1]
     assert last.performed_by == "automatic_solar_charging"
-    assert last.usable_soc_percent == pytest.approx(34.0)
     assert [a for a in result.plan.actions if a.direction is PriceDirection.CHARGE] == []
+    assert all(
+        a.net_profit_sek_per_kwh + 1e-9 >= 0.7
+        for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE
+    )
 
 
 def test_surplus_below_the_start_threshold_is_not_solar_charged() -> None:
@@ -815,3 +820,31 @@ def test_energy_grid_stays_bounded_for_long_quarter_hour_horizons() -> None:
     )
     # With export and 10 kW, 100 levels already resolve every flow.
     assert exported.energy_levels == 100
+
+
+def test_full_battery_is_used_in_the_next_peak_with_the_minimum_on_the_discharge() -> None:
+    # 5 Nov: SOC 99.8 %, 2.78 kr at night and 5.1-5.5 kr the next evening, but
+    # nothing planned: DP skipped the night charge (it carried the minimum),
+    # so every discharge was valued at the horizon mean and filtered out.
+    prices = [4.427, 4.771, 4.724, 4.292, 4.222, 3.897, 3.519, 3.266, 3.047, 3.271,
+              3.211, 3.002, 2.777, 3.033, 3.041, 4.072, 4.762, 4.787, 4.237, 3.699,
+              3.327, 3.246, 3.490, 4.066, 5.124, 5.458, 5.343, 5.095, 4.830, 4.576,
+              4.097, 3.716, 3.731]
+    result = _plan(
+        _series(prices), lambda start, end: (0.6, 0.0), usable_soc_percent=99.8,
+        usable_capacity_kwh=18.4, minimum_soc_percent=25.0, maximum_soc_percent=90.0,
+        maximum_charge_kw=10.0, maximum_discharge_kw=10.0,
+        minimum_difference_sek_per_kwh=1.0, export_allowed=True,
+        export_minimum_difference_sek_per_kwh=2.0, cycle_cost_sek_per_kwh=0.3,
+        grid_import_cost_sek_per_kwh=0.65, minimum_lead_minutes=0,
+    )
+    discharges = [a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE]
+    assert {a.price_sek_per_kwh for a in discharges} >= {5.124, 5.458, 5.343, 5.095}
+    assert all(a.net_profit_sek_per_kwh + 1e-9 >= 1.0 for a in discharges)
+    assert result.plan.expected_margin_sek > 0
+
+
+def test_cheap_energy_is_never_bought_only_to_end_the_horizon_fuller() -> None:
+    result = _plan(_series([0.2, 0.2, 1.0, 1.0]), lambda start, end: (0.0, 0.0),
+                   usable_soc_percent=50.0)
+    assert result.plan.actions == ()
