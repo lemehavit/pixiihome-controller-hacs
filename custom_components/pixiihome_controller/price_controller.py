@@ -56,8 +56,10 @@ _SERVICE_TYPE = {
 # Time a pass needs after one of our schedules ends before the next write is
 # sent, on top of the lead time; a later action closer than this is chained.
 _CHAIN_MARGIN_MINUTES = 5
+# Wait before the read-only check of a removal the Gateway did not confirm.
+_POST_CHECK_DELAY_SECONDS = 20
 # Smallest change of a foreign Target SOC worth the pass's one external write
-# (3 points is about 0.55 kWh at 18.4 kWh usable).
+# (3 points of SOC is about 0.7 kWh with 18.4 kWh usable between 10 and 90 %).
 _TARGET_DEADBAND_PERCENT = 3.0
 
 
@@ -679,9 +681,14 @@ class PriceOptimizationController:
             ):
                 continue
             seen = self._conflicts_seen.setdefault(conflicted.m_id, datetime.now(UTC))
+            absent = self._absent_from_inventory(conflicted, seen)
+            if not absent and await self._refresh_list_after(seen):
+                # The fallback needs a list read after the removal was seen;
+                # read it now instead of waiting for the next 15-min refresh.
+                absent = self._absent_from_inventory(conflicted, seen)
             recovered = await mutation_manager.recover_conflicted_price_delete(
                 conflicted.m_id,
-                absent_from_inventory=self._absent_from_inventory(conflicted, seen),
+                absent_from_inventory=absent,
             )
             if recovered.status is not SchedulerTransactionStatus.SUCCESS:
                 self.delete_recovery_reason = recovered.reason
@@ -707,6 +714,28 @@ class PriceOptimizationController:
                    + (" and the pause is lifted." if gone
                       else "; the plan decides what to do with it.")),
             )
+
+    async def _refresh_list_after(self, seen: datetime) -> bool:
+        """Read the schedule list (read-only) when the last one predates ``seen``."""
+        coordinator = self.runtime.scheduler_coordinator
+        refresh = getattr(coordinator, "async_refresh", None)
+        snapshot = None if coordinator is None else coordinator.last_good_snapshot
+        if refresh is None or (
+            snapshot is not None and snapshot.evaluated_at_epoch > seen.timestamp()
+        ):
+            return False
+        try:
+            await refresh()
+        except Exception:  # noqa: BLE001 - the regular refresh retries later
+            return False
+        return True
+
+    def _wake_later(self, seconds: float) -> None:
+        """Plan again after ``seconds`` (used to settle an unconfirmed removal)."""
+        try:
+            asyncio.get_running_loop().call_later(seconds, self._wake.set)
+        except RuntimeError:
+            return
 
     def _absent_from_inventory(self, record: SchedulerOwnershipRecord, seen: datetime) -> bool:
         """Whether a complete list read after ``seen`` has nothing in the record's place."""
@@ -963,7 +992,7 @@ class PriceOptimizationController:
         # cycle includes actions that follow back to back: nothing can be
         # written while our own schedule runs, so they would come too late.
         actions, _ = _applied_cycle(actions, self._chain_gap())
-        if not await self._reconcile(actions):
+        if not await self._reconcile(actions, keep=self.plan.actions):
             return
         self.last_applied_at = datetime.now(UTC)
         self._reported_block = ()
@@ -1526,6 +1555,13 @@ class PriceOptimizationController:
         resulting energy and ends planning at its start.
         """
         owned = self._price_records()
+        ownership = self.runtime.scheduler_ownership
+        # Our own non-price schedules (for example a manual Target SOC) also
+        # show up as foreign in the Gateway list: never lower or delete them.
+        own_other = [
+            record for record in (ownership.records.values() if ownership is not None else ())
+            if record.owner != PRICE_OWNER
+        ]
         schedules = self._inventory()
         now = int(datetime.now(UTC).timestamp())
         battery = self.runtime.battery
@@ -1613,6 +1649,7 @@ class PriceOptimizationController:
                 (schedule, reference)
                 if schedule.service_type == _SERVICE_TYPE["targetsoc"]
                 and schedule.recurrence.recurring is False
+                and not any(_record_has_schedule_shape(r, schedule) for r in own_other)
                 else None
             )
         for stale in set(self._target_cache) - keys:
@@ -2045,17 +2082,36 @@ class PriceOptimizationController:
         }
         self._transient_refusals.clear()
 
-    async def _reconcile(self, actions: tuple[PricePlanAction, ...]) -> bool:
+    async def _reconcile(
+        self,
+        actions: tuple[PricePlanAction, ...],
+        keep: tuple[PricePlanAction, ...] = (),
+    ) -> bool:
+        """Write ``actions``; remove own schedules that are in neither list.
+
+        ``keep`` is the whole plan: a schedule written earlier that the plan
+        still contains stays, even when this pass writes only part of the plan
+        (first cycle, a busy period or a refused aggregator target).
+        """
         manager = self.runtime.scheduler_mutation_manager
         if manager is None:
             self._publish("blocked", "price_scheduler_mutation_unavailable")
             return False
         desired = {_action_key(action): action for action in actions}
+        planned = set(desired) | {_action_key(action) for action in keep}
         existing = {_record_key(record): record for record in self._price_records()}
+        creates = [action for key, action in desired.items() if key not in existing]
+        if creates and self.current_service not in (0, 105):
+            # The safety policy allows removals but no new schedule while
+            # another service runs. Removing first would leave nothing booked
+            # (8 Nov 14:35), so the whole change waits for idle.
+            self._log_create_wait(creates[0])
+            self._publish("waiting_for_priority", "price_create_waits_for_idle")
+            return False
         self._kept_logged &= {record.m_id for record in existing.values()}
         now = datetime.now(UTC)
         for key, record in tuple(existing.items()):
-            if key in desired:
+            if key in planned:
                 continue
             start = _record_start(record)
             if start is None or start <= now:
@@ -2079,6 +2135,10 @@ class PriceOptimizationController:
             result = await manager.delete(record.m_id)
             if result.status is not SchedulerTransactionStatus.SUCCESS:
                 if not result.blocked_reasons:
+                    # Settle it with a read-only check soon, not at the next
+                    # 15-min list refresh.
+                    self._conflicts_seen.setdefault(record.m_id, datetime.now(UTC))
+                    self._wake_later(_POST_CHECK_DELAY_SECONDS)
                     # Sent, but the outcome is unknown: say why it was sent; the
                     # read-only post-check reports how it ended.
                     log_activity(self.runtime, PRICE_STATUS,

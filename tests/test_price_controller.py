@@ -2415,3 +2415,142 @@ async def test_back_to_back_discharges_are_written_in_one_pass():
 
     assert [request.starttime for request in mutations.created] == [first.start, adjacent.start]
     assert controller.status == "active"
+
+
+def _record_for(action, m_id, owner=PRICE_OWNER):
+    from custom_components.pixiihome_controller.scheduler.ownership import (
+        OwnershipLifecycle,
+        SchedulerOwnershipRecord,
+    )
+
+    return SchedulerOwnershipRecord(
+        "entry", "gateway", m_id, action.service,
+        {"starttime": action.start.isoformat(), "duration": action.duration_seconds,
+         "values": dict(action.values)},
+        lifecycle=OwnershipLifecycle.OWNED, owner=owner,
+    )
+
+
+@pytest.mark.asyncio
+async def test_written_schedule_still_in_the_plan_is_kept_outside_the_applied_cycle():
+    # 7 Nov 10:15, 10:38, 23:40: a pass that wrote only part of the plan
+    # deleted own schedules the plan still contained.
+    from custom_components.pixiihome_controller.control.price_optimization import (
+        PriceDirection,
+        PricePlan,
+    )
+
+    instance, mutations = runtime()
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    base = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=3)
+    first = _plan_action(base, 30, PriceDirection.DISCHARGE, 10.0)
+    later = _plan_action(base + timedelta(hours=3), 30, PriceDirection.DISCHARGE, 10.0)
+    gone = _plan_action(base + timedelta(hours=5), 30, PriceDirection.DISCHARGE, 10.0)
+    records = instance.scheduler_ownership.records
+    records[1000000000201] = _record_for(later, 1000000000201)
+    records[1000000000202] = _record_for(gone, 1000000000202)
+    controller._build_plan = lambda *a, **k: PricePlan(  # type: ignore[method-assign]
+        (first, later), (), "fp", 10.0, 50.0, 5.0,
+    )
+
+    await controller.tick()
+
+    assert mutations.deleted == [1000000000202]
+    assert [request.starttime for request in mutations.created] == [first.start]
+
+
+def _busy_with_known_target(instance):
+    from dataclasses import replace
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    running = external_schedule(now - timedelta(minutes=30), duration=3600)
+    instance.scheduler_manager.normalized_schedules = [running]
+    instance.telemetry.value = lambda family, key: 107
+    instance.battery = replace(instance.battery, effective_min_soc=0, effective_max_soc=100)
+
+    async def read_target(service_no):
+        return {"reference": 50}
+
+    instance.gateway_scheduler = SimpleNamespace(
+        client=SimpleNamespace(read_target_soc=read_target),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement", [True, False])
+async def test_busy_battery_removes_nothing_when_the_replacement_must_wait(replacement):
+    # 8 Nov 14:35: under the aggregator's Target SOC the old discharge was
+    # removed, the new one refused, and nothing was booked any more.
+    from custom_components.pixiihome_controller.control.price_optimization import (
+        PriceDirection,
+        PricePlan,
+    )
+
+    instance, mutations = runtime()
+    _busy_with_known_target(instance)
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    base = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=3)
+    old = _plan_action(base, 60, PriceDirection.DISCHARGE, 10.0)
+    new = _plan_action(base + timedelta(minutes=30), 60, PriceDirection.DISCHARGE, 10.0)
+    instance.scheduler_ownership.records[1000000000301] = _record_for(old, 1000000000301)
+    controller._build_plan = lambda *a, **k: PricePlan(  # type: ignore[method-assign]
+        (new,) if replacement else (), (), "fp", 10.0, 50.0, 5.0,
+    )
+
+    await controller.tick()
+
+    assert mutations.created == []
+    if replacement:
+        assert mutations.deleted == []
+        assert controller.reason == "price_create_waits_for_idle"
+    else:
+        # Nothing to create: a schedule that left the plan is still removed.
+        assert mutations.deleted == [1000000000301]
+
+
+@pytest.mark.asyncio
+async def test_own_manual_target_soc_is_never_lowered_as_an_aggregator_target():
+    from custom_components.pixiihome_controller.scheduler.ownership import (
+        OwnershipLifecycle,
+        SchedulerOwnershipRecord,
+    )
+
+    instance, _ = runtime()
+    window, calls = _aggregator_day(instance, adjust=True)
+    start = datetime.fromtimestamp(window.start_epoch, UTC)
+    instance.scheduler_ownership.records[1000000000401] = SchedulerOwnershipRecord(
+        "entry", "gateway", 1000000000401, "targetsoc",
+        {"starttime": start.isoformat(), "duration": window.duration_seconds,
+         "values": {"socref": 90}},
+        lifecycle=OwnershipLifecycle.OWNED, owner=None,
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_post_check_reads_the_list_again_when_it_predates_the_removal():
+    instance, _ = runtime()
+    refreshed = []
+    old = int(datetime.now(UTC).timestamp()) - 600
+    instance.scheduler_coordinator = SimpleNamespace(
+        last_good_snapshot=SimpleNamespace(evaluated_at_epoch=old),
+    )
+
+    async def refresh():
+        refreshed.append(True)
+
+    instance.scheduler_coordinator.async_refresh = refresh
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    seen = datetime.now(UTC) - timedelta(seconds=30)
+
+    assert await controller._refresh_list_after(seen) is True
+    assert refreshed == [True]
+    instance.scheduler_coordinator.last_good_snapshot.evaluated_at_epoch = int(
+        datetime.now(UTC).timestamp()
+    )
+    assert await controller._refresh_list_after(seen) is False
+    assert refreshed == [True]
