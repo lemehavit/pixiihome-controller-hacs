@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.5.28 — 2026-11-08
+
+Rättningar efter genomgången av prisoptimeraren 8 november (inget var bokat
+trots billig natt och dyr morgondag).
+
+- Under aggregatorns Target SOC eller en annan tjänst får nya scheman inte
+  skapas, men borttagning tillåts. Tidigare togs den gamla urladdningen bort
+  och den nya vägrades, så inget var bokat (8 november 14:35). Nu väntar hela
+  ändringen tills batteriet är ledigt när något nytt måste skapas. Status
+  visar *Nytt schema skrivs när batteriets pågående tjänst är klar*
+  (`waiting_for_priority`, räknas inte som stopp i notisen efter 3 h), med en
+  rad per upptagen period i aktivitetsloggen. Behöver inget skapas tas
+  scheman som lämnat planen bort som förut.
+- Egna scheman som planen fortfarande innehåller tas inte bort bara för att
+  varvet skriver en del av planen (första cykeln, en upptagen period eller ett
+  vägrat aggregatormål). Det hände 7 november 10:15, 10:38 och 23:40.
+- Urladdningar som ligger direkt efter varandra skrivs i samma varv. Medan ett
+  eget schema kör får inget nytt skrivas, och efteråt hade nästa kvart redan
+  passerat 5-minutersgränsen (7 november föll 17:45–18:00 bort). Samma gräns
+  styr vilka aggregatorfönster som får ersättas.
+- Efterkontrollen av en borttagning som Gateway inte bekräftade läser
+  schemalistan direkt och körs igen efter 20 s. Tidigare kunde skrivningarna
+  vänta upp till 15 minuter (7 av 17 fall tog 5–15 min).
+- Integrationens egna Target SOC-scheman (till exempel manuella) behandlas
+  inte längre som aggregatorns och sänks eller raderas aldrig av
+  prisoptimeringen.
+- Aggregatorns Target SOC ändras bara när skillnaden är minst 3
+  procentenheter (cirka 0,7 kWh). 48 av 98 ändringar 6–8 november var 1–2
+  enheter. Ett mål som vi sänkt återställs alltid helt till aggregatorns
+  värde, även när skillnaden är liten.
+
 ## 0.5.27 — 2026-11-05
 
 - Med **Allow changing aggregator schedules** på planerar prisoptimeringen som
