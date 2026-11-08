@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.28 — 2026-11-08
+
+- Urladdningar som ligger direkt efter varandra skrivs i samma planeringsvarv.
+  Medan ett eget schema kör får inget nytt skrivas, och efteråt hade nästa
+  kvart redan passerat 5-minutersgränsen. Den 7 november föll 17:45–18:00 bort
+  så. Nu skrivs hela den sammanhängande kedjan efter första urladdningen, och
+  samma gräns styr vilka aggregatorfönster som får ersättas.
+- Nya scheman väntar tills batteriet är ledigt i stället för att försöka och få
+  nej av säkerhetsregeln. Medan aggregatorns Target SOC eller en annan tjänst
+  kör visas *Nytt schema skrivs när batteriets pågående tjänst är klar*
+  (`waiting_for_priority`), en rad per upptagen period i aktivitetsloggen, och
+  det räknas inte längre som stopp i notisen efter 3 h. Borttagning och
+  ändring av aggregatormål körs som förut.
+- Aggregatorns Target SOC ändras bara när skillnaden är minst 3
+  procentenheter. 48 av 98 ändringar 6–8 november var 1–2 enheter och tog
+  varvets enda externa skrivning. Ett mål som vi sänkt återställs alltid helt
+  till aggregatorns värde, även när skillnaden är liten.
+
 ## 0.5.27 — 2026-11-05
 
 - Med **Allow changing aggregator schedules** på planerar prisoptimeringen som

@@ -498,9 +498,20 @@ async def test_authority_release_reports_failures_without_retrying():
 
 
 @pytest.mark.asyncio
-async def test_known_running_target_soc_allows_writes_only_after_its_end():
+async def test_known_running_target_soc_defers_creates_until_idle(monkeypatch):
+    """The safety policy refuses every CREATE while another service runs.
+
+    Planning goes on, but new schedules wait for idle (no false block, logged
+    once per busy period) and are written on the first idle pass.
+    """
     from dataclasses import replace
 
+    import custom_components.pixiihome_controller.price_controller as module
+
+    logged: list[str] = []
+    monkeypatch.setattr(
+        module, "log_activity", lambda _runtime, _key, message, *_args: logged.append(message)
+    )
     instance, mutations = runtime()
     now = datetime.now(UTC).replace(microsecond=0)
     running = external_schedule(now - timedelta(minutes=30), duration=3600)
@@ -518,11 +529,22 @@ async def test_known_running_target_soc_allows_writes_only_after_its_end():
     controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
 
     await controller.tick()
+    await controller.tick()
 
     end = datetime.fromtimestamp(running.end_epoch, UTC)
     assert controller.busy_until == end
+    assert mutations.created == []
+    assert controller.status == "waiting_for_priority"
+    assert controller.reason == "price_create_waits_for_idle"
+    waits = [line for line in logged if line.startswith("Waiting to schedule")]
+    assert len(waits) == 1
+    assert "Target SoC is running" in waits[0]
+
+    instance.telemetry.value = lambda family, key: 0
+    await controller.tick()
+
     assert mutations.created
-    assert all(request.starttime >= end for request in mutations.created)
+    assert controller.status == "active"
 
 
 @pytest.mark.asyncio
@@ -681,6 +703,42 @@ async def test_aggregator_target_between_discharge_and_recharge_is_lowered():
     assert call["allow_delete"] is True
     assert controller.external_target_adjust_count == 1
     assert mutations.created
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reference", "lowered", "expected"),
+    [
+        (12, None, None),    # the plan reaches 10 %: 2 points is inside the deadband
+        (13, None, 10.0),    # 3 points is worth the pass's one external write
+        (8, 90.0, None),     # a partial raise of 2 points waits
+        (5, 90.0, 10.0),     # a partial raise of 5 points runs
+        (8, 10.0, 10.0),     # a full restore always runs, however small
+    ],
+)
+async def test_small_target_changes_inside_the_deadband_are_skipped(
+    reference, lowered, expected,
+):
+    from custom_components.pixiihome_controller.price_controller import _target_key
+
+    instance, mutations = runtime()
+    window, calls = _aggregator_day(instance, adjust=True)
+
+    async def read_target(service_no):
+        return {"reference": reference}
+
+    instance.gateway_scheduler.client.read_target_soc = read_target
+    instance.lowered_external_targets = (
+        {_target_key(window): lowered} if lowered is not None else {}
+    )
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    assert [call["new_reference"] for call in calls] == ([] if expected is None else [expected])
+    # A skipped change does not cut the plan after that window.
+    assert mutations.created
+    assert controller.status == "active"
 
 
 @pytest.mark.asyncio
@@ -2296,3 +2354,64 @@ async def test_whole_day_plan_uses_the_solar_export_buffer() -> None:
     assert attributes["whole_day_plan"]["energy_levels"] >= 100
     assert attributes["whole_day_plan"]["resolution_limited"] is False
     assert mutations.created == []
+
+
+def _plan_action(start, minutes, direction, power):
+    from custom_components.pixiihome_controller.control.price_optimization import (
+        PricePlanAction,
+    )
+
+    return PricePlanAction(
+        start, start + timedelta(minutes=minutes), direction, power, "demandresponse",
+        {"pacref": -power * 1000}, None, 5.0, 2.0, 3.0, 50.0, 1.0, 1.0,
+    )
+
+
+def test_applied_cycle_includes_actions_back_to_back_with_the_first_discharge():
+    # 7 Nov: 17:15-17:45 was written, 17:45-18:00 never was: nothing can be
+    # written while our own schedule runs, and afterwards the next quarter
+    # had already passed the lead time.
+    from custom_components.pixiihome_controller.control.price_optimization import (
+        PriceDirection,
+    )
+    from custom_components.pixiihome_controller.price_controller import _applied_cycle
+
+    base = datetime(2026, 11, 9, 15, 0, tzinfo=UTC)
+    charge = _plan_action(base - timedelta(hours=12), 60, PriceDirection.CHARGE, 10.0)
+    first = _plan_action(base, 30, PriceDirection.DISCHARGE, 10.0)
+    adjacent = _plan_action(base + timedelta(minutes=30), 15, PriceDirection.DISCHARGE, 0.7)
+    adjacent_charge = _plan_action(base + timedelta(minutes=45), 15, PriceDirection.CHARGE, 3.0)
+    later = _plan_action(base + timedelta(minutes=75), 30, PriceDirection.DISCHARGE, 10.0)
+    gap = timedelta(minutes=10)
+
+    actions, end = _applied_cycle((charge, first, adjacent, adjacent_charge, later), gap)
+
+    assert actions == (charge, first, adjacent, adjacent_charge)
+    assert end == base + timedelta(minutes=60)
+    # A gap the next pass can still write in time ends the cycle.
+    assert _applied_cycle((charge, first, later), gap) == ((charge, first), first.end)
+    # Without a discharge everything is written and the cycle has no end.
+    assert _applied_cycle((charge,), gap) == ((charge,), None)
+
+
+@pytest.mark.asyncio
+async def test_back_to_back_discharges_are_written_in_one_pass():
+    from custom_components.pixiihome_controller.control.price_optimization import (
+        PriceDirection,
+        PricePlan,
+    )
+
+    instance, mutations = runtime()
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    base = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=3)
+    first = _plan_action(base, 30, PriceDirection.DISCHARGE, 10.0)
+    adjacent = _plan_action(base + timedelta(minutes=30), 15, PriceDirection.DISCHARGE, 0.7)
+    later = _plan_action(base + timedelta(minutes=90), 30, PriceDirection.DISCHARGE, 10.0)
+    controller._build_plan = lambda *a, **k: PricePlan(  # type: ignore[method-assign]
+        (first, adjacent, later), (), "fp", 10.0, 50.0, 5.0,
+    )
+
+    await controller.tick()
+
+    assert [request.starttime for request in mutations.created] == [first.start, adjacent.start]
+    assert controller.status == "active"

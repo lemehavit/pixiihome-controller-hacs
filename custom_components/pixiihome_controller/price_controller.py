@@ -30,6 +30,7 @@ from .control.price_optimization import (
 )
 from .control.whole_day_planner import SolarCharging, WholeDayResult, build_whole_day_plan
 from .price_guard import PriceSocGuard
+from .protocol.enums import service_type_label
 from .protocol.scheduler_readback import parse_scheduler_starttime
 from .reasons import reason_text
 from .scheduler.models import Ownership, ScheduleCompleteness, ScheduleConsistency
@@ -52,6 +53,12 @@ _SERVICE_TYPE = {
     "adaptivepeakshaving": 105,
     "targetsoc": 107,
 }
+# Time a pass needs after one of our schedules ends before the next write is
+# sent, on top of the lead time; a later action closer than this is chained.
+_CHAIN_MARGIN_MINUTES = 5
+# Smallest change of a foreign Target SOC worth the pass's one external write
+# (3 points is about 0.55 kWh at 18.4 kWh usable).
+_TARGET_DEADBAND_PERCENT = 3.0
 
 
 class PriceOptimizationController:
@@ -108,6 +115,8 @@ class PriceOptimizationController:
         # Safety checks that last stopped a schedule write (logged once).
         self.blocked_details: list[str] = []
         self._reported_block: tuple[str, ...] = ()
+        # Busy period (service, known end) a deferred create was logged for.
+        self._create_wait_logged: tuple[int | None, datetime | None] | None = None
         self.external_target_adjust_count = 0
         self.external_target_delete_count = 0
         self.busy_until: datetime | None = None
@@ -950,17 +959,20 @@ class PriceOptimizationController:
             actions = tuple(a for a in actions if a.start >= self.busy_until)
         # Only apply the first cycle. Self-consumption, background controllers
         # and support interruptions can change the real energy before another
-        # cycle. Later cycles remain proposals until fresh SoC is measured.
-        first_discharge = next(
-            (a for a in actions if a.direction is PriceDirection.DISCHARGE), None,
-        )
-        if first_discharge is not None:
-            actions = tuple(a for a in actions if a.end <= first_discharge.end)
+        # cycle. Later cycles remain proposals until fresh SoC is measured. A
+        # cycle includes actions that follow back to back: nothing can be
+        # written while our own schedule runs, so they would come too late.
+        actions, _ = _applied_cycle(actions, self._chain_gap())
         if not await self._reconcile(actions):
             return
         self.last_applied_at = datetime.now(UTC)
         self._reported_block = ()
+        self._create_wait_logged = None
         self._publish("active" if actions else "ready")
+
+    def _chain_gap(self) -> timedelta:
+        """Largest gap after one of our schedules that still cannot be written in time."""
+        return timedelta(minutes=self.config.minimum_lead_minutes + _CHAIN_MARGIN_MINUTES)
 
     async def _priority_allows_mutation(self) -> bool:
         """Allow idle, our verified background APS, or writes after a known external end.
@@ -1827,11 +1839,9 @@ class PriceOptimizationController:
         # A deleted aggregator target cannot be restored, so only windows the
         # applied cycle uses, or that start before the pass after next could
         # still reach them, are replaced; later ones are held for now.
-        first_discharge = next(
-            (a for a in plan.actions if a.direction is PriceDirection.DISCHARGE), None
-        )
+        _, cycle_end = _applied_cycle(plan.actions, self._chain_gap())
         replace_until = max(
-            first_discharge.end if first_discharge is not None else lead,
+            cycle_end if cycle_end is not None else lead,
             lead + timedelta(minutes=self.config.refresh_minutes * 1.5),
         )
         for window, meta in zip(windows, self._external_meta, strict=True):
@@ -1860,14 +1870,19 @@ class PriceOptimizationController:
                 usable = max(floor, planned.get(window.start, fallback))
                 desired = float(min(100, ceil(battery.effective_min_soc + usable * span / 100)))
                 original = self._lowered.get(key)
-                if desired >= reference - 0.5:
-                    # The plan keeps more energy than an earlier pass did: raise
-                    # a target we lowered back towards, never above, the
-                    # aggregator's own value.
+                if desired > reference - _TARGET_DEADBAND_PERCENT:
+                    # A change smaller than the deadband is not worth the pass's
+                    # one external write. When the plan keeps more energy than an
+                    # earlier pass did, raise a target we lowered back towards,
+                    # never above, the aggregator's own value; a full restore
+                    # always runs, a small partial raise waits.
                     if original is None:
                         continue
                     desired = min(desired, original)
-                    if desired <= reference + 0.5:
+                    if desired <= reference + 0.5 or (
+                        desired < original - 0.5
+                        and desired - reference < _TARGET_DEADBAND_PERCENT
+                    ):
                         continue
                     allow_delete = False
                 else:
@@ -1986,6 +2001,26 @@ class PriceOptimizationController:
                     return failed_from
         return failed_from
 
+    def _log_create_wait(self, action: PricePlanAction) -> None:
+        """Say once per busy period that a new schedule waits for idle."""
+        period = (self.current_service, self.busy_until)
+        if period == self._create_wait_logged:
+            return
+        self._create_wait_logged = period
+        until = f" (ends {clock(self.busy_until)})" if self.busy_until is not None else ""
+        lead = self.config.minimum_lead_minutes
+        log_activity(
+            self.runtime, PRICE_STATUS,
+            f"Waiting to schedule {_action_text(action)}: "
+            f"{service_type_label(self.current_service)} is running{until}",
+            "Who: price optimization. Why: another service or schedule runs on the "
+            "battery, and the safety policy allows new schedules only while the "
+            "battery is idle. Removals and aggregator target changes can still run. "
+            "The schedule is written as soon as the battery is idle, if it then "
+            f"still starts at least {lead} min later; otherwise the plan moves the "
+            "energy to later intervals.",
+        )
+
     def _report_blocked(self, what: str, result: Any) -> None:
         """Say once which safety checks stopped a write, until they change."""
         details = tuple(result.blocked_reasons)
@@ -2071,6 +2106,12 @@ class PriceOptimizationController:
                 return False
             if not await self._mutation_context_safe():
                 return False
+            if self.current_service not in (0, 105):
+                # The safety policy refuses every new schedule while another
+                # service runs; wait for idle instead of reporting a block.
+                self._log_create_wait(action)
+                self._publish("waiting_for_priority", "price_create_waits_for_idle")
+                return False
             result = await manager.create(
                 SchedulerCreateRequest(
                     starttime=action.start,
@@ -2098,6 +2139,31 @@ class PriceOptimizationController:
                 _action_cause(action, self.planner_engine, self.runtime.operational_settings),
             )
         return True
+
+
+def _applied_cycle(
+    actions: tuple[PricePlanAction, ...], gap: timedelta,
+) -> tuple[tuple[PricePlanAction, ...], datetime | None]:
+    """Actions written now and the end of the applied cycle.
+
+    Everything up to the first discharge is written, plus every action that
+    starts within ``gap`` of the previous one's end. Nothing may be written
+    while one of our own schedules runs, so an action right after it would
+    pass the lead time before it could be written and be lost. Without a
+    discharge every action is written and the end is ``None``.
+    """
+    ordered = sorted(actions, key=lambda action: action.start)
+    first = next(
+        (i for i, a in enumerate(ordered) if a.direction is PriceDirection.DISCHARGE), None,
+    )
+    if first is None:
+        return actions, None
+    end = ordered[first].end
+    for action in ordered[first + 1:]:
+        if action.start > end + gap:
+            break
+        end = max(end, action.end)
+    return tuple(a for a in actions if a.end <= end), end
 
 
 def _action_text(action: PricePlanAction) -> str:
