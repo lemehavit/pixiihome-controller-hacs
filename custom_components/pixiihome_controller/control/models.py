@@ -77,6 +77,9 @@ class PlantHealth:
     battery_status: int | None = None
     grid_status: int | None = None
     system_events: Any = None
+    # The Gateway's low-SOC notice (status Info with only event 65536) was
+    # accepted as safe; it clears when the battery is charged again.
+    low_soc_info: bool = False
 
     @property
     def healthy(self) -> bool:

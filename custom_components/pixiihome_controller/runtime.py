@@ -101,6 +101,10 @@ from .scheduler.validation import SchedulerValidationRoundtrip
 from .solar_controller import SolarChargingController, build_solar_lease_request
 from .telemetry import TelemetryStore
 
+# Gateway low-SOC notice: status Info with only this system event set.
+LOW_SOC_INFO_EVENT = 65536
+STATUS_INFO = 2
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -2085,6 +2089,13 @@ class RuntimeData:
         if not battery_fresh:
             reasons.append("battery_telemetry_stale")
 
+        system_events = core.get("sys_events")
+        # The Gateway reports low SOC as status Info (2) with event 65536 and
+        # clears it once the battery is charged again. It is a notice, not a
+        # fault: accepted only when that is the one event and the status is
+        # Info; any other event, Warning or worse still blocks.
+        low_soc_info = system_events == LOW_SOC_INFO_EVENT and type(system_events) is int
+
         def status_value(payload: dict[str, object], field_name: str) -> int | None:
             value = payload.get(field_name)
             if value is None:
@@ -2097,6 +2108,8 @@ class RuntimeData:
                 reasons.append(f"{field_name}_undefined")
             elif value not in STATUS_LABELS:
                 reasons.append(f"{field_name}_unknown")
+            elif value == STATUS_INFO and low_soc_info and field_name != "grid_status":
+                return value
             elif value != 1:
                 reasons.append(f"{field_name}_unsafe")
             return value
@@ -2104,7 +2117,6 @@ class RuntimeData:
         system_status = status_value(core, "sys_status")
         battery_status = status_value(battery, "batt_status")
         grid_status = status_value(core, "grid_status")
-        system_events = core.get("sys_events")
         system_events_clear = False
         if system_events is None:
             reasons.append("sys_events_missing")
@@ -2114,15 +2126,17 @@ class RuntimeData:
             or system_events < 0
         ):
             reasons.append("sys_events_malformed")
-        elif system_events != 0:
+        elif system_events != 0 and not low_soc_info:
             reasons.append("sys_events_unsafe")
         else:
             system_events_clear = True
 
         return PlantHealth(
             telemetry_fresh=telemetry_fresh,
-            system_safe=system_status == 1,
-            battery_safe=battery_status == 1,
+            system_safe=system_status == 1 or (low_soc_info and system_status == STATUS_INFO),
+            battery_safe=(
+                battery_status == 1 or (low_soc_info and battery_status == STATUS_INFO)
+            ),
             grid_safe=grid_status == 1,
             system_events_clear=system_events_clear,
             reasons=tuple(reasons),
@@ -2130,6 +2144,7 @@ class RuntimeData:
             battery_status=battery_status,
             grid_status=grid_status,
             system_events=system_events,
+            low_soc_info=low_soc_info and not reasons,
         )
 
     def operation_impact(self) -> OperationImpact:
