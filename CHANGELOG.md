@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.5.29 — 2026-11-09
+
+- Gatewayens notis om låg SOC (status *Info* med bara händelse 65536) räknas
+  inte längre som osäker. Den ligger kvar tills batteriet laddats upp igen och
+  stoppade prisoptimeringen i 7 timmar 8 november, just när den behövde
+  planera laddning. Varning, larm eller någon annan händelse stoppar som förut,
+  och elnätets status måste alltid vara normal. En rad i aktivitetsloggen när
+  notisen tas emot.
+- Gränsen på fyra flyttade aggregatorladdningar per dygn stoppar bara fler
+  flyttar, inte hela prisoptimeringen.
+- Aggregatorns Target SOC-fönster raderas (ersätts) bara när första
+  urladdningen i cykeln börjar inom 4 timmar, eller när fönstret börjar inom
+  nästa planeringsvarv. Längre fram sänks fönstret i stället, vilket går att
+  ångra, och egna pass inne i fönstret skrivs först när det får ersättas.
+  7 november raderades två fönster cirka 20 timmar i förväg och sedan
+  planerades urladdningen bort.
+- En skriven urladdning för eget bruk behålls när planen bara ändrar dess tak
+  (till exempel 10 kW ↔ 0,7 kW) men inte tiden. Den täcker husets last i båda
+  fallen, och en omskrivning kostar en obekräftad borttagning och en paus.
+- När en sänkning av ett aggregatormål nekas tillfälligt skickas inte
+  aggregatorns gamla värde tillbaka i samma varv.
+- Laddningar loggas inte längre med "net profit 0.00": texten säger att
+  vinsten räknas på urladdningen som använder energin.
+
 ## 0.5.28 — 2026-11-08
 
 Rättningar efter genomgången av prisoptimeraren 8 november (inget var bokat

@@ -58,6 +58,9 @@ _SERVICE_TYPE = {
 _CHAIN_MARGIN_MINUTES = 5
 # Wait before the read-only check of a removal the Gateway did not confirm.
 _POST_CHECK_DELAY_SECONDS = 20
+# Aggregator windows are replaced for a cycle whose first discharge starts
+# within this many hours; until then they are only lowered.
+_REPLACE_AHEAD_HOURS = 4
 # Smallest change of a foreign Target SOC worth the pass's one external write
 # (3 points of SOC is about 0.7 kWh with 18.4 kWh usable between 10 and 90 %).
 _TARGET_DEADBAND_PERCENT = 3.0
@@ -119,12 +122,14 @@ class PriceOptimizationController:
         self._reported_block: tuple[str, ...] = ()
         # Busy period (service, known end) a deferred create was logged for.
         self._create_wait_logged: tuple[int | None, datetime | None] | None = None
+        self._low_soc_info_logged = False
         self.external_target_adjust_count = 0
         self.external_target_delete_count = 0
         self.busy_until: datetime | None = None
         self._planned_settings: dict[str, Any] | None = None
         self._planned_policy: dict[str, Any] | None = None
         self._external_move_times: deque[datetime] = deque()
+        self._move_limit_logged: datetime | None = None
         self._task: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
         self._stopping = False
@@ -862,6 +867,20 @@ class PriceOptimizationController:
             ):
                 self._publish("waiting_telemetry", "plant_telemetry_not_safe")
                 return
+            low_soc_info = bool(getattr(health, "low_soc_info", False))
+            if low_soc_info != self._low_soc_info_logged:
+                self._low_soc_info_logged = low_soc_info
+                if low_soc_info:
+                    log_activity(
+                        self.runtime, PRICE_STATUS,
+                        "Gateway shows its low-SOC notice (Info, event 65536); "
+                        "planning continues",
+                        "Who: price optimization. Why: the Gateway reports low SOC as "
+                        "status Info with system event 65536 until the battery is "
+                        "charged again. It is a notice, not a fault, so charging can "
+                        "still be planned; the SOC limits keep discharges above your "
+                        "minimum. Warning or any other event still stops planning.",
+                    )
             if (
                 battery.usable_soc is None
                 or not isfinite(battery.usable_soc)
@@ -992,12 +1011,49 @@ class PriceOptimizationController:
         # cycle includes actions that follow back to back: nothing can be
         # written while our own schedule runs, so they would come too late.
         actions, _ = _applied_cycle(actions, self._chain_gap())
+        # An action inside an aggregator window that may not be replaced yet
+        # waits (with everything after it) until the window may be replaced.
+        replace_until = self._replace_until(self.plan.actions)
+        deferred_from = min(
+            (
+                action.start for action in actions
+                for window in windows
+                if window.adjustable and window.start not in self._aps_held_starts
+                and window.start >= replace_until
+                and action.start < window.end and window.start < action.end
+            ),
+            default=None,
+        )
+        if deferred_from is not None:
+            actions = tuple(a for a in actions if a.end <= deferred_from)
         if not await self._reconcile(actions, keep=self.plan.actions):
             return
         self.last_applied_at = datetime.now(UTC)
         self._reported_block = ()
         self._create_wait_logged = None
         self._publish("active" if actions else "ready")
+
+    def _replace_until(self, actions: tuple[PricePlanAction, ...]) -> datetime:
+        """Aggregator windows starting before this may be replaced (deleted).
+
+        A deleted aggregator schedule cannot be restored, so windows are only
+        replaced for the applied cycle once its first discharge is near, or
+        when they start before the pass after next could reach them. Until
+        then they are only lowered, which can be undone.
+        """
+        now = datetime.now(UTC)
+        lead = now + timedelta(minutes=self.config.minimum_lead_minutes)
+        until = lead + timedelta(minutes=self.config.refresh_minutes * 1.5)
+        cycle, cycle_end = _applied_cycle(actions, self._chain_gap())
+        first = next(
+            (a for a in cycle if a.direction is PriceDirection.DISCHARGE), None,
+        )
+        if (
+            cycle_end is not None and first is not None
+            and first.start <= now + timedelta(hours=_REPLACE_AHEAD_HOURS)
+        ):
+            until = max(until, cycle_end)
+        return until
 
     def _chain_gap(self) -> timedelta:
         """Largest gap after one of our schedules that still cannot be written in time."""
@@ -1392,8 +1448,19 @@ class PriceOptimizationController:
         while self._external_move_times and self._external_move_times[0] < cutoff:
             self._external_move_times.popleft()
         if len(self._external_move_times) >= 4:
-            self._publish("blocked", "price_aggregator_conflict_limit")
-            return False
+            # The limit stops further moves only; price optimization goes on.
+            first = self._external_move_times[0]
+            if self._move_limit_logged != first:
+                self._move_limit_logged = first
+                log_activity(
+                    self.runtime, PRICE_STATUS,
+                    "Not moving more aggregator charges: 4 moves in the last 24 h",
+                    "Who: price optimization. Why: at most four aggregator charges are "
+                    f"moved per 24 hours; the next move is possible after "
+                    f"{clock(first + timedelta(hours=24))}. Planning and your own "
+                    "schedules continue as usual.",
+                )
+            return True
         charge_actions = sorted(
             (
                 action
@@ -1876,11 +1943,7 @@ class PriceOptimizationController:
         # A deleted aggregator target cannot be restored, so only windows the
         # applied cycle uses, or that start before the pass after next could
         # still reach them, are replaced; later ones are held for now.
-        _, cycle_end = _applied_cycle(plan.actions, self._chain_gap())
-        replace_until = max(
-            cycle_end if cycle_end is not None else lead,
-            lead + timedelta(minutes=self.config.refresh_minutes * 1.5),
-        )
+        replace_until = self._replace_until(plan.actions)
         for window, meta in zip(windows, self._external_meta, strict=True):
             if meta is None or window.start <= lead:
                 continue
@@ -1925,6 +1988,10 @@ class PriceOptimizationController:
                 else:
                     allow_delete = window.start not in self._aps_held_starts
             elif key in self._lowered:
+                if key in self._transient_refusals:
+                    # Refused for a passing reason in this pass: it only stopped
+                    # being held because of that, so nothing is restored now.
+                    continue
                 desired, allow_delete = self._lowered[key], False
                 if desired <= reference + 0.5:
                     self._lowered.pop(key, None)
@@ -2100,6 +2167,41 @@ class PriceOptimizationController:
         desired = {_action_key(action): action for action in actions}
         planned = set(desired) | {_action_key(action) for action in keep}
         existing = {_record_key(record): record for record in self._price_records()}
+        # A written self-use discharge whose interval is unchanged stays when
+        # the plan only changes its power cap (0.7 <-> 10 kW): it covers the
+        # house load either way, and rewriting costs a removal the Gateway
+        # never confirms plus a pause for the post-check.
+        for key, action in tuple(desired.items()):
+            if key in existing or not _self_use(action.service, action.values):
+                continue
+            same = next(
+                (
+                    (old_key, record) for old_key, record in existing.items()
+                    if old_key not in planned
+                    and record.service == action.service
+                    and _record_start(record) == action.start.astimezone(UTC).replace(
+                        microsecond=0
+                    )
+                    and record.intended_state.get("duration") == action.duration_seconds
+                    and _self_use(record.service, record.intended_state.get("values"))
+                ),
+                None,
+            )
+            if same is None:
+                continue
+            old_key, record = same
+            del desired[key]
+            planned.add(old_key)
+            if record.m_id not in self._kept_logged:
+                self._kept_logged.add(record.m_id)
+                log_activity(
+                    self.runtime, PRICE_STATUS,
+                    f"Kept {_describe(record)}: the plan only changed its power cap "
+                    f"to {action.power_kw:.1f} kW",
+                    "Who: price optimization. Why: a self-use discharge covers the "
+                    "house load whatever its cap, so the written schedule is kept "
+                    "instead of removing and rewriting it.",
+                )
         creates = [action for key, action in desired.items() if key not in existing]
         if creates and self.current_service not in (0, 105):
             # The safety policy allows removals but no new schedule while
@@ -2194,11 +2296,24 @@ class PriceOptimizationController:
             log_activity(
                 self.runtime, PRICE_STATUS,
                 f"Scheduled {action.direction.value} {time_span(action.start, action.end)} "
-                f"at {action.power_kw:.1f} kW, price {action.price_sek_per_kwh:.2f} kr/kWh, "
-                f"expected net profit {action.net_profit_sek_per_kwh:.2f} kr/kWh",
+                f"at {action.power_kw:.1f} kW, price {action.price_sek_per_kwh:.2f} kr/kWh"
+                + (
+                    "; the profit is counted on the discharge that uses it"
+                    if action.direction is PriceDirection.CHARGE
+                    else f", expected net profit {action.net_profit_sek_per_kwh:.2f} kr/kWh"
+                ),
                 _action_cause(action, self.planner_engine, self.runtime.operational_settings),
             )
         return True
+
+
+def _self_use(service: object, values: object) -> bool:
+    """A peak-shaving discharge without export (follows the house load)."""
+    return (
+        service == "peakshaving" and isinstance(values, Mapping)
+        and values.get("exportlim") == 0 and values.get("charge_max") == 0
+        and (values.get("discharge_max") or 0) > 0
+    )
 
 
 def _applied_cycle(
@@ -2252,10 +2367,20 @@ def _action_cause(action: PricePlanAction, engine: str, settings: Any) -> str:
             f"use stored energy now at {action.price_sek_per_kwh:.2f} kr/kWh by {mode}; "
             f"it was charged at about {action.reference_price_sek_per_kwh:.2f} kr/kWh"
         )
+    if action.direction is PriceDirection.CHARGE:
+        profit = (
+            "A charge earns nothing by itself: its profit is counted on the discharge "
+            f"that uses the energy, which must net at least your minimum {minimum:.2f} "
+            "kr/kWh after losses and costs"
+        )
+    else:
+        profit = (
+            f"Net profit {action.net_profit_sek_per_kwh:.2f} kr/kWh after losses and "
+            f"costs, your minimum is {minimum:.2f} kr/kWh"
+        )
     return (
-        f"Who: price optimization, {planner} planner. Why: {why}. Net profit "
-        f"{action.net_profit_sek_per_kwh:.2f} kr/kWh after losses and costs, your minimum is "
-        f"{minimum:.2f} kr/kWh. Battery SOC after this interval about "
+        f"Who: price optimization, {planner} planner. Why: {why}. {profit}. "
+        f"Battery SOC after this interval about "
         f"{action.projected_usable_soc_percent:.0f} %."
     )
 

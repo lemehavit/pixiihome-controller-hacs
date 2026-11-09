@@ -170,3 +170,36 @@ def test_stale_core_or_battery_blocks(family: str):
 
     assert not health.healthy
     assert f"{family}_telemetry_stale" in health.reasons
+
+
+@pytest.mark.parametrize(
+    ("sys_status", "batt_status", "events", "healthy"),
+    [
+        (2, 2, 65536, True),   # low-SOC notice: Info with only event 65536
+        (1, 2, 65536, True),
+        (1, 1, 65536, True),
+        (3, 2, 65536, False),  # Warning still blocks
+        (2, 4, 65536, False),  # Alarm still blocks
+        (2, 2, 65536 | 1, False),  # any other event still blocks
+        (2, 2, 0, False),      # Info without the low-SOC event: cause unknown
+    ],
+)
+def test_low_soc_info_notice_is_not_a_fault(sys_status, batt_status, events, healthy):
+    health = _runtime(
+        core={"sys_status": sys_status, "grid_status": 1, "srv_type": 0, "sys_events": events},
+        battery={"batt_status": batt_status},
+    ).plant_health()
+
+    assert health.healthy is healthy
+    assert health.low_soc_info == (healthy and events == 65536)
+    assert health.system_status == sys_status  # the real value is still reported
+
+
+def test_low_soc_info_never_excuses_the_grid():
+    health = _runtime(
+        core={"sys_status": 2, "grid_status": 2, "srv_type": 0, "sys_events": 65536},
+        battery={"batt_status": 2},
+    ).plant_health()
+
+    assert not health.healthy
+    assert "grid_status_unsafe" in health.reasons

@@ -2554,3 +2554,144 @@ async def test_post_check_reads_the_list_again_when_it_predates_the_removal():
     )
     assert await controller._refresh_list_after(seen) is False
     assert refreshed == [True]
+
+
+@pytest.mark.asyncio
+async def test_aggregator_window_far_ahead_is_lowered_not_deleted(monkeypatch):
+    # 7 Nov 20:45: windows for the next afternoon were deleted ~20 h ahead,
+    # then the discharge they were cleared for was replanned away.
+    import custom_components.pixiihome_controller.price_controller as module
+
+    monkeypatch.setattr(module, "_REPLACE_AHEAD_HOURS", 1)
+    instance, mutations = runtime()
+    window, calls = _aggregator_day(instance, adjust=True)
+    start = datetime.fromtimestamp(window.start_epoch, UTC) - timedelta(hours=1)
+    prices = [(-1, 0.5), (0, 1.0), (1, 4.0), (2, 1.0), (3, 0.2), (4, 1.0)]
+    instance.hass.states.state.attributes = {
+        "unit_of_measurement": "SEK/kWh",
+        "prices": [
+            {"start": (start + timedelta(hours=h)).isoformat(),
+             "end": (start + timedelta(hours=h + 1)).isoformat(), "price": p}
+            for h, p in prices
+        ],
+    }
+
+    async def set_target(**kwargs):
+        calls.append(kwargs)
+        return {"status": "deleted" if kwargs["delete"] else "adjusted"}
+
+    instance.gateway_scheduler.set_external_target_soc = set_target
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    window_start = datetime.fromtimestamp(window.start_epoch, UTC)
+    window_end = datetime.fromtimestamp(window.end_epoch, UTC)
+    assert all(call["delete"] is False for call in calls)
+    assert controller.external_target_delete_count == 0
+    # Nothing inside the window is written while it may not be replaced.
+    assert all(
+        not (request.starttime < window_end
+             and window_start < request.starttime
+             + timedelta(seconds=request.duration_seconds))
+        for request in mutations.created
+    )
+
+
+@pytest.mark.asyncio
+async def test_move_limit_stops_only_further_moves(monkeypatch):
+    import custom_components.pixiihome_controller.price_controller as module
+
+    logged: list[str] = []
+    monkeypatch.setattr(
+        module, "log_activity", lambda _runtime, _key, message, *_args: logged.append(message)
+    )
+    instance, mutations = runtime()
+    instance.operational_settings = instance.operational_settings.set(
+        "price_adjust_external_target_soc", True
+    )
+    instance.entry.options[CONF_PRICE_OPTIMIZATION]["managed_source_id"] = 7
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    controller.runtime.gateway_scheduler = SimpleNamespace(client=None)
+    now = datetime.now(UTC)
+    controller._external_move_times.extend(now - timedelta(hours=h) for h in (4, 3, 2, 1))
+    instance.battery = instance.battery.__class__(
+        **{**{f: getattr(instance.battery, f) for f in instance.battery.__dataclass_fields__},
+           "raw_soc": 50, "effective_min_soc": 10, "effective_max_soc": 90}
+    )
+
+    assert await controller._move_one_managed_external_charge(None, ()) is True  # type: ignore[arg-type]
+    assert await controller._move_one_managed_external_charge(None, ()) is True  # type: ignore[arg-type]
+    assert [line for line in logged if "4 moves" in line] == [
+        "Not moving more aggregator charges: 4 moves in the last 24 h"
+    ]
+
+
+def _self_use_action(start, minutes, power):
+    from custom_components.pixiihome_controller.control.price_optimization import (
+        PriceDirection,
+        PriceDischargeMode,
+        PricePlanAction,
+    )
+
+    return PricePlanAction(
+        start, start + timedelta(minutes=minutes), PriceDirection.DISCHARGE, power,
+        "peakshaving",
+        {"exportlim": 0.0, "importlim": 0.0, "charge_max": 0.0,
+         "discharge_max": round(power * 1000, 3), "keep_active": True},
+        PriceDischargeMode.SELF_CONSUMPTION, 5.0, 2.0, 3.0, 50.0, 1.0, 1.0,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shift", [0, 15])
+async def test_self_use_discharge_is_kept_when_only_its_cap_changes(shift):
+    # 9 Nov 07:45: the written 15:00 self-use discharge (10 kW cap) was
+    # replanned at 0.7 kW; rewriting it costs an unconfirmed removal.
+    from custom_components.pixiihome_controller.control.price_optimization import PricePlan
+
+    instance, mutations = runtime()
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    base = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=3)
+    written = _self_use_action(base, 30, 10.0)
+    replanned = _self_use_action(base + timedelta(minutes=shift), 30, 0.7)
+    instance.scheduler_ownership.records[1000000000501] = _record_for(written, 1000000000501)
+    controller._build_plan = lambda *a, **k: PricePlan(  # type: ignore[method-assign]
+        (replanned,), (), "fp", 10.0, 50.0, 5.0,
+    )
+
+    await controller.tick()
+
+    if shift:
+        # A moved interval is a real change.
+        assert mutations.deleted == [1000000000501]
+        assert [r.starttime for r in mutations.created] == [replanned.start]
+    else:
+        assert mutations.deleted == []
+        assert mutations.created == []
+
+
+@pytest.mark.asyncio
+async def test_transient_refusal_does_not_restore_the_target_in_the_same_pass():
+    from custom_components.pixiihome_controller.price_controller import _target_key
+
+    instance, _ = runtime()
+    window, calls = _aggregator_day(instance, adjust=True)
+
+    async def read_target(service_no):
+        return {"reference": 40}
+
+    async def set_target(**kwargs):
+        calls.append(kwargs)
+        return {"status": "refused", "reason": "scheduler_visibility_stale"}
+
+    instance.gateway_scheduler.client.read_target_soc = read_target
+    instance.gateway_scheduler.set_external_target_soc = set_target
+    instance.lowered_external_targets = {_target_key(window): 90.0}
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+
+    await controller.tick()
+
+    # The lowering was refused once; the aggregator's 90 % is not sent back
+    # in the same pass just because the window is no longer held.
+    assert [call["new_reference"] for call in calls if call["new_reference"] >= 90] == []
