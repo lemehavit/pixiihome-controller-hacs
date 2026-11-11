@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.31 — 2026-11-11
+
+- När batteriet är nästan tomt visar Gateway samma låg-SOC-notis (bara
+  händelse 65536) som *Warning* i stället för *Info*. Det stoppade
+  planeringen i 4,5 timmar 10 november och igen 11 november, så ingen
+  laddning kunde planeras. Warning med bara den händelsen godtas nu när
+  uppmätt användbar SOC är högst 15 %. Varning vid högre SOC, larm, andra
+  händelser eller fel på elnätet stoppar som förut.
+- Efterkontrollen som avgör ett obekräftat SOC-stopp efter passets slut
+  rapporterade "reconciliation_failed" fast den lyckades. Den räknas nu som
+  lyckad och loggas.
+
 ## 0.5.30 — 2026-11-11
 
 Rättningar efter genomgången av 9–11 november.

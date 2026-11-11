@@ -1657,7 +1657,11 @@ class SchedulerMutationManager:
                 reconciliation_status=reconciliation.status,
                 reason="ownership_persistence_failed",
             )
-        if transitioned.lifecycle is OwnershipLifecycle.OWNED:
+        # An ended interval kept reserved is a settled outcome too (an earlier
+        # SOC-guard stop has no open journal transaction, so it arrives here).
+        if transitioned.lifecycle in {
+            OwnershipLifecycle.OWNED, OwnershipLifecycle.EXPIRED_RESERVED,
+        }:
             self.diagnostics.successful_reconciliations += 1
             return SchedulerTransactionResult(
                 operation,

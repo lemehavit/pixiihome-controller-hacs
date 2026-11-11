@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
+from math import isfinite
 from time import time
 from typing import Any, cast
 from uuid import uuid4
@@ -104,6 +105,10 @@ from .telemetry import TelemetryStore
 # Gateway low-SOC notice: status Info with only this system event set.
 LOW_SOC_INFO_EVENT = 65536
 STATUS_INFO = 2
+STATUS_WARNING = 3
+# The low-SOC notice escalates to Warning near empty; above this usable SOC a
+# Warning is never treated as that notice.
+LOW_SOC_WARNING_MAX_USABLE_SOC = 15.0
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -2093,8 +2098,20 @@ class RuntimeData:
         # The Gateway reports low SOC as status Info (2) with event 65536 and
         # clears it once the battery is charged again. It is a notice, not a
         # fault: accepted only when that is the one event and the status is
-        # Info; any other event, Warning or worse still blocks.
+        # Info. Below about 9 % usable SOC the same notice turns into Warning
+        # (3), still with only event 65536 (10-11 Nov); that is accepted only
+        # while the measured usable SOC really is that low. Any other event,
+        # a Warning at higher SOC, or worse still blocks.
         low_soc_info = system_events == LOW_SOC_INFO_EVENT and type(system_events) is int
+        usable_soc: object = getattr(getattr(self, "battery", None), "usable_soc", None)
+        low_soc_warning = (
+            low_soc_info
+            and isinstance(usable_soc, int | float)
+            and not isinstance(usable_soc, bool)
+            and isfinite(usable_soc)
+            and 0 <= usable_soc <= LOW_SOC_WARNING_MAX_USABLE_SOC
+        )
+        accepted = {STATUS_INFO, STATUS_WARNING} if low_soc_warning else {STATUS_INFO}
 
         def status_value(payload: dict[str, object], field_name: str) -> int | None:
             value = payload.get(field_name)
@@ -2108,7 +2125,7 @@ class RuntimeData:
                 reasons.append(f"{field_name}_undefined")
             elif value not in STATUS_LABELS:
                 reasons.append(f"{field_name}_unknown")
-            elif value == STATUS_INFO and low_soc_info and field_name != "grid_status":
+            elif value in accepted and low_soc_info and field_name != "grid_status":
                 return value
             elif value != 1:
                 reasons.append(f"{field_name}_unsafe")
@@ -2133,9 +2150,9 @@ class RuntimeData:
 
         return PlantHealth(
             telemetry_fresh=telemetry_fresh,
-            system_safe=system_status == 1 or (low_soc_info and system_status == STATUS_INFO),
+            system_safe=system_status == 1 or (low_soc_info and system_status in accepted),
             battery_safe=(
-                battery_status == 1 or (low_soc_info and battery_status == STATUS_INFO)
+                battery_status == 1 or (low_soc_info and battery_status in accepted)
             ),
             grid_safe=grid_status == 1,
             system_events_clear=system_events_clear,

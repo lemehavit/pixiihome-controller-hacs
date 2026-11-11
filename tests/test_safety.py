@@ -195,6 +195,34 @@ def test_low_soc_info_notice_is_not_a_fault(sys_status, batt_status, events, hea
     assert health.system_status == sys_status  # the real value is still reported
 
 
+@pytest.mark.parametrize(
+    ("sys_status", "batt_status", "events", "usable_soc", "healthy"),
+    [
+        (3, 3, 65536, 6.25, True),  # 11 Nov: notice turned Warning near empty
+        (2, 3, 65536, 15.0, True),
+        (3, 3, 65536, 15.1, False),  # Warning at higher SOC still blocks
+        (3, 3, 65536, None, False),  # SOC unknown: cannot corroborate
+        (3, 3, 65536 | 1, 6.0, False),  # any other event still blocks
+        (4, 3, 65536, 6.0, False),  # Alarm still blocks
+        (3, 3, 0, 6.0, False),  # Warning without the low-SOC event
+    ],
+)
+def test_low_soc_warning_is_accepted_only_near_empty(
+    monkeypatch, sys_status, batt_status, events, usable_soc, healthy,
+):
+    monkeypatch.setattr(
+        RuntimeData, "battery", property(lambda _self: SimpleNamespace(usable_soc=usable_soc)),
+    )
+    health = _runtime(
+        core={"sys_status": sys_status, "grid_status": 1, "srv_type": 0, "sys_events": events},
+        battery={"batt_status": batt_status},
+    ).plant_health()
+
+    assert health.healthy is healthy
+    assert health.low_soc_info is healthy
+    assert health.battery_status == batt_status
+
+
 def test_low_soc_info_never_excuses_the_grid():
     health = _runtime(
         core={"sys_status": 2, "grid_status": 2, "srv_type": 0, "sys_events": 65536},
