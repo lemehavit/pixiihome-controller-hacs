@@ -424,9 +424,20 @@ async def test_planner_settles_an_unconfirmed_own_delete_before_new_writes(absen
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("listed", [False, True])
-async def test_unanswered_get_is_settled_by_a_later_complete_list_without_the_schedule(listed):
+@pytest.mark.parametrize(
+    ("listed", "settled"),
+    [
+        (None, True),  # nothing at that time
+        ("same_service", False),  # could still be ours
+        ("target_soc", True),  # aggregator Target SoC starting at the same time
+        ("target_soc_list_only", False),  # not fully read, could still be ours
+    ],
+)
+async def test_unanswered_get_is_settled_by_a_later_complete_list_without_the_schedule(
+    listed, settled,
+):
     from custom_components.pixiihome_controller.control.settings import ControllerState
+    from custom_components.pixiihome_controller.scheduler.models import ScheduleCompleteness
 
     from .test_price_controller import external_schedule
     from .test_scheduler_manager import _timed_out_price_delete
@@ -444,9 +455,15 @@ async def test_unanswered_get_is_settled_by_a_later_complete_list_without_the_sc
     fake_mutations.recover_conflicted_price_delete = AsyncMock(
         side_effect=real_manager.recover_conflicted_price_delete
     )
-    instance.scheduler_manager.normalized_schedules = (
-        [replace(external_schedule(start), service_type=102)] if listed else []
-    )
+    listing = {
+        None: [],
+        "same_service": [replace(external_schedule(start), service_type=102)],
+        "target_soc": [external_schedule(start)],
+        "target_soc_list_only": [replace(
+            external_schedule(start), completeness=ScheduleCompleteness.LIST_ONLY,
+        )],
+    }
+    instance.scheduler_manager.normalized_schedules = listing[listed]
     controller = PriceOptimizationController(instance)
     await controller.tick()
     # The list must be read after the conflict was first seen.
@@ -455,7 +472,7 @@ async def test_unanswered_get_is_settled_by_a_later_complete_list_without_the_sc
     await controller.tick()
     assert len(executor.mutation_commands) == 1
     assert store.records[M_ID].lifecycle is (
-        OwnershipLifecycle.CONFLICTED if listed else OwnershipLifecycle.ORPHANED
+        OwnershipLifecycle.ORPHANED if settled else OwnershipLifecycle.CONFLICTED
     )
     assert controller.status == "disabled"
 
@@ -478,3 +495,33 @@ async def test_planner_settles_an_unconfirmed_delete_whose_interval_has_ended():
     assert controller.delete_recovery_reason is None
     assert store.records[M_ID].lifecycle is OwnershipLifecycle.EXPIRED_RESERVED
     assert len(executor.mutation_commands) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ended", [False, True])
+async def test_unconfirmed_soc_guard_stop_is_settled_only_after_its_interval(ended):
+    # 11 Nov: the SOC guard's stop of a running discharge was never confirmed.
+    # The post-check skipped it for good, so later discharges the plan no
+    # longer wanted could not be removed until Home Assistant restarted.
+    from .test_scheduler_manager import _move_start, _timed_out_price_delete
+
+    executor, store, _, real_manager = _timed_out_price_delete([TimeoutError(), TimeoutError()])
+    await real_manager.delete(M_ID)
+    # The one-hour interval either still runs or ended seven hours ago.
+    _move_start(store, datetime.now(UTC) - timedelta(hours=7 if ended else 0, minutes=10))
+    instance, fake_mutations = runtime()
+    instance.scheduler_ownership = store
+    instance.scheduler_mutation_manager = fake_mutations
+    fake_mutations.recover_conflicted_price_delete = AsyncMock(
+        side_effect=real_manager.recover_conflicted_price_delete
+    )
+    controller = PriceOptimizationController(instance)
+    controller.soc_guard._attempted.add(M_ID)
+    await controller.tick()
+    assert len(executor.mutation_commands) == 1  # the stop is never re-sent
+    if ended:
+        fake_mutations.recover_conflicted_price_delete.assert_awaited_once()
+        assert store.records[M_ID].lifecycle is OwnershipLifecycle.EXPIRED_RESERVED
+    else:
+        fake_mutations.recover_conflicted_price_delete.assert_not_awaited()
+        assert store.records[M_ID].lifecycle is OwnershipLifecycle.CONFLICTED

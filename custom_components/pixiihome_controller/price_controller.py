@@ -47,6 +47,8 @@ _LOGGER = logging.getLogger(__name__)
 
 
 PRICE_OWNER = "automatic_price_optimization"
+# Same margin the mutation manager uses before an ended interval is moot.
+_ENDED_MARGIN = timedelta(minutes=5)
 _SERVICE_TYPE = {
     "demandresponse": 102,
     "peakshaving": 104,
@@ -116,6 +118,9 @@ class PriceOptimizationController:
         # Refusals caused by a passing state (a safety check, a list being
         # refreshed) only hold for the pass they happened in.
         self._transient_refusals: set[tuple[int, int, int, int]] = set()
+        # Refusal reasons already logged; kept while they recur pass after
+        # pass, so a lasting block (13 h on 10-11 Nov) is logged once.
+        self._logged_refusals: set[str] = set()
         self._logged_block_reason: str | None = None
         # Safety checks that last stopped a schedule write (logged once).
         self.blocked_details: list[str] = []
@@ -683,7 +688,12 @@ class PriceOptimizationController:
                 conflicted.owner != PRICE_OWNER
                 or conflicted.lifecycle is not OwnershipLifecycle.CONFLICTED
                 or conflicted.m_id in self.soc_guard._attempted
+                and not _interval_ended(conflicted)
             ):
+                # An unconfirmed SOC-guard stop is never retried while its
+                # interval runs. Once the interval is over the read-only
+                # post-check may retire it; otherwise it would block every
+                # price write until Home Assistant restarts (11 Nov).
                 continue
             seen = self._conflicts_seen.setdefault(conflicted.m_id, datetime.now(UTC))
             absent = self._absent_from_inventory(conflicted, seen)
@@ -763,9 +773,11 @@ class PriceOptimizationController:
             return False
         if begin <= snapshot.evaluated_at_epoch:
             return False
+        own_type = _SERVICE_TYPE.get(record.service)
         return not any(
             schedule.start_epoch == begin
-            or schedule.service_type == _SERVICE_TYPE.get(record.service)
+            and not _provably_other_service(schedule, own_type)
+            or schedule.service_type == own_type
             and schedule.start_epoch < end
             and begin < schedule.start_epoch + (schedule.duration_seconds or 0)
             for schedule in snapshot.schedules
@@ -2076,11 +2088,15 @@ class PriceOptimizationController:
             elif status == "refused" and window.adjustable:
                 reason = str(result.get("reason"))
                 # One entry per reason: the same cause usually hits every target.
-                repeated = reason in self._refused_targets.values()
+                repeated = (
+                    reason in self._refused_targets.values()
+                    or reason in self._logged_refusals
+                )
                 self._refused_targets[key] = reason
+                self._logged_refusals.add(reason)
                 if not _lasting_refusal(reason):
                     self._transient_refusals.add(key)
-                _LOGGER.warning(
+                (_LOGGER.debug if repeated else _LOGGER.warning)(
                     "Aggregator Target SOC %s could not be changed: %s", when, reason
                 )
                 if not repeated:
@@ -2143,6 +2159,8 @@ class PriceOptimizationController:
 
     def _prune_refused_targets(self) -> None:
         now = datetime.now(UTC).timestamp()
+        # Forget a logged reason once a whole pass went by without it.
+        self._logged_refusals &= set(self._refused_targets.values())
         self._refused_targets = {
             key: reason for key, reason in self._refused_targets.items()
             if key[2] + key[3] > now and key not in self._transient_refusals
@@ -2481,6 +2499,34 @@ def _describe(record: SchedulerOwnershipRecord) -> str:
     if start is None or type(duration) is not int:
         return f"price {direction}"
     return f"price {direction} {time_span(start, start + timedelta(seconds=duration))}"
+
+
+def _interval_ended(record: SchedulerOwnershipRecord) -> bool:
+    """Whether a record's whole one-shot interval (plus margin) has passed."""
+    start = _record_start(record)
+    duration = record.intended_state.get("duration")
+    if start is None or type(duration) is not int:
+        return False
+    return datetime.now(UTC) >= start + timedelta(seconds=duration) + _ENDED_MARGIN
+
+
+def _provably_other_service(schedule: Any, own_type: int | None) -> bool:
+    """Whether a listed schedule is fully read and runs another service.
+
+    The aggregator's Target SoC windows start on the hour, often at the same
+    time as an own price schedule. A complete entry with a different service
+    type cannot be the removed own schedule, so it must not keep the removal
+    unproven (11 Nov: a 08:00 discharge stayed "unconfirmed" for 13 h because
+    the aggregator's 08:00-09:00 Target SoC started at the same time).
+    """
+    return (
+        own_type is not None
+        and schedule.completeness is ScheduleCompleteness.COMPLETE
+        and schedule.consistency is ScheduleConsistency.CONSISTENT
+        and type(schedule.service_type) is int
+        and schedule.service_type > 0
+        and schedule.service_type != own_type
+    )
 
 
 def _record_start(record: SchedulerOwnershipRecord) -> datetime | None:

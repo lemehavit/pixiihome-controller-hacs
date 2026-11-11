@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.30 — 2026-11-11
+
+Rättningar efter genomgången av 9–11 november.
+
+- En egen urladdning vars borttagning gatewayn inte bekräftade kunde inte
+  efterkontrolleras om aggregatorns Target SOC-fönster började samma minut.
+  Fönstret räknades som "något på samma plats", så alla prisskrivningar stod
+  still i 13 timmar 10–11 november (nattladdningen skapades aldrig och
+  aggregatorns mål 08–09 gick inte att sänka). Ett fullt läst schema med en
+  annan tjänst hindrar inte längre efterkontrollen.
+- När SOC-vaktens stopp av en pågående urladdning inte bekräftades hoppades
+  efterkontrollen över för gott, så senare urladdningar som planen inte längre
+  ville ha kunde inte tas bort förrän Home Assistant startades om
+  (11 november, efter aggregatorns DR). Stoppet skickas fortfarande aldrig
+  igen, men när passets tid är slut avgörs det med en ren läsning.
+- En nekad ändring av ett aggregatormål loggas en gång så länge orsaken
+  består, i stället för varje planeringsvarv (cirka 300 rader i systemloggen).
+
 ## 0.5.29 — 2026-11-09
 
 - Gatewayens notis om låg SOC (status *Info* med bara händelse 65536) räknas

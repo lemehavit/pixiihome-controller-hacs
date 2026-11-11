@@ -1217,6 +1217,49 @@ async def test_refused_target_is_kept_and_planned_around_with_its_reason(caplog)
 
 
 @pytest.mark.asyncio
+async def test_passing_refusal_is_logged_once_while_it_lasts(caplog):
+    # 10-11 Nov: a 13 h ownership block logged the same refusal every pass
+    # (about 100 activity entries and 300 system-log warnings).
+    from homeassistant.exceptions import HomeAssistantError
+
+    instance, _ = runtime()
+    _window, calls = _aggregator_day(instance, adjust=True)
+    logged: list[str] = []
+    refuse = True
+
+    async def target(**kwargs):
+        calls.append(kwargs)
+        if refuse:
+            raise HomeAssistantError("scheduler_ownership_ambiguous")
+        return {"status": "unchanged"}
+
+    instance.gateway_scheduler.set_external_target_soc = target
+    controller = PriceOptimizationController(instance)  # type: ignore[arg-type]
+    import custom_components.pixiihome_controller.price_controller as module
+
+    original = module.log_activity
+    module.log_activity = lambda _runtime, _key, message, *_args: logged.append(message)
+    try:
+        for _ in range(3):
+            await controller.tick()
+        tried = len(calls)
+        refusals = [m for m in logged if "cannot be changed" in m]
+        warnings = caplog.text.count("could not be changed: scheduler_ownership_ambiguous")
+        refuse = False
+        await controller.tick()
+        refuse = True
+        await controller.tick()
+    finally:
+        module.log_activity = original
+
+    # A passing refusal is tried again every pass but logged only once.
+    assert tried >= 3
+    assert len(refusals) == 1 and warnings == 1
+    # After a pass without it, a new refusal is news again.
+    assert len([m for m in logged if "cannot be changed" in m]) == 2
+
+
+@pytest.mark.asyncio
 async def test_lowered_target_is_restored_when_no_longer_held():
     instance, _ = runtime()
     window, calls = _aggregator_day(instance, adjust=True)
