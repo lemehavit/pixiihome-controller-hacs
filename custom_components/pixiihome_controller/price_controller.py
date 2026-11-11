@@ -885,13 +885,15 @@ class PriceOptimizationController:
                 if low_soc_info:
                     log_activity(
                         self.runtime, PRICE_STATUS,
-                        "Gateway shows its low-SOC notice (Info, event 65536); "
+                        "Gateway shows its low-SOC notice (event 65536); "
                         "planning continues",
                         "Who: price optimization. Why: the Gateway reports low SOC as "
                         "status Info with system event 65536 until the battery is "
-                        "charged again. It is a notice, not a fault, so charging can "
-                        "still be planned; the SOC limits keep discharges above your "
-                        "minimum. Warning or any other event still stops planning.",
+                        "charged again, and as Warning when it is nearly empty "
+                        "(accepted only at 15 % usable SOC or less). It is a notice, "
+                        "not a fault, so charging can still be planned; the SOC limits "
+                        "keep discharges above your minimum. Any other event, or a "
+                        "Warning at higher SOC, still stops planning.",
                     )
             if (
                 battery.usable_soc is None

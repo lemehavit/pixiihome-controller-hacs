@@ -1162,6 +1162,29 @@ async def test_unconfirmed_price_delete_settles_once_its_interval_has_ended(read
 
 
 @pytest.mark.asyncio
+async def test_ended_conflict_without_open_journal_transaction_reports_success() -> None:
+    # 11 Nov: an unconfirmed SOC-guard stop finalizes its journal entry as
+    # failed. Settling it after its interval worked but was reported as
+    # "reconciliation_failed".
+    executor, store, allocator, _ = _timed_out_price_delete([])
+    store.records[M_ID] = replace(
+        store.records[M_ID], lifecycle=OwnershipLifecycle.CONFLICTED,
+    )
+    manager_instance = manager(executor, store=store, allocator=allocator)
+    _move_start(store, datetime.now(UTC) - timedelta(hours=2))
+    executor.gets = [TimeoutError()]
+
+    recovered = await manager_instance.recover_conflicted_price_delete(M_ID)
+
+    assert recovered.status is SchedulerTransactionStatus.SUCCESS
+    assert recovered.lifecycle_after is OwnershipLifecycle.EXPIRED_RESERVED
+    assert store.records[M_ID].lifecycle is OwnershipLifecycle.EXPIRED_RESERVED
+    assert M_ID in allocator.owned_ids
+    assert executor.mutation_commands == []
+    assert not store.has_unresolved_records()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("readback", ["moved_to_future", "longer", "running", "changed_values"])
 async def test_ended_price_delete_stays_conflicted_when_gateway_disagrees(readback) -> None:
     # N1: a readable reply that contradicts the local end time (another
