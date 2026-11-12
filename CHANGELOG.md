@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.5.32 — 2026-11-12
+
+Rättningar efter genomgången 12 november.
+
+- Hela-dagen-planeraren räknade i steg om 0,18 kWh när export var tillåten.
+  En kvart med husförbrukning under cirka 0,7 kW gick då inte att planera,
+  så urladdningar till huset uteblev eller skrevs med taket "0,7 kW".
+  Energistegen förfinas nu efter husets last även när export är tillåten.
+  12 november 07:30 hade det gett urladdning 07:45–10:15 i stället för ingen.
+- En urladdning till huset som ligger inom ett energisteg från lasten följer
+  nu lasten i stället för att få ett fast effekttak.
+- När planen inte har någon egen urladdning återställdes alla sänkta
+  Target SOC direkt, även till dagens dyraste timme (12 november 08–09 för
+  3,50 kr/kWh). Fönstren före det billigaste fönstret hålls nu kvar på
+  planerad nivå, så att aggregatorns påfyllning väntar till den billigare
+  tiden. Det kräver minst 0,10 kr/kWh lägre pris, färsk SOC, kända priser
+  och att det billiga fönstret är minst lika långt. Sådana fönster sänks
+  bara, de tas aldrig bort. Kräver som förut *Allow changing aggregator
+  schedules*.
+- Aggregatorns Target SOC justeras bara när fönstret börjar inom fyra
+  timmar. Tidigare skrevs alla dagens fönster om vid varje SOC-steg (38
+  skrivningar natten mot 12 november). Senare fönster behåller aggregatorns
+  värde tills de närmar sig, vilket också är säkrare om Home Assistant stannar.
+- En urladdning som minsta vinst filtrerar bort lämnade kvar laddningen som
+  var till för den. Planen görs nu om utan den urladdningen, högst tre gånger.
+- Battery activity: när batteriet går åt motsatt håll mot vårt eget schema
+  (12 november 07:50 laddade det ur 9,3 kW mitt i vår laddning) anges det
+  som "not started by this integration" i stället för prisoptimeringen.
+
 ## 0.5.31 — 2026-11-11
 
 - När batteriet är nästan tomt visar Gateway samma låg-SOC-notis (bara

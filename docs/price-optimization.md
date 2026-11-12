@@ -127,6 +127,13 @@ This requires **Automatic price optimization**, **Allow creating schedules** and
 **Allow changing aggregator schedules**, as well as production authority and the
 normal policy/identity checks. No APS-based hold is added for missing/stale
 observations, foreign APS, incomplete prices or an infeasible cheaper slot.
+
+Without an APS observation, and when the plan has no discharge of its own, the
+aggregator's refill is still postponed to the cheapest Target SOC window: the
+windows before it are held at the planned level. This needs a price at least
+0.10 SEK/kWh lower, fresh SOC, complete prices for the windows involved, and a
+cheaper window at least as long as each window it replaces. These windows are
+only lowered, never deleted, and restored when the advantage disappears.
 The target is held at measured/projected SOC, bounded by the configured reserve;
 it is not arbitrarily lowered to minimum SOC. The later cheap target is retained.
 Original targets are restored, never raised above the aggregator's own value,
@@ -192,6 +199,9 @@ schedules instead of being refilled by each of them:
   (`lowered_external_targets`) and read back after a Home Assistant restart,
   so a target can still be restored. Original references for APS-based holds
   must be saved durably before lowering; a storage failure blocks the write.
+- Only windows that start within four hours are lowered or raised. Later
+  windows keep the aggregator's own value until they come closer, so the
+  target is not rewritten at every SOC change.
 - Each adjustment pass changes at most one aggregator schedule. Cleanup may run
   several bounded restoration passes for remembered originals, and keeps retrying
   safely while the feature is off. Expired or completely inventoried absent

@@ -2149,18 +2149,12 @@ async def test_aps_target_restores_original_when_price_advantage_disappears(whol
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("condition", ["no_context", "expired", "foreign", "no_permission",
-                                       "no_writes", "stale_soc", "too_short", "unpriced"])
+@pytest.mark.parametrize("condition", ["no_permission", "no_writes", "stale_soc",
+                                       "too_short", "unpriced"])
 async def test_aps_context_alone_does_not_authorize_unsafe_deferral(condition):
     instance, _ = runtime()
     _, cheap, _, calls, _ = _aps_recharge_day(instance)
-    if condition == "no_context":
-        instance.aps_recharge_context = None
-    elif condition == "expired":
-        instance.aps_recharge_context["expires_at"] = datetime.now(UTC).timestamp() - 1
-    elif condition == "foreign":
-        instance.aps_recharge_context["owner"] = "foreign"
-    elif condition == "no_permission":
+    if condition == "no_permission":
         instance.operational_settings = instance.operational_settings.set(
             "price_adjust_external_target_soc", False)
     elif condition == "no_writes":
@@ -2180,6 +2174,74 @@ async def test_aps_context_alone_does_not_authorize_unsafe_deferral(condition):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("condition", ["no_context", "expired", "foreign"])
+async def test_refill_waits_for_the_cheaper_window_without_aps_or_own_discharge(condition):
+    # 12 Nov 07:30: no discharge of our own was left, so every lowered target
+    # was restored and the aggregator refilled 08-09, the day's most expensive
+    # hour. Without a verified APS discharge the earlier window is still held
+    # at the current level; it is lowered, never deleted.
+    instance, _ = runtime()
+    expensive, cheap, targets, calls, _ = _aps_recharge_day(instance)
+    if condition == "no_context":
+        instance.aps_recharge_context = None
+    elif condition == "expired":
+        instance.aps_recharge_context["expires_at"] = datetime.now(UTC).timestamp() - 1
+    else:
+        instance.aps_recharge_context["owner"] = "foreign"
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    assert len(calls) == 1
+    assert calls[0]["sch_index"] == expensive.sch_index
+    assert calls[0]["new_reference"] == 50
+    assert calls[0]["allow_delete"] is False and calls[0]["delete"] is False
+    assert targets[cheap.service_no] == 100
+    assert controller._aps_held_starts == set()
+    # Stable: the next pass writes nothing more.
+    await controller.tick()
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_refill_hold_ends_when_the_later_window_is_not_cheaper():
+    instance, _ = runtime()
+    _, _, targets, calls, _ = _aps_recharge_day(instance)
+    instance.aps_recharge_context = None
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    assert targets[300] == 50
+    for item in instance.hass.states.state.attributes["prices"]:
+        item["price"] = 0.2
+    await controller.tick()
+    assert targets[300] == 100
+    assert not calls[-1]["delete"]
+    assert instance.lowered_external_targets == {}
+
+
+@pytest.mark.asyncio
+async def test_aggregator_target_far_ahead_is_not_adjusted_yet():
+    # Night to 12 Nov: all nine windows of the day were rewritten at every SOC
+    # step (38 writes). A window more than four hours ahead waits; it gets the
+    # level planned then, and keeps the aggregator's value if HA stops.
+    instance, _ = runtime()
+    expensive, cheap, targets, calls, _ = _aps_recharge_day(instance)
+    instance.aps_recharge_context = None
+    shift = 5 * 3600
+    for item in instance.hass.states.state.attributes["prices"]:
+        for key in ("start", "end"):
+            item[key] = (datetime.fromisoformat(item[key]) + timedelta(seconds=shift)).isoformat()
+    instance.scheduler_manager.normalized_schedules = [
+        replace(schedule, start_epoch=schedule.start_epoch + shift,
+                end_epoch=schedule.end_epoch + shift)
+        for schedule in (expensive, cheap)
+    ]
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    assert calls == []
+    assert targets == {300: 100.0, 301: 100.0}
+    assert controller.status in {"ready", "active"}
+
+
+@pytest.mark.asyncio
 async def test_aps_deferral_does_not_change_a_target_within_lead_time():
     instance, _ = runtime()
     expensive, _, _, calls, _ = _aps_recharge_day(instance)
@@ -2193,16 +2255,14 @@ async def test_aps_deferral_does_not_change_a_target_within_lead_time():
     assert controller.aps_targets_within_lead_time == 1
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("condition", ["expired", "no_permission", "no_writes", "disabled"])
+@pytest.mark.parametrize("condition", ["no_permission", "no_writes", "disabled"])
 async def test_existing_aps_hold_restores_original_when_conditions_end(condition):
     instance, _ = runtime()
     _, _, targets, calls, _ = _aps_recharge_day(instance)
     controller = PriceOptimizationController(instance)
     await controller.tick()
     assert targets[300] == 50
-    if condition == "expired":
-        instance.aps_recharge_context["expires_at"] = datetime.now(UTC).timestamp() - 1
-    elif condition == "no_permission":
+    if condition == "no_permission":
         instance.operational_settings = instance.operational_settings.set(
             "price_adjust_external_target_soc", False)
     elif condition == "no_writes":
@@ -2297,11 +2357,11 @@ async def test_partial_recharge_durably_consumes_old_aps_context():
     instance.battery = replace(instance.battery, usable_soc=60)
     await controller.tick()
     assert saved == [(APS_RECHARGE, None)]
-    assert targets[300] == 100
-    before = len(calls)
-    instance.battery = replace(instance.battery, usable_soc=40)
-    await controller.tick()
-    assert len(calls) == before and targets[300] == 100
+    # The APS context is used up. The window is still held so the refill
+    # waits for the cheaper one, now at the level the battery really has.
+    assert targets[300] == 60
+    assert controller._aps_held_starts == set()
+    assert targets[301] == 100
 
 
 @pytest.mark.asyncio

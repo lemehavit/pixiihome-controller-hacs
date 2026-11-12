@@ -66,6 +66,15 @@ _REPLACE_AHEAD_HOURS = 4
 # Smallest change of a foreign Target SOC worth the pass's one external write
 # (3 points of SOC is about 0.7 kWh with 18.4 kWh usable between 10 and 90 %).
 _TARGET_DEADBAND_PERCENT = 3.0
+# Price advantage (kr/kWh) that makes it worth holding aggregator targets only
+# to let the refill wait for a cheaper window, with no discharge of our own.
+_REFILL_MINIMUM_ADVANTAGE_SEK_PER_KWH = 0.10
+# Aggregator targets are only lowered or raised when their window starts
+# within this many hours. Later windows wait: the planned level changes with
+# every SOC step, and each change is a write to a foreign schedule (38 writes
+# in the night to 12 Nov for nine windows). An untouched later target also
+# fails safe: if Home Assistant stops, the aggregator's own value stands.
+_ADJUST_AHEAD_HOURS = 4
 
 
 class PriceOptimizationController:
@@ -108,6 +117,9 @@ class PriceOptimizationController:
         self._lowered: dict[tuple[int, int, int, int], float] = {}
         self._lowered_loaded = False
         self._aps_held_starts: set[datetime] = set()
+        # Windows held only so the aggregator's refill waits for a cheaper
+        # window. They are lowered, never deleted.
+        self._refill_held_starts: set[datetime] = set()
         self.aps_recharge_reason: str | None = None
         self.aps_targets_within_lead_time = 0
         self._restoring_targets = False
@@ -993,6 +1005,7 @@ class PriceOptimizationController:
         )
         self._prune_refused_targets()
         if not adjust:
+            self._refill_held_starts.clear()
             self._aps_held_starts.clear()
             self.aps_recharge_reason = "aggregator_changes_not_permitted"
         # A refused target is planned as fixed from then on, so plan again
@@ -1756,6 +1769,7 @@ class PriceOptimizationController:
         keeps at least the target need no change.
         """
         self._aps_held_starts = set()
+        self._refill_held_starts = set()
         self.aps_recharge_reason = None
         lead = datetime.now(UTC) + timedelta(minutes=self.config.minimum_lead_minutes)
         self.aps_targets_within_lead_time = sum(
@@ -1803,6 +1817,21 @@ class PriceOptimizationController:
                 if second.ready and second_discharges:
                     first, discharges = second, second_discharges
                     second_plan, refill_windows = second, refill
+                elif second.ready and self._refill_is_cheaper_later(series, eligible, cut):
+                    # Nothing of our own to discharge, but the aggregator
+                    # still refills at its next window whatever that costs
+                    # (12 Nov: targets were restored at 07:30 and the battery
+                    # was filled 08-09, the day's most expensive hour). Keep
+                    # the earlier windows at the planned level, so the refill
+                    # waits for the cheapest window.
+                    # A verified APS discharge keeps its own, stricter hold.
+                    aps = self._with_aps_targets(
+                        series, limits, self._external_windows, eligible, first
+                    )
+                    if self._aps_held_starts:
+                        return aps
+                    self._refill_held_starts = {w.start for w in refill if w.adjustable}
+                    return refill
         if not first.ready or not discharges:
             return self._with_aps_targets(series, limits, self._external_windows, eligible, first)
         if first is not second_plan:
@@ -1813,6 +1842,39 @@ class PriceOptimizationController:
         else:
             held = refill_windows
         return self._with_aps_targets(series, limits, held, eligible, first)
+
+    def _refill_is_cheaper_later(
+        self, series: PriceSeries, eligible: list[bool], cut: datetime,
+    ) -> bool:
+        """Whether holding the windows before ``cut`` moves a refill to a cheaper time.
+
+        Postponing a refill adds no cycle and no losses, so a small price
+        advantage is enough; it only has to be worth the target writes. Every
+        second of the windows involved must be priced, the SOC must be fresh,
+        and the cheaper window must be at least as long as each window it
+        replaces, so it can refill as much as they would have.
+        """
+        fresh = getattr(self.runtime.telemetry, "is_fresh", None)
+        if callable(fresh) and not (fresh("battery") and fresh("core")):
+            return False
+        refill = next((w for w in self._external_windows if w.start == cut), None)
+        earlier = [
+            window
+            for window, flag in zip(self._external_windows, eligible, strict=True)
+            if flag and window.start < cut
+        ]
+        if refill is None or not earlier:
+            return False
+        refill_price = _covered_window_price(series, refill)
+        prices = [_covered_window_price(series, window) for window in earlier]
+        if refill_price is None or any(price is None for price in prices):
+            return False
+        if any(refill.end - refill.start < window.end - window.start for window in earlier):
+            return False
+        return (
+            max(price for price in prices if price is not None) - refill_price
+            >= _REFILL_MINIMUM_ADVANTAGE_SEK_PER_KWH
+        )
 
     def _with_aps_targets(
         self, series: PriceSeries, limits: dict[str, float],
@@ -1958,6 +2020,7 @@ class PriceOptimizationController:
         # applied cycle uses, or that start before the pass after next could
         # still reach them, are replaced; later ones are held for now.
         replace_until = self._replace_until(plan.actions)
+        adjust_until = datetime.now(UTC) + timedelta(hours=_ADJUST_AHEAD_HOURS)
         for window, meta in zip(windows, self._external_meta, strict=True):
             if meta is None or window.start <= lead:
                 continue
@@ -1978,6 +2041,10 @@ class PriceOptimizationController:
                 # The plan uses this time itself: remove the aggregator target.
                 desired, allow_delete = reference, True
             elif window.adjustable:
+                if window.start > adjust_until and window.start not in self._aps_held_starts:
+                    # Too far ahead to be worth a write now; it is adjusted
+                    # to the level planned then, once it comes closer.
+                    continue
                 fallback = (battery.usable_soc if window.start in self._aps_held_starts else floor)
                 if fallback is None:
                     return window.start
@@ -2000,7 +2067,10 @@ class PriceOptimizationController:
                         continue
                     allow_delete = False
                 else:
-                    allow_delete = window.start not in self._aps_held_starts
+                    allow_delete = (
+                        window.start not in self._aps_held_starts
+                        and window.start not in self._refill_held_starts
+                    )
             elif key in self._lowered:
                 if key in self._transient_refusals:
                     # Refused for a passing reason in this pass: it only stopped

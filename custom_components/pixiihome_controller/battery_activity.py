@@ -25,6 +25,9 @@ SAMPLE_SECONDS = 15
 # so a house load flickering around zero does not flood the logbook.
 DIRECTION_HOLD = timedelta(minutes=3)
 THRESHOLD_W = 200.0
+# Power in the opposite direction of an own schedule that cannot be that
+# schedule's doing (a self-use discharge never charges, a charge never exports).
+OVERRIDE_THRESHOLD_W = 1000.0
 RECENT_LIMIT = 30
 
 OWNER_NAMES = {
@@ -328,10 +331,45 @@ class BatteryActivityTracker:
             if not start <= now < end:
                 continue
             owner = OWNER_NAMES.get(record.owner or "", record.owner or "this integration")
+            against = self._against_own_schedule(record)
+            if against is not None:
+                # The same service number runs, but the battery does the
+                # opposite of our schedule: someone else commands it now.
+                return Cause(
+                    "not started by this integration",
+                    f"the battery is {against[1]} although the {owner} schedule "
+                    f"{span(start, end)} is a {against[0]}: the aggregator or the "
+                    "Gateway's own control overrides it",
+                )
             detail = ""
             if record.owner == "automatic_price_optimization":
                 detail = self._price_detail(now)
             return Cause(owner, detail, span(start, end))
+        return None
+
+    def _against_own_schedule(self, record: Any) -> tuple[str, str] | None:
+        """(what our schedule is, what the battery does) when they clearly differ.
+
+        12 Nov 07:50: during our own Demand Response charge the battery
+        discharged 9.3 kW to the grid for five minutes. The aggregator's
+        command uses the same service number, so it was logged as price
+        optimization discharging.
+        """
+        power = self.power_w
+        values = record.intended_state.get("values")
+        if power is None or not isinstance(values, Mapping):
+            return None
+        intended: str | None = None
+        if record.service == "demandresponse":
+            pacref = _number(values.get("pacref"))
+            if pacref is not None and pacref != 0:
+                intended = "charge" if pacref > 0 else "discharge"
+        elif record.service == "peakshaving" and values.get("charge_max") == 0:
+            intended = "discharge"
+        if intended == "charge" and power < -OVERRIDE_THRESHOLD_W:
+            return intended, "discharging"
+        if intended == "discharge" and power > OVERRIDE_THRESHOLD_W:
+            return intended, "charging"
         return None
 
     def _price_detail(self, now: datetime) -> str:
