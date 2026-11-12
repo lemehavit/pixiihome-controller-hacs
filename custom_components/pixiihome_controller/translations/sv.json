@@ -357,6 +357,9 @@
       "solar_smart_safety_margin_percent": {
         "name": "Smart solladdning säkerhetsmarginal"
       },
+      "price_refill_delay_gain_sek_per_hour": {
+        "name": "Minsta besparing per timme som aggregatorns påfyllning skjuts upp"
+      },
       "price_blocked_notify_hours": {
         "name": "Avisera när prisoptimeringen stått still i"
       },

@@ -134,8 +134,10 @@ windows before it are held at the planned level. After a price discharge of
 the last 24 hours that has not been refilled yet (the SOC has not risen five
 points above the lowest level seen since), it waits for the cheapest window of
 the horizon. When something else emptied the battery, such as the aggregator's
-Demand Response, it only waits for a cheaper window that starts within four
-hours of the next one. This needs a price at least
+Demand Response, the saving decides how long it may wait: the refill energy
+times the price difference, in SEK, must reach **Minimum saving per hour of
+postponed aggregator refill** (default 1 SEK/h) for every hour of delay, and
+the accepted window with the largest saving is chosen. This needs a price at least
 0.10 SEK/kWh lower, fresh SOC, complete prices for the windows involved, and a
 cheaper window at least as long as each window it replaces. These windows are
 only lowered, never deleted, and restored when the advantage disappears.

@@ -21,8 +21,12 @@ Rättningar efter genomgången 12 november.
     inte fyllts på sedan dess) väntar påfyllningen till horisontens
     billigaste fönster.
   - Har någon annan tömt batteriet, till exempel aggregatorns Demand
-    Response, väntar den bara på ett billigare fönster i närtid, som börjar
-    inom fyra timmar efter nästa fönster.
+    Response, avgör vinsten i kronor hur länge påfyllningen får vänta.
+    Besparingen på den flyttade laddningen måste nå den nya inställningen
+    *Minsta besparing per timme som aggregatorns påfyllning skjuts upp*
+    (standard 1 kr/h) för varje timmes uppskjutning. En liten vinst flyttar
+    laddningen kort, en större får hålla den längre. 0 godtar varje
+    billigare fönster.
   Det kräver minst 0,10 kr/kWh lägre pris, färsk SOC, kända priser och att
   det billiga fönstret är minst lika långt. Sådana fönster sänks bara, de
   tas aldrig bort. Kräver som förut *Allow changing aggregator schedules*.

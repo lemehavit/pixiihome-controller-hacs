@@ -69,10 +69,6 @@ _TARGET_DEADBAND_PERCENT = 3.0
 # Price advantage (kr/kWh) that makes it worth holding aggregator targets only
 # to let the refill wait for a cheaper window, with no discharge of our own.
 _REFILL_MINIMUM_ADVANTAGE_SEK_PER_KWH = 0.10
-# When the battery was emptied by someone else (the aggregator), the refill
-# only waits for a cheaper window that starts within this many hours of the
-# next one. After a discharge of our own it may wait for the whole horizon.
-_NEAR_REFILL_HOURS = 4
 # Usable SOC above the lowest level seen after an own discharge that counts
 # as the battery having been refilled.
 _REFILLED_MARGIN_PERCENT = 5.0
@@ -1835,7 +1831,7 @@ class PriceOptimizationController:
                     # was filled 08-09, the day's most expensive hour). Keep
                     # the earlier windows at the planned level, so the refill
                     # waits for a cheaper window.
-                    postponed = self._postponed_refill(series, eligible, later)
+                    postponed = self._postponed_refill(series, limits, eligible, later)
                     if postponed is not None:
                         # A verified APS discharge keeps its own, stricter hold.
                         aps = self._with_aps_targets(
@@ -1859,36 +1855,88 @@ class PriceOptimizationController:
         return self._with_aps_targets(series, limits, held, eligible, first)
 
     def _postponed_refill(
-        self, series: PriceSeries, eligible: list[bool], later: list[ExternalWindow],
+        self, series: PriceSeries, limits: Mapping[str, float], eligible: list[bool],
+        later: list[ExternalWindow],
     ) -> tuple[ExternalWindow, ...] | None:
         """Windows with those before a cheaper refill held, or ``None``.
 
         When price optimization itself discharged the battery, the refill
         waits for the cheapest window of the whole horizon. When someone
-        else emptied it (the aggregator's Demand Response), only a cheaper
-        window in the near future is waited for, so the battery is not kept
-        low for long on the aggregator's account.
+        else emptied it (the aggregator's Demand Response), the saving in kr
+        of the moved refill decides how long it may wait: it must reach the
+        setting Minimum saving per hour of postponed aggregator refill for
+        every hour of delay. A small saving moves the refill a short time
+        only; a larger one may hold it longer.
         """
-        first = next(
-            (w for w, flag in zip(self._external_windows, eligible, strict=True) if flag), None,
-        )
-        if first is None:
+        index = next((i for i, flag in enumerate(eligible) if flag), None)
+        if index is None or not later:
             return None
-        if not self._own_discharge_awaits_refill():
-            near = first.start + timedelta(hours=_NEAR_REFILL_HOURS)
-            later = [w for w in later if w.start <= near]
-        if not later:
+        first = self._external_windows[index]
+        first_price = _covered_window_price(series, first)
+        if first_price is None:
             return None
-        cheapest = min(later, key=lambda w: (_window_price(series, w), w.start))
-        if _window_price(series, cheapest) >= _window_price(series, first):
-            # The next window is already the cheapest: nothing to wait for.
-            return None
+        if self._own_discharge_awaits_refill():
+            cheapest = min(later, key=lambda w: (_window_price(series, w), w.start))
+            if _window_price(series, cheapest) >= first_price:
+                # The next window is already the cheapest: nothing to wait for.
+                return None
+        else:
+            energy = self._refill_energy_kwh(index, limits)
+            rate = float(self.runtime.operational_settings.get(
+                "price_refill_delay_gain_sek_per_hour"
+            ))
+            best: tuple[float, ExternalWindow] | None = None
+            for window in later:
+                price = _covered_window_price(series, window)
+                if energy is None or price is None or price >= first_price:
+                    continue
+                gain = energy * (first_price - price)
+                hours = (window.start - first.start).total_seconds() / 3600
+                if gain + 1e-9 >= rate * hours and (best is None or gain > best[0]):
+                    best = (gain, window)
+            if best is None:
+                return None
+            cheapest = best[1]
         if not self._refill_is_cheaper_later(series, eligible, cheapest.start):
             return None
         return tuple(
             replace(window, adjustable=flag and window.start < cheapest.start)
             for window, flag in zip(self._external_windows, eligible, strict=True)
         )
+
+    def _refill_energy_kwh(self, index: int, limits: Mapping[str, float]) -> float | None:
+        """Grid energy the aggregator window at ``index`` would buy now (AC kWh).
+
+        From the current SOC up to the aggregator's own target (not a value
+        this controller lowered it to), limited by what the window's length
+        and the charge power allow.
+        """
+        battery = self.runtime.battery
+        window = self._external_windows[index]
+        meta = self._external_meta[index]
+        soc = battery.usable_soc
+        capacity = limits.get("capacity")
+        if meta is None or soc is None or not isfinite(soc) or not capacity:
+            return None
+        target = window.target_usable_soc_percent
+        saved = getattr(self.runtime, "lowered_external_targets", {})
+        original = self._lowered.get(_target_key(meta[0]), saved.get(_target_key(meta[0])))
+        if (original is not None and battery.effective_min_soc is not None
+                and battery.effective_max_soc is not None
+                and battery.effective_max_soc > battery.effective_min_soc):
+            target = (original - battery.effective_min_soc) * 100 / (
+                battery.effective_max_soc - battery.effective_min_soc
+            )
+        if target is None:
+            return None
+        policy = self.runtime._automation_policy()
+        power = min(limits.get("charge_kw", 0.0), policy.max_power_kw,
+                    max(0.0, (battery.charge_power_limit_w or 0) / 1000))
+        efficiency = sqrt(limits.get("efficiency", 100.0) / 100)
+        hours = (window.end - window.start).total_seconds() / 3600
+        stored = min(max(0.0, min(target, 100.0) - soc) / 100 * capacity,
+                     power * hours * efficiency)
+        return stored / efficiency if efficiency > 0 else None
 
     def _own_discharge_awaits_refill(self) -> bool:
         """Whether a price discharge of the last 24 h has not been refilled yet.
