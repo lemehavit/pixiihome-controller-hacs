@@ -13,12 +13,19 @@ Rättningar efter genomgången 12 november.
   nu lasten i stället för att få ett fast effekttak.
 - När planen inte har någon egen urladdning återställdes alla sänkta
   Target SOC direkt, även till dagens dyraste timme (12 november 08–09 för
-  3,50 kr/kWh). Fönstren före det billigaste fönstret hålls nu kvar på
+  3,50 kr/kWh). Fönstren före ett billigare fönster hålls nu kvar på
   planerad nivå, så att aggregatorns påfyllning väntar till den billigare
-  tiden. Det kräver minst 0,10 kr/kWh lägre pris, färsk SOC, kända priser
-  och att det billiga fönstret är minst lika långt. Sådana fönster sänks
-  bara, de tas aldrig bort. Kräver som förut *Allow changing aggregator
-  schedules*.
+  tiden:
+  - Har prisoptimeringen själv laddat ur batteriet (ett eget
+    urladdningsschema har körts de senaste 24 timmarna och batteriet har
+    inte fyllts på sedan dess) väntar påfyllningen till horisontens
+    billigaste fönster.
+  - Har någon annan tömt batteriet, till exempel aggregatorns Demand
+    Response, väntar den bara på ett billigare fönster i närtid, som börjar
+    inom fyra timmar efter nästa fönster.
+  Det kräver minst 0,10 kr/kWh lägre pris, färsk SOC, kända priser och att
+  det billiga fönstret är minst lika långt. Sådana fönster sänks bara, de
+  tas aldrig bort. Kräver som förut *Allow changing aggregator schedules*.
 - Aggregatorns Target SOC justeras bara när fönstret börjar inom fyra
   timmar. Tidigare skrevs alla dagens fönster om vid varje SOC-steg (38
   skrivningar natten mot 12 november). Senare fönster behåller aggregatorns

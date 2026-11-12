@@ -129,8 +129,13 @@ normal policy/identity checks. No APS-based hold is added for missing/stale
 observations, foreign APS, incomplete prices or an infeasible cheaper slot.
 
 Without an APS observation, and when the plan has no discharge of its own, the
-aggregator's refill is still postponed to the cheapest Target SOC window: the
-windows before it are held at the planned level. This needs a price at least
+aggregator's refill is still postponed to a cheaper Target SOC window: the
+windows before it are held at the planned level. After a price discharge of
+the last 24 hours that has not been refilled yet (the SOC has not risen five
+points above the lowest level seen since), it waits for the cheapest window of
+the horizon. When something else emptied the battery, such as the aggregator's
+Demand Response, it only waits for a cheaper window that starts within four
+hours of the next one. This needs a price at least
 0.10 SEK/kWh lower, fresh SOC, complete prices for the windows involved, and a
 cheaper window at least as long as each window it replaces. These windows are
 only lowered, never deleted, and restored when the advantage disappears.

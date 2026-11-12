@@ -2217,6 +2217,58 @@ async def test_refill_hold_ends_when_the_later_window_is_not_cheaper():
     assert instance.lowered_external_targets == {}
 
 
+def _cheap_refill_far_ahead(instance):
+    """Expensive Target SOC in two hours; the only cheaper one five hours after it."""
+    expensive, cheap, targets, calls, _ = _aps_recharge_day(instance)
+    instance.aps_recharge_context = None
+    start = datetime.fromtimestamp(expensive.start_epoch, UTC)
+    instance.hass.states.state.attributes["prices"] = [
+        {"start": (start + timedelta(hours=i)).isoformat(),
+         "end": (start + timedelta(hours=i + 1)).isoformat(), "price": price}
+        for i, price in enumerate((3.0, 3.0, 3.0, 3.0, 3.0, 0.2, 0.2))
+    ]
+    shift = 3 * 3600
+    instance.scheduler_manager.normalized_schedules = [
+        expensive,
+        replace(cheap, start_epoch=cheap.start_epoch + shift, end_epoch=cheap.end_epoch + shift),
+    ]
+    return targets, calls
+
+
+@pytest.mark.asyncio
+async def test_refill_after_aggregator_discharge_only_waits_for_a_near_window():
+    # The aggregator emptied the battery, not price optimization: the refill
+    # may only wait for a cheaper window in the near future, never five hours.
+    instance, _ = runtime()
+    targets, calls = _cheap_refill_far_ahead(instance)
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    assert calls == []
+    assert targets == {300: 100.0, 301: 100.0}
+
+
+@pytest.mark.asyncio
+async def test_refill_after_own_discharge_waits_for_the_cheapest_window():
+    # Price optimization discharged the battery itself: the aggregator target
+    # stays lowered until the cheapest window, however far ahead, and is given
+    # back once the battery has been refilled.
+    instance, _ = runtime()
+    targets, calls = _cheap_refill_far_ahead(instance)
+    instance.scheduler_ownership.records[1000000000201] = _owned_price_record(
+        1000000000201, datetime.now(UTC) - timedelta(hours=2)
+    )
+    controller = PriceOptimizationController(instance)
+    await controller.tick()
+    assert len(calls) == 1
+    assert calls[0]["new_reference"] == 50
+    assert calls[0]["allow_delete"] is False and calls[0]["delete"] is False
+    assert targets == {300: 50, 301: 100.0}
+    # Refilled (clearly above the lowest level seen): the discharge is used up.
+    instance.battery = replace(instance.battery, usable_soc=60)
+    await controller.tick()
+    assert targets == {300: 100.0, 301: 100.0}
+
+
 @pytest.mark.asyncio
 async def test_aggregator_target_far_ahead_is_not_adjusted_yet():
     # Night to 12 Nov: all nine windows of the day were rewritten at every SOC
