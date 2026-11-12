@@ -193,6 +193,7 @@ phase, service and ownership checks.
 | `price_usable_capacity_kwh`<br>Usable battery capacity for price planning | 0 | 0–1000; 0.1 | kWh | Explicit usable energy capacity for price planning. Default zero blocks planning; it is not inferred from nameplate capacity. |
 | `price_round_trip_efficiency_percent`<br>Battery round-trip efficiency | 90 | 50–100; 1 | % | Estimated AC round-trip efficiency for energy/profit calculations. Enter percent, for example 90 rather than 0.9. |
 | `price_cycle_cost_sek_per_kwh`<br>Battery cycle cost per delivered kWh | 0 | 0–20; 0.01 | SEK/kWh | Estimated battery-wear cost per delivered AC kWh. Default zero omits this expense; it does not mean wear is free. |
+| `price_refill_delay_gain_sek_per_hour`<br>Minimum saving per hour of postponed aggregator refill | 1 | 0–20; 0.1 | SEK/h | When something other than price optimization emptied the battery, the aggregator's refill is only postponed to a cheaper Target SOC window if the saving in SEK is at least this much per hour of delay. A small saving moves the refill a short time, a large one may hold it longer. 0 accepts any cheaper window. Needs **Allow changing aggregator schedules**. |
 | `price_blocked_notify_hours`<br>Notify when price optimization is stopped for | 3 | 0–48; 1 | h | Create a Home Assistant notification when price optimization has been blocked this long. 0 turns it off. |
 
 ### Retired settings and compatibility

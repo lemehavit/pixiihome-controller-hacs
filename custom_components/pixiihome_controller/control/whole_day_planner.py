@@ -56,6 +56,9 @@ MAXIMUM_ENERGY_LEVELS = 400
 _WORK_BUDGET = 1_600_000
 # Without export, discharge follows the house load: resolve loads this small.
 _HOUSE_LOAD_RESOLUTION_KW = 0.25
+# Times the plan is made again after the minimum-profit filter removed a
+# discharge that a planned charge was bought for.
+_REPLAN_LIMIT = 3
 
 PERFORMED_BY_SOLAR = "automatic_solar_charging"
 PERFORMED_BY_PRICE = "price_schedule"
@@ -173,6 +176,8 @@ def build_whole_day_plan(
     external_windows: Sequence[ExternalWindow] = (),
     levels: int | None = None,
     solar_charging: SolarCharging | None = None,
+    _no_discharge: frozenset[datetime] = frozenset(),
+    _replans: int = 0,
 ) -> WholeDayResult:
     """Plan the cheapest battery trajectory; ``forecast`` gives (load_kw, solar_kw).
 
@@ -181,6 +186,11 @@ def build_whole_day_plan(
     it. ``None`` treats the whole surplus as optional free charging. Charging
     beyond it is a written charge that must earn the minimum profit.
     ``levels`` fixes the energy grid; ``None`` chooses it automatically.
+
+    A discharge the minimum-profit filter leaves out is not written, but the
+    charge planned for it would still be. The plan is then made again without
+    a discharge in those intervals (``_no_discharge``, internal), a few times
+    at most, so no charge is bought for a discharge that never runs.
     """
     if now.tzinfo is None:
         raise ValueError("price_plan_now_naive")
@@ -360,8 +370,19 @@ def build_whole_day_plan(
         discharge_kw = maximum_discharge_kw
         if not export_allowed:
             discharge_kw = min(discharge_kw, max(0.0, load - solar))
+        if item.start in _no_discharge:
+            discharge_kw = 0.0
         down = floor(discharge_kw * hours / eta / step + 1e-9)
-        if (up == 0 and maximum_charge_kw >= 0.1) or (down == 0 and discharge_kw >= 0.1):
+        # The house load is its own flow also when export is allowed.
+        house_kw = min(maximum_discharge_kw, max(0.0, load - solar))
+        if item.start in _no_discharge:
+            house_kw = 0.0
+        house_down = floor(house_kw * hours / eta / step + 1e-9)
+        if (
+            (up == 0 and maximum_charge_kw >= 0.1)
+            or (down == 0 and discharge_kw >= 0.1)
+            or (house_down == 0 and house_kw >= _HOUSE_LOAD_RESOLUTION_KW)
+        ):
             resolution_limited = True
         ups.append(up)
         moves.append([
@@ -457,6 +478,7 @@ def build_whole_day_plan(
     kept = first_energy
     baseline_energy = first_energy
     window_socs: dict[datetime, float] = {}
+    filtered: set[datetime] = set()
     for index, item in enumerate(candidates):
         for window in windows:
             if window.adjustable and window.start not in window_socs and (
@@ -541,6 +563,8 @@ def build_whole_day_plan(
             )
         if written and action is not None:
             actions.append(action)
+        elif action is not None and action.direction is PriceDirection.DISCHARGE:
+            filtered.add(item.start)
         if effective_delta:
             kept = min(levels * step, max(0.0, kept + effective_delta * step))
         if index + 1 in resets:
@@ -566,6 +590,27 @@ def build_whole_day_plan(
             item.start, item.end, item.price_sek_per_kwh, load, solar, effective_battery, soc,
             blocked[index], free, performed_by,
         ))
+    if (
+        filtered
+        and _replans < _REPLAN_LIMIT
+        and any(action.direction is PriceDirection.CHARGE for action in actions)
+    ):
+        return build_whole_day_plan(
+            series, now=now, horizon_hours=horizon_hours,
+            minimum_lead_minutes=minimum_lead_minutes,
+            usable_soc_percent=usable_soc_percent, usable_capacity_kwh=usable_capacity_kwh,
+            minimum_soc_percent=minimum_soc_percent, maximum_soc_percent=maximum_soc_percent,
+            maximum_charge_kw=maximum_charge_kw, maximum_discharge_kw=maximum_discharge_kw,
+            minimum_difference_sek_per_kwh=minimum_difference_sek_per_kwh,
+            export_allowed=export_allowed,
+            export_minimum_difference_sek_per_kwh=export_minimum_difference_sek_per_kwh,
+            round_trip_efficiency_percent=round_trip_efficiency_percent,
+            cycle_cost_sek_per_kwh=cycle_cost_sek_per_kwh,
+            grid_import_cost_sek_per_kwh=grid_import_cost_sek_per_kwh,
+            forecast=forecast, end_before=end_before, external_windows=external_windows,
+            levels=levels, solar_charging=solar_charging,
+            _no_discharge=_no_discharge | filtered, _replans=_replans + 1,
+        )
     margin_total = baseline - planned + terminal_value * (kept - baseline_energy)
     for window in windows:
         if window.adjustable:
@@ -598,13 +643,16 @@ def _energy_levels(
 ) -> int:
     """Energy levels fine enough that the smallest relevant flow spans two.
 
-    The relevant flow is the lower of the power limits, and without export
-    also a small house load, since discharge then follows the house. The grid
-    never gets coarser than ``ENERGY_LEVELS`` and is bounded by the DP work.
+    The relevant flow is the lower of the power limits and a small house
+    load: a self-consumption discharge follows the house, with or without
+    export permission. (With export allowed the grid used to stay at 100
+    levels, 0.18 kWh for 18.4 kWh, so a quarter hour of house load below
+    0.7 kW could not be planned; 12 Nov.) The grid never gets coarser than
+    ``ENERGY_LEVELS`` and is bounded by the DP work.
     """
     hours = min(item.duration_hours for item in candidates)
     powers = [p for p in (maximum_charge_kw, maximum_discharge_kw) if p >= 0.1]
-    if not export_allowed and any(load - solar >= 0.1 for load, solar in flows):
+    if maximum_discharge_kw >= 0.1 and any(load - solar >= 0.1 for load, solar in flows):
         powers.append(_HOUSE_LOAD_RESOLUTION_KW)
     if not powers:
         return ENERGY_LEVELS
@@ -690,9 +738,14 @@ def _action(
         # forcing a fixed export power.
         if -battery <= max(0.0, net) + max(0.05, step_kw):
             # Following the whole house load: let the battery cover it as it
-            # varies. Covering only part of it: cap the discharge.
+            # varies. A shortfall of less than one energy step is rounding in
+            # the energy grid, not a choice to cover only part of the house
+            # (written as "0.7 kW" on 7-8 Nov, so peaks were bought at the
+            # expensive price). Covering clearly less: cap the discharge.
+            house = max(0.0, net)
             power = (
-                maximum_discharge_kw if -battery >= 0.9 * max(0.0, net) - 0.05
+                maximum_discharge_kw
+                if -battery >= min(0.9 * house, house - step_kw) - 0.05
                 else round(-battery, 1)
             )
             if power < 0.1:

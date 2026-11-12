@@ -134,6 +134,9 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "price_blocked_notify_hours": SettingSpec(
         "price_blocked_notify_hours", 3, 0, 48, 1, "h"
     ),
+    "price_refill_delay_gain_sek_per_hour": SettingSpec(
+        "price_refill_delay_gain_sek_per_hour", 1.0, 0.0, 20.0, 0.1, "SEK/h"
+    ),
     "price_min_difference_sek_per_kwh": SettingSpec(
         "price_min_difference_sek_per_kwh", 0.5, 0.0, 20.0, 0.01, "SEK/kWh"
     ),

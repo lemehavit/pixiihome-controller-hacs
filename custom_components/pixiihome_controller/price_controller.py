@@ -66,6 +66,18 @@ _REPLACE_AHEAD_HOURS = 4
 # Smallest change of a foreign Target SOC worth the pass's one external write
 # (3 points of SOC is about 0.7 kWh with 18.4 kWh usable between 10 and 90 %).
 _TARGET_DEADBAND_PERCENT = 3.0
+# Price advantage (kr/kWh) that makes it worth holding aggregator targets only
+# to let the refill wait for a cheaper window, with no discharge of our own.
+_REFILL_MINIMUM_ADVANTAGE_SEK_PER_KWH = 0.10
+# Usable SOC above the lowest level seen after an own discharge that counts
+# as the battery having been refilled.
+_REFILLED_MARGIN_PERCENT = 5.0
+# Aggregator targets are only lowered or raised when their window starts
+# within this many hours. Later windows wait: the planned level changes with
+# every SOC step, and each change is a write to a foreign schedule (38 writes
+# in the night to 12 Nov for nine windows). An untouched later target also
+# fails safe: if Home Assistant stops, the aggregator's own value stands.
+_ADJUST_AHEAD_HOURS = 4
 
 
 class PriceOptimizationController:
@@ -108,6 +120,13 @@ class PriceOptimizationController:
         self._lowered: dict[tuple[int, int, int, int], float] = {}
         self._lowered_loaded = False
         self._aps_held_starts: set[datetime] = set()
+        # Windows held only so the aggregator's refill waits for a cheaper
+        # window. They are lowered, never deleted.
+        self._refill_held_starts: set[datetime] = set()
+        # (m_id, lowest usable SOC seen) of the latest own discharge that
+        # ran, and the id of the one the battery has been refilled after.
+        self._own_discharge_floor: tuple[int, float] | None = None
+        self._own_discharge_refilled: int | None = None
         self.aps_recharge_reason: str | None = None
         self.aps_targets_within_lead_time = 0
         self._restoring_targets = False
@@ -993,6 +1012,7 @@ class PriceOptimizationController:
         )
         self._prune_refused_targets()
         if not adjust:
+            self._refill_held_starts.clear()
             self._aps_held_starts.clear()
             self.aps_recharge_reason = "aggregator_changes_not_permitted"
         # A refused target is planned as fixed from then on, so plan again
@@ -1756,6 +1776,7 @@ class PriceOptimizationController:
         keeps at least the target need no change.
         """
         self._aps_held_starts = set()
+        self._refill_held_starts = set()
         self.aps_recharge_reason = None
         lead = datetime.now(UTC) + timedelta(minutes=self.config.minimum_lead_minutes)
         self.aps_targets_within_lead_time = sum(
@@ -1803,6 +1824,25 @@ class PriceOptimizationController:
                 if second.ready and second_discharges:
                     first, discharges = second, second_discharges
                     second_plan, refill_windows = second, refill
+                elif second.ready:
+                    # Nothing of our own to discharge, but the aggregator
+                    # still refills at its next window whatever that costs
+                    # (12 Nov: targets were restored at 07:30 and the battery
+                    # was filled 08-09, the day's most expensive hour). Keep
+                    # the earlier windows at the planned level, so the refill
+                    # waits for a cheaper window.
+                    postponed = self._postponed_refill(series, limits, eligible, later)
+                    if postponed is not None:
+                        # A verified APS discharge keeps its own, stricter hold.
+                        aps = self._with_aps_targets(
+                            series, limits, self._external_windows, eligible, first
+                        )
+                        if self._aps_held_starts:
+                            return aps
+                        self._refill_held_starts = {
+                            w.start for w in postponed if w.adjustable
+                        }
+                        return postponed
         if not first.ready or not discharges:
             return self._with_aps_targets(series, limits, self._external_windows, eligible, first)
         if first is not second_plan:
@@ -1813,6 +1853,164 @@ class PriceOptimizationController:
         else:
             held = refill_windows
         return self._with_aps_targets(series, limits, held, eligible, first)
+
+    def _postponed_refill(
+        self, series: PriceSeries, limits: Mapping[str, float], eligible: list[bool],
+        later: list[ExternalWindow],
+    ) -> tuple[ExternalWindow, ...] | None:
+        """Windows with those before a cheaper refill held, or ``None``.
+
+        When price optimization itself discharged the battery, the refill
+        waits for the cheapest window of the whole horizon. When someone
+        else emptied it (the aggregator's Demand Response), the saving in kr
+        of the moved refill decides how long it may wait: it must reach the
+        setting Minimum saving per hour of postponed aggregator refill for
+        every hour of delay. A small saving moves the refill a short time
+        only; a larger one may hold it longer.
+        """
+        index = next((i for i, flag in enumerate(eligible) if flag), None)
+        if index is None or not later:
+            return None
+        first = self._external_windows[index]
+        first_price = _covered_window_price(series, first)
+        if first_price is None:
+            return None
+        if self._own_discharge_awaits_refill():
+            cheapest = min(later, key=lambda w: (_window_price(series, w), w.start))
+            if _window_price(series, cheapest) >= first_price:
+                # The next window is already the cheapest: nothing to wait for.
+                return None
+        else:
+            energy = self._refill_energy_kwh(index, limits)
+            rate = float(self.runtime.operational_settings.get(
+                "price_refill_delay_gain_sek_per_hour"
+            ))
+            best: tuple[float, ExternalWindow] | None = None
+            for window in later:
+                price = _covered_window_price(series, window)
+                if energy is None or price is None or price >= first_price:
+                    continue
+                gain = energy * (first_price - price)
+                hours = (window.start - first.start).total_seconds() / 3600
+                if gain + 1e-9 >= rate * hours and (best is None or gain > best[0]):
+                    best = (gain, window)
+            if best is None:
+                return None
+            cheapest = best[1]
+        if not self._refill_is_cheaper_later(series, eligible, cheapest.start):
+            return None
+        return tuple(
+            replace(window, adjustable=flag and window.start < cheapest.start)
+            for window, flag in zip(self._external_windows, eligible, strict=True)
+        )
+
+    def _refill_energy_kwh(self, index: int, limits: Mapping[str, float]) -> float | None:
+        """Grid energy the aggregator window at ``index`` would buy now (AC kWh).
+
+        From the current SOC up to the aggregator's own target (not a value
+        this controller lowered it to), limited by what the window's length
+        and the charge power allow.
+        """
+        battery = self.runtime.battery
+        window = self._external_windows[index]
+        meta = self._external_meta[index]
+        soc = battery.usable_soc
+        capacity = limits.get("capacity")
+        if meta is None or soc is None or not isfinite(soc) or not capacity:
+            return None
+        target = window.target_usable_soc_percent
+        saved = getattr(self.runtime, "lowered_external_targets", {})
+        original = self._lowered.get(_target_key(meta[0]), saved.get(_target_key(meta[0])))
+        if (original is not None and battery.effective_min_soc is not None
+                and battery.effective_max_soc is not None
+                and battery.effective_max_soc > battery.effective_min_soc):
+            target = (original - battery.effective_min_soc) * 100 / (
+                battery.effective_max_soc - battery.effective_min_soc
+            )
+        if target is None:
+            return None
+        policy = self.runtime._automation_policy()
+        power = min(limits.get("charge_kw", 0.0), policy.max_power_kw,
+                    max(0.0, (battery.charge_power_limit_w or 0) / 1000))
+        efficiency = sqrt(limits.get("efficiency", 100.0) / 100)
+        hours = (window.end - window.start).total_seconds() / 3600
+        stored = min(max(0.0, min(target, 100.0) - soc) / 100 * capacity,
+                     power * hours * efficiency)
+        return stored / efficiency if efficiency > 0 else None
+
+    def _own_discharge_awaits_refill(self) -> bool:
+        """Whether a price discharge of the last 24 h has not been refilled yet.
+
+        The evidence is an own price schedule that discharges and has started.
+        The lowest usable SOC seen since is remembered; once the SOC is clearly
+        above it the battery has been refilled and that discharge no longer
+        counts. After a restart the lowest level starts from the current SOC.
+        """
+        ownership = self.runtime.scheduler_ownership
+        soc = self.runtime.battery.usable_soc
+        if ownership is None or soc is None or not isfinite(soc):
+            return False
+        now = datetime.now(UTC)
+        latest: tuple[datetime, int] | None = None
+        for record in ownership.records.values():
+            if record.owner != PRICE_OWNER or record.lifecycle not in _RAN_LIFECYCLES:
+                continue
+            start = _record_start(record)
+            duration = record.intended_state.get("duration")
+            if (
+                start is None or type(duration) is not int or start > now
+                or not _describe(record).startswith("price discharge")
+            ):
+                continue
+            end = start + timedelta(seconds=duration)
+            if end > now - timedelta(hours=24) and (latest is None or end > latest[0]):
+                latest = (end, record.m_id)
+        if latest is None:
+            self._own_discharge_floor = None
+            return False
+        m_id = latest[1]
+        if m_id == self._own_discharge_refilled:
+            return False
+        floor = self._own_discharge_floor
+        low = soc if floor is None or floor[0] != m_id else min(floor[1], soc)
+        self._own_discharge_floor = (m_id, low)
+        if soc > low + _REFILLED_MARGIN_PERCENT:
+            self._own_discharge_refilled = m_id
+            return False
+        return True
+
+    def _refill_is_cheaper_later(
+        self, series: PriceSeries, eligible: list[bool], cut: datetime,
+    ) -> bool:
+        """Whether holding the windows before ``cut`` moves a refill to a cheaper time.
+
+        Postponing a refill adds no cycle and no losses, so a small price
+        advantage is enough; it only has to be worth the target writes. Every
+        second of the windows involved must be priced, the SOC must be fresh,
+        and the cheaper window must be at least as long as each window it
+        replaces, so it can refill as much as they would have.
+        """
+        fresh = getattr(self.runtime.telemetry, "is_fresh", None)
+        if callable(fresh) and not (fresh("battery") and fresh("core")):
+            return False
+        refill = next((w for w in self._external_windows if w.start == cut), None)
+        earlier = [
+            window
+            for window, flag in zip(self._external_windows, eligible, strict=True)
+            if flag and window.start < cut
+        ]
+        if refill is None or not earlier:
+            return False
+        refill_price = _covered_window_price(series, refill)
+        prices = [_covered_window_price(series, window) for window in earlier]
+        if refill_price is None or any(price is None for price in prices):
+            return False
+        if any(refill.end - refill.start < window.end - window.start for window in earlier):
+            return False
+        return (
+            max(price for price in prices if price is not None) - refill_price
+            >= _REFILL_MINIMUM_ADVANTAGE_SEK_PER_KWH
+        )
 
     def _with_aps_targets(
         self, series: PriceSeries, limits: dict[str, float],
@@ -1958,6 +2156,7 @@ class PriceOptimizationController:
         # applied cycle uses, or that start before the pass after next could
         # still reach them, are replaced; later ones are held for now.
         replace_until = self._replace_until(plan.actions)
+        adjust_until = datetime.now(UTC) + timedelta(hours=_ADJUST_AHEAD_HOURS)
         for window, meta in zip(windows, self._external_meta, strict=True):
             if meta is None or window.start <= lead:
                 continue
@@ -1978,6 +2177,10 @@ class PriceOptimizationController:
                 # The plan uses this time itself: remove the aggregator target.
                 desired, allow_delete = reference, True
             elif window.adjustable:
+                if window.start > adjust_until and window.start not in self._aps_held_starts:
+                    # Too far ahead to be worth a write now; it is adjusted
+                    # to the level planned then, once it comes closer.
+                    continue
                 fallback = (battery.usable_soc if window.start in self._aps_held_starts else floor)
                 if fallback is None:
                     return window.start
@@ -2000,7 +2203,10 @@ class PriceOptimizationController:
                         continue
                     allow_delete = False
                 else:
-                    allow_delete = window.start not in self._aps_held_starts
+                    allow_delete = (
+                        window.start not in self._aps_held_starts
+                        and window.start not in self._refill_held_starts
+                    )
             elif key in self._lowered:
                 if key in self._transient_refusals:
                     # Refused for a passing reason in this pass: it only stopped
@@ -2420,6 +2626,14 @@ def best_net_profit(
         cheapest = min(cheapest, price)
     return best
 
+
+# Lifecycles of an own schedule that was not removed before it started.
+_RAN_LIFECYCLES = frozenset({
+    OwnershipLifecycle.OWNED,
+    OwnershipLifecycle.CONFLICTED,
+    OwnershipLifecycle.STOPPED_RESERVED,
+    OwnershipLifecycle.EXPIRED_RESERVED,
+})
 
 # Refusals that stay true for the target's lifetime. Anything else (the
 # safety policy, an ownership check after an unconfirmed removal, a list that

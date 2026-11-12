@@ -173,7 +173,7 @@ def test_rounding_past_the_house_load_follows_the_load_instead_of_exporting() ->
     result = _plan(
         series, lambda start, end: (0.6, 0.0), usable_soc_percent=90.0,
         usable_capacity_kwh=18.4, export_allowed=True,
-        export_minimum_difference_sek_per_kwh=5.0, minimum_lead_minutes=0,
+        export_minimum_difference_sek_per_kwh=5.0, minimum_lead_minutes=0, levels=100,
     )
     assert result.slots[1].battery_kw < -0.65
     discharge = [a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE]
@@ -820,8 +820,72 @@ def test_energy_grid_stays_bounded_for_long_quarter_hour_horizons() -> None:
         series, lambda start, end: (0.6, 0.0), usable_capacity_kwh=18.4,
         maximum_charge_kw=10.0, maximum_discharge_kw=10.0, export_allowed=True,
     )
-    # With export and 10 kW, 100 levels already resolve every flow.
-    assert exported.energy_levels == 100
+    # Export permission does not make the house load coarser: a self-use
+    # discharge still follows the house, so the grid is refined for it too.
+    assert 100 < exported.energy_levels <= MAXIMUM_ENERGY_LEVELS
+
+
+def test_small_house_load_is_planned_with_export_allowed() -> None:
+    # 12 Nov 07:30: 0.4 kW house load, export allowed, SOC 45 %. With 100
+    # levels (0.18 kWh) a quarter hour of 0.4 kW was below one level, so no
+    # discharge was planned in the day's most expensive hours.
+    prices = [3.405, 3.538, 3.455, 3.465, 3.543, 3.302, 3.336, 3.294, 3.074, 3.319,
+              3.042, 2.906, 2.835, 2.913, 2.826, 2.676, 2.702, 2.711, 2.698, 2.614,
+              2.579, 2.2, 2.1, 2.0, 1.98, 1.72]
+    arguments = dict(
+        usable_soc_percent=45.0, usable_capacity_kwh=18.4, minimum_soc_percent=25.0,
+        maximum_charge_kw=9.3, maximum_discharge_kw=10.0,
+        minimum_difference_sek_per_kwh=1.0, export_allowed=True,
+        export_minimum_difference_sek_per_kwh=2.0, cycle_cost_sek_per_kwh=0.3,
+        grid_import_cost_sek_per_kwh=0.65,
+        solar_charging=SolarCharging(False, 10.0, 90.0),
+    )
+    series = _series(prices, minutes=15)
+    coarse = _plan(series, lambda start, end: (0.4, 0.0), levels=100, **arguments)
+    assert coarse.plan.actions == ()
+    assert coarse.resolution_limited
+    result = _plan(series, lambda start, end: (0.4, 0.0), **arguments)
+    discharge = [a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE]
+    assert discharge
+    assert not result.resolution_limited
+    # It follows the house (full power cap), never a fixed partial cap.
+    assert all(a.discharge_mode is PriceDischargeMode.SELF_CONSUMPTION for a in discharge)
+    assert all(a.power_kw == 10.0 for a in discharge)
+    assert discharge[0].start == series.intervals[0].start
+
+
+def test_house_discharge_within_one_energy_step_follows_the_load() -> None:
+    # 7-8 Nov: discharges were written as "0.7 kW" (one energy level per
+    # quarter) although the house drew more; the rest was bought at the peak.
+    series = _series([0.2] * 4 + [4.0] * 4, minutes=15)
+    result = _plan(
+        series, lambda start, end: (1.0, 0.0), usable_soc_percent=90.0,
+        usable_capacity_kwh=18.4, maximum_charge_kw=10.0, maximum_discharge_kw=10.0,
+        export_allowed=True, export_minimum_difference_sek_per_kwh=9.0, levels=100,
+    )
+    discharge = [a for a in result.plan.actions if a.direction is PriceDirection.DISCHARGE]
+    assert discharge
+    assert all(a.power_kw == 10.0 for a in discharge)
+
+
+def test_charge_for_a_filtered_discharge_is_not_written() -> None:
+    from custom_components.pixiihome_controller.control import whole_day_planner
+
+    series = _series([0.2, 0.2, 3.0, 3.0])
+    arguments = dict(maximum_charge_kw=2.0, maximum_discharge_kw=2.0)
+    normal = _plan(series, lambda start, end: (1.5, 0.0), **arguments)
+    assert any(a.direction is PriceDirection.CHARGE for a in normal.plan.actions)
+    # Force the written-action filter to reject every discharge: the charge
+    # planned for them must then go too, instead of being bought for nothing.
+    original = whole_day_planner._meets_minimum
+    whole_day_planner._meets_minimum = (
+        lambda action, minimum, export_minimum: action.direction is PriceDirection.CHARGE
+    )
+    try:
+        result = _plan(series, lambda start, end: (1.5, 0.0), **arguments)
+    finally:
+        whole_day_planner._meets_minimum = original
+    assert result.plan.actions == ()
 
 
 def test_full_battery_is_used_in_the_next_peak_with_the_minimum_on_the_discharge() -> None:

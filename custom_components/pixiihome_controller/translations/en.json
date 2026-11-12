@@ -443,6 +443,9 @@
       "solar_smart_safety_margin_percent": {
         "name": "Smart solar safety margin"
       },
+      "price_refill_delay_gain_sek_per_hour": {
+        "name": "Minimum saving per hour of postponed aggregator refill"
+      },
       "price_blocked_notify_hours": {
         "name": "Notify when price optimization is stopped for"
       },

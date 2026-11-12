@@ -96,6 +96,7 @@ _ENTITY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "switch.price_whole_day_planner",
             "switch.price_plan_high_consumption",
             "number.price_blocked_notify_hours",
+            "number.price_refill_delay_gain_sek_per_hour",
             "number.price_grid_import_cost_sek_per_kwh",
             "number.price_min_difference_sek_per_kwh",
             "number.price_export_min_difference_sek_per_kwh",

@@ -213,3 +213,42 @@ def test_aggregator_schedule_is_never_called_this_integration() -> None:
     why = tracker._why()
     assert "(this integration)" not in why
     assert "not created by this integration" in why
+
+def test_opposite_direction_during_our_own_schedule_is_not_called_ours() -> None:
+    # 12 Nov 07:50: during our Demand Response charge 07:45-08:00 the battery
+    # discharged 9.3 kW to the grid for five minutes (the aggregator's command
+    # has the same service number). It was logged as price optimization.
+    start = NOW - timedelta(minutes=5)
+    record = SimpleNamespace(
+        lifecycle=SimpleNamespace(value="owned"),
+        owner="automatic_price_optimization",
+        service="demandresponse",
+        intended_state={"starttime": start.strftime("%Y-%m-%dT%H:%M:%SZ"), "duration": 900,
+                        "values": {"pacref": 9300.0}},
+    )
+    runtime = _runtime()
+    runtime.scheduler_ownership = SimpleNamespace(records={1: record})
+    clock = [NOW]
+    tracker = _tracker(runtime, clock)
+    tracker.sample()
+    runtime.telemetry.service = 102
+    runtime.battery.power_w = 8900.0
+    clock[0] += timedelta(seconds=15)
+    tracker.sample()
+    assert tracker.state() == "Charging – price optimization"
+    runtime.battery.power_w = -9300.0
+    clock[0] += timedelta(seconds=15)
+    tracker.sample()
+    clock[0] += timedelta(minutes=3)
+    tracker.sample()
+    assert tracker.state() == "Discharging – not started by this integration"
+    message = runtime.events[-1]["message"]
+    assert "started discharging" in message and "overrides it" in message
+    assert "price optimization schedule" in message
+    # Back to our charge: it is ours again.
+    runtime.battery.power_w = 8900.0
+    clock[0] += timedelta(seconds=15)
+    tracker.sample()
+    clock[0] += timedelta(minutes=3)
+    tracker.sample()
+    assert tracker.state() == "Charging – price optimization"
