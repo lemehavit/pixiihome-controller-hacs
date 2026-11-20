@@ -8,6 +8,12 @@
   den entitet som hittades på enheten. Tomma start-, paus- och strömfält
   betyder laddboxenhetens Easee-actions, tom prissensor betyder
   prisoptimeringens och tomma fasströmmar betyder Pixiis mätning.
+- Lastbalanseringen för elbilen visas nu under enheten *Load balancing*:
+  switchen *Lastbalansering elbil* och en ny sensor *Elbil laddström* (A,
+  med fasutrymme, säkring och marginal). Den är separat från batteriets
+  lastbalansering och ändrar aldrig batteriet. Smart laddning ligger kvar
+  under *EV charging*. Entity-id för switchen ändras inte, men den byter
+  enhet; kort och automationer behöver inte ändras.
 
 ## 0.5.34 — 2026-11-20
 

@@ -114,7 +114,7 @@
           "charger": "Laddbox",
           "car": "Bil",
           "price": "Pris",
-          "load_balancing": "Lastbalansering"
+          "load_balancing": "Lastbalansering elbil (separat från batteriet)"
         },
         "sections": {
           "charger": {
@@ -151,7 +151,7 @@
             }
           },
           "load_balancing": {
-            "name": "Lastbalansering",
+            "name": "Lastbalansering elbil (separat från batteriet)",
             "data": {
               "current_l1": "Nätström L1 (valfritt, tomt = Pixiis mätning)",
               "current_l2": "Nätström L2 (valfritt, tomt = Pixiis mätning)",
@@ -366,6 +366,9 @@
           "paused_for_load": "Pausad, hög last",
           "completed": "Klar"
         }
+      },
+      "ev_charger_current": {
+        "name": "Elbil laddström"
       }
     },
     "number": {

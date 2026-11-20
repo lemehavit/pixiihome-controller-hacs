@@ -154,6 +154,7 @@ async def async_setup_entry(
         )
     if getattr(runtime, "ev_charging", None) is not None:
         entities.append(PixiiEvChargingSensor(runtime, parent_device_id))
+        entities.append(PixiiEvChargerCurrentSensor(runtime, parent_device_id))
     if getattr(runtime, "battery_activity", None) is not None:
         entities.append(PixiiBatteryActivitySensor(runtime))
     if getattr(runtime, "energy_forecast", None) is not None:
@@ -351,6 +352,43 @@ class PixiiEvChargingSensor(SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return self.controller.attributes()
+
+
+class PixiiEvChargerCurrentSensor(PixiiEvChargingSensor):
+    """EV charger current set by EV load balancing, shown with load balancing."""
+
+    _attr_translation_key = "ev_charger_current"
+    _attr_native_unit_of_measurement = "A"
+    _attr_device_class = SensorDeviceClass.CURRENT
+    _unrecorded_attributes = frozenset()
+
+    def __init__(self, runtime: RuntimeData, parent_device_id: str | None = None) -> None:
+        super().__init__(runtime, parent_device_id)
+        self._attr_unique_id = f"{runtime.serial}_ev_charger_current"
+        self._attr_device_info = feature_device_info(
+            runtime.serial, PixiiFeature.LOAD_BALANCING, parent_device_id,
+        )
+
+    @property
+    def native_value(self) -> int | None:  # type: ignore[override]
+        return self.controller.applied_limit_a
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        c = self.controller
+        config = c.config
+        return {
+            "ev_load_balancing_enabled": c.balancing_enabled,
+            "charger_status": c.charger_state,
+            "phase_headroom_a": None if c.headroom_a is None else round(c.headroom_a, 1),
+            "detail": c.balance_detail,
+            "paused_for_load": c.lb_paused,
+            "fuse_a": config.fuse_a,
+            "margin_a": config.margin_a,
+            "min_current_a": config.min_current_a,
+            "max_current_a": config.max_current_a,
+            "affects_battery": False,
+        }
 
 
 class PixiiAdaptivePeakShavingSensor(SensorEntity):

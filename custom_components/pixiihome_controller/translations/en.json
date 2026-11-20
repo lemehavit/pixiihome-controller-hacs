@@ -115,7 +115,7 @@
           "charger": "Charger",
           "car": "Car",
           "price": "Price",
-          "load_balancing": "Load balancing"
+          "load_balancing": "EV load balancing (separate from the battery)"
         },
         "sections": {
           "charger": {
@@ -152,7 +152,7 @@
             }
           },
           "load_balancing": {
-            "name": "Load balancing",
+            "name": "EV load balancing (separate from the battery)",
             "data": {
               "current_l1": "Grid current L1 (optional, empty = Pixii measurements)",
               "current_l2": "Grid current L2 (optional, empty = Pixii measurements)",
@@ -377,6 +377,9 @@
           "paused_for_load": "Paused for high load",
           "completed": "Completed"
         }
+      },
+      "ev_charger_current": {
+        "name": "EV charger current"
       }
     },
     "number": {
