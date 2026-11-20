@@ -7,7 +7,7 @@ the service calls.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from math import ceil, floor, isfinite
@@ -142,10 +142,15 @@ class EvSlot:
     start: datetime
     end: datetime
     price: float
+    power_kw: float = 0.0
 
     @property
     def hours(self) -> float:
         return (self.end - self.start).total_seconds() / 3600
+
+    @property
+    def energy_kwh(self) -> float:
+        return self.hours * self.power_kw
 
 
 @dataclass(frozen=True)
@@ -173,7 +178,8 @@ class EvPlan:
                 None if self.average_price is None else round(self.average_price, 3)
             ),
             "planned_slots": [
-                {"start": s.start.isoformat(), "end": s.end.isoformat(), "price": round(s.price, 3)}
+                {"start": s.start.isoformat(), "end": s.end.isoformat(),
+                 "price": round(s.price, 3), "power_kw": round(s.power_kw, 2)}
                 for s in _merge(self.slots)
             ],
             **self.extra,
@@ -211,6 +217,7 @@ def plan_charging(
     battery_discharges: Iterable[tuple[datetime, datetime]] = (),
     allow_battery: bool = False,
     committed_until: datetime | None = None,
+    power_at: Callable[[datetime, datetime], float] | None = None,
 ) -> EvPlan:
     """Choose the cheapest price intervals before the deadline that cover the need.
 
@@ -219,6 +226,9 @@ def plan_charging(
     so a slowly rising SOC does not pause and resume within one interval.
     Intervals with a planned home-battery discharge are skipped unless
     ``allow_battery``; the minimum level and the deadline still charge in them.
+    ``power_at(start, end)`` is the charging power available in that period
+    (fuse room, house load, what the car accepts); ``power_kw`` is used when
+    it is not given and for the time after the last known price.
     """
     if soc is None:
         return EvPlan(False, "car_soc_unknown", deadline=deadline,
@@ -227,19 +237,23 @@ def plan_charging(
         return EvPlan(False, "target_reached", 0.0, 0.0, deadline,
                       detail=f"The car is at {soc:.0f} %, target {target_soc:.0f} %")
     need = energy_needed_kwh(soc, target_soc, capacity_kwh, efficiency_percent)
+    power = power_at or (lambda _start, _end: power_kw)
     if power_kw <= 0:
         return EvPlan(False, "no_charge_power", need, None, deadline,
                       detail="The charger has no usable power")
-    hours = need / power_kw * PLAN_MARGIN
+    goal = need * PLAN_MARGIN
+    hours = goal / power_kw
     if soc < min_soc:
         return EvPlan(True, "below_minimum", need, hours, deadline,
                       detail=f"The car is at {soc:.0f} %, below the minimum {min_soc:.0f} %, "
                              "so it charges now regardless of price")
     remaining = (deadline - now).total_seconds() / 3600
-    if remaining <= hours:
+    reachable = _energy_until(now, deadline, power)
+    if reachable <= goal:
         return EvPlan(True, "deadline", need, hours, deadline,
-                      detail=f"About {hours:.1f} h of charging is needed and only "
-                             f"{max(0.0, remaining):.1f} h remain until the ready-by time")
+                      detail=f"About {goal:.1f} kWh is needed and the available power gives "
+                             f"only {reachable:.1f} kWh in the {max(0.0, remaining):.1f} h "
+                             "left until the ready-by time")
     discharges = tuple(battery_discharges)
     slots: list[EvSlot] = []
     known_end: datetime | None = None
@@ -254,29 +268,34 @@ def plan_charging(
         if not allow_battery and any(a < end and start < b for a, b in discharges):
             known_end = end if known_end is None else max(known_end, end)
             continue
-        slots.append(EvSlot(start, end, float(price)))
+        slots.append(EvSlot(start, end, float(price), max(0.0, power(start, end))))
         known_end = end if known_end is None else max(known_end, end)
     if known_end is None:
         return EvPlan(False, "waiting_for_prices", need, hours, deadline,
                       detail="No prices are known before the ready-by time yet")
     unknown_hours = max(0.0, (deadline - known_end).total_seconds() / 3600)
+    tail = _energy_until(known_end, deadline, power) if unknown_hours > 0 else 0.0
     # When the unpriced tail alone can hold the whole charge, wait for the next
     # day's prices instead of committing to today's known hours.
-    if unknown_hours >= hours:
+    if tail >= goal:
         return EvPlan(False, "waiting_for_prices", need, hours, deadline,
                       detail=f"Prices are known until {known_end.isoformat()}; the remaining "
-                             f"{unknown_hours:.1f} h before the ready-by time can hold the "
-                             f"{hours:.1f} h needed, so it waits for the next price list")
-    to_cover = hours - unknown_hours
+                             f"{unknown_hours:.1f} h before the ready-by time can deliver "
+                             f"{tail:.1f} kWh of the {goal:.1f} kWh needed, so it waits for "
+                             "the next price list")
+    to_cover = goal - tail
     chosen: list[EvSlot] = []
     covered = 0.0
     for slot in sorted(slots, key=lambda s: (s.price, s.start)):
         if covered >= to_cover - 1e-9:
             break
+        if slot.energy_kwh <= 0:
+            continue
         chosen.append(slot)
-        covered += slot.hours
+        covered += slot.energy_kwh
     chosen.sort(key=lambda s: s.start)
     weight = sum(s.hours for s in chosen)
+    hours = weight + unknown_hours if tail else weight
     average = sum(s.price * s.hours for s in chosen) / weight if weight else None
     current = next((s for s in chosen if s.start <= now < s.end), None)
     in_discharge = not allow_battery and any(a <= now < b for a, b in discharges)
@@ -307,6 +326,19 @@ def plan_charging(
                      else f" from {upcoming.start.isoformat()} ({upcoming.price:.2f} kr/kWh)"))
 
 
+def _energy_until(
+    start: datetime, end: datetime, power: Callable[[datetime, datetime], float]
+) -> float:
+    """Energy the available power can deliver between two instants, per quarter hour."""
+    total, cursor = 0.0, start
+    step = timedelta(minutes=15)
+    while cursor < end:
+        stop = min(end, cursor + step)
+        total += max(0.0, power(cursor, stop)) * (stop - cursor).total_seconds() / 3600
+        cursor = stop
+    return total
+
+
 def _merge(slots: Sequence[EvSlot]) -> list[EvSlot]:
     merged: list[EvSlot] = []
     for slot in sorted(slots, key=lambda s: s.start):
@@ -314,7 +346,8 @@ def _merge(slots: Sequence[EvSlot]) -> list[EvSlot]:
             last = merged[-1]
             hours = last.hours + slot.hours
             price = (last.price * last.hours + slot.price * slot.hours) / hours
-            merged[-1] = EvSlot(last.start, slot.end, price)
+            power = (last.energy_kwh + slot.energy_kwh) / hours
+            merged[-1] = EvSlot(last.start, slot.end, price, power)
         else:
             merged.append(slot)
     return merged

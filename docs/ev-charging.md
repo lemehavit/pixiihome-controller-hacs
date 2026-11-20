@@ -51,19 +51,29 @@ On the **EV charging** device:
 
 Every 10 seconds, while the car is plugged in:
 
-1. The energy needed is `(target − battery level) × capacity ÷ efficiency`.
-   Charge time is that energy at full charger power plus 15 %.
-2. Below the charge-now level, or when the remaining time to the ready-by hour
-   is shorter than the charge time, it charges at once.
-3. Otherwise it picks the cheapest price intervals before the ready-by hour
-   that cover the charge time, and charges only in them. An interval in which
+1. The energy needed is `(target − battery level) × capacity ÷ efficiency`,
+   plus 15 % margin. It is recalculated as the battery level rises.
+2. Each price interval gets its own available power:
+   - the charger's maximum current × phases × 230 V;
+   - with EV load balancing on: limited by main fuse − margin − the forecast
+     house load for that interval (spread over three phases, the busiest phase
+     counted as 1.5 × an even share); for the current interval the measured
+     phase room is used instead;
+   - limited by what the car itself accepts, learnt when it draws clearly less
+     than allowed for two minutes (one-phase charging, cold battery, taper).
+     Forgotten when the car is unplugged.
+   An interval where the room is below the minimum current gets no power.
+3. Below the charge-now level, or when the power available until the ready-by
+   hour cannot deliver the energy needed, it charges at once.
+4. Otherwise it picks the cheapest intervals before the ready-by hour until
+   their energy covers the need, and charges only in them. An interval in which
    charging started is finished.
-4. If tomorrow's prices are not published yet and the unpriced hours before the
-   ready-by time can hold the whole charge, it waits for them.
-5. While price optimization has a planned battery discharge, the car does not
+5. If tomorrow's prices are not published yet and the unpriced hours before the
+   ready-by time can deliver the whole charge, it waits for them.
+6. While price optimization has a planned battery discharge, the car does not
    charge unless **EV may charge from home battery** is on. The charge-now
    level and the ready-by deadline still charge.
-6. At the target it pauses. The car's own limit is set to the target rounded up
+7. At the target it pauses. The car's own limit is set to the target rounded up
    to its step and range (MySkoda: 50–100 % in steps of 10). A target below 50 %
    is reached by pausing the charger.
 
@@ -92,8 +102,9 @@ Turning EV load balancing off gives the charger its maximum current back.
 
 Every action has a logbook line on **EV charging status** with *Who* and *Why*,
 and the same reason appears on the charger's own logbook line. The sensor's
-attributes show the plan (`planned_slots`, `need_kwh`, `ready_by`), the phase
-room and the last actions.
+attributes show the plan (`planned_slots` with price and power, `need_kwh`,
+`ready_by`), `charge_power_now_kw`, `car_max_power_kw`, the phase room and the
+last actions.
 
 ## Before turning it on
 

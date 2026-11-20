@@ -17,7 +17,11 @@ Guide: docs/ev-charging.md.
 - *Smart elbilsladdning* (av som standard) startar och pausar laddboxen så att
   bilen når målnivån till *Elbil klar till* i de billigaste prisintervallen.
   Under *Elbil ladda direkt under* eller när tiden inte räcker laddar den
-  direkt. Väntar på morgondagens priser när de hinner komma. Bilens egen laddgräns sätts till
+  direkt. Laddtiden räknas från bilens SOC, målet, kapaciteten och den
+  effekt som finns i varje kvart: säkringsutrymme minus husets
+  förbrukningsprognos, uppmätt fasutrymme just nu och den effekt bilen själv
+  tar emot (lärs in under laddningen). Väntar på morgondagens priser när de
+  hinner komma. Bilens egen laddgräns sätts till
   målet avrundat uppåt (MySkoda tillåter 50–100 % i steg om 10); lägre mål nås
   genom att laddboxen pausas.
 - *Lastbalansering elbil* (av som standard) sätter laddboxens dynamiska

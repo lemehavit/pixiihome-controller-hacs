@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers.storage import Store
@@ -50,6 +50,12 @@ CAR_LIMIT_RETRY_SECONDS = 900
 CAR_SWITCH_RETRY_SECONDS = 900
 OBSERVER_MAX_AGE_SECONDS = 30
 RECENT_ACTIONS = 15
+# Phase currents are rarely even; the forecast house load is spread as if the
+# busiest phase carries this much more than an even share.
+HOUSE_PHASE_IMBALANCE = 1.5
+# The car limits the power itself when it draws clearly less than the charger allows.
+CAR_LIMITED_SHARE = 0.85
+CAR_LIMIT_LEARN_SECONDS = 120
 
 DISCONNECTED = {"disconnected", "unplugged", "not_connected", "unknown", "unavailable", ""}
 CHARGING = {"charging", "on"}
@@ -86,6 +92,9 @@ class EvChargingController:
         self.paused_by_us = False
         self.limit_owned = False
         self.lb_paused = False
+        self.available_a: int | None = None
+        self.car_max_kw: float | None = None
+        self._car_limited_since: float | None = None
         self.committed_until: datetime | None = None
         self.recent: list[dict[str, str]] = []
         self._lb_ok_since: float | None = None
@@ -437,6 +446,7 @@ class EvChargingController:
         limit_sensor = self._number(config.charger_limit_entity)
         if limit_sensor is not None:
             self.applied_limit_a = int(round(limit_sensor))
+        self._learn_car_power(config)
 
         if not connected:
             await self._disconnected(config, device_id, balancing)
@@ -464,6 +474,60 @@ class EvChargingController:
             return
         await self._apply(config, device_id, want_charge, why)
 
+    def _measured_kw(self, config: EvChargingConfig) -> float | None:
+        power = self._number(config.charger_power_entity)
+        if power is None:
+            return None
+        state = self._state(config.charger_power_entity)
+        unit = None if state is None else state.attributes.get("unit_of_measurement")
+        return power / 1000 if unit == "W" else power
+
+    def _learn_car_power(self, config: EvChargingConfig) -> None:
+        """Remember the power the car itself accepts (one phase, cold battery, taper)."""
+        measured = self._measured_kw(config)
+        if self.charger_phase != "charging" or measured is None or measured <= 0:
+            self._car_limited_since = None
+            return
+        limit = min(config.max_current_a, self.applied_limit_a or config.max_current_a)
+        allowed = config.phases * config.voltage_v * limit / 1000
+        if measured < allowed * CAR_LIMITED_SHARE:
+            now = self.monotonic()
+            if self._car_limited_since is None:
+                self._car_limited_since = now
+            if now - self._car_limited_since >= CAR_LIMIT_LEARN_SECONDS:
+                self.car_max_kw = (
+                    measured if self.car_max_kw is None
+                    else 0.8 * self.car_max_kw + 0.2 * measured
+                )
+        else:
+            self._car_limited_since = None
+            if self.car_max_kw is not None and measured > self.car_max_kw:
+                self.car_max_kw = measured
+
+    def power_at(self, start: datetime, end: datetime) -> float:
+        """Charging power available in a period: fuse room, house load and the car."""
+        config = self.config
+        amps: float = config.max_current_a
+        if self.balancing_enabled:
+            now = self.clock()
+            if start <= now < end and self.available_a is not None:
+                amps = min(amps, self.available_a)
+            else:
+                forecast = getattr(self.runtime, "energy_forecast", None)
+                try:
+                    house_kw = None if forecast is None else forecast.load_kw(start, end)
+                except Exception:  # noqa: BLE001 - no forecast means the fuse alone decides
+                    house_kw = None
+                if house_kw is not None and house_kw >= 0:
+                    house_a = house_kw * 1000 / (config.voltage_v * 3) * HOUSE_PHASE_IMBALANCE
+                    amps = min(amps, int(config.fuse_a - config.margin_a - house_a))
+        if amps < config.min_current_a:
+            return 0.0
+        power = config.phases * config.voltage_v * amps / 1000
+        if self.car_max_kw is not None:
+            power = min(power, self.car_max_kw)
+        return power
+
     def _plan(self, config: EvChargingConfig) -> EvPlan:
         now = self.clock()
         target = float(self._setting("ev_target_soc_percent"))
@@ -484,6 +548,7 @@ class EvChargingController:
             battery_discharges=self._battery_discharges(),
             allow_battery=self._setting("ev_allow_battery_discharge") is True,
             committed_until=self.committed_until,
+            power_at=self.power_at,
         )
         if plan.charge and plan.reason == "cheap_price":
             current = next((s for s in plan.slots if s.start <= now < s.end), None)
@@ -597,6 +662,7 @@ class EvChargingController:
         except ValueError as error:
             # Without phase data the safe current is the minimum.
             self.headroom_a, self.balance_detail = None, str(error)
+            self.available_a = config.min_current_a
             self._log_once("balance", "EV load balancing has no phase currents",
                            f"Who: EV load balancing. Why: {error}; the charger is held at "
                            f"{config.min_current_a} A")
@@ -607,6 +673,7 @@ class EvChargingController:
             return
         self._last_logged.pop("balance", None)
         self.headroom_a, self.balance_detail = decision.headroom_a, decision.detail
+        self.available_a = 0 if decision.pause else decision.limit_a
         now = self.monotonic()
         if decision.pause:
             self._lb_ok_since = None
@@ -615,7 +682,8 @@ class EvChargingController:
                 self._remember("Paused for load: " + decision.detail)
         elif self.lb_paused:
             if decision.limit_a >= config.min_current_a + LB_RESUME_MARGIN_A:
-                self._lb_ok_since = self._lb_ok_since or now
+                if self._lb_ok_since is None:
+                    self._lb_ok_since = now
                 if now - self._lb_ok_since >= LB_RESUME_HOLD_SECONDS:
                     self.lb_paused, self._lb_ok_since = False, None
                     self._remember("Load allows charging again: " + decision.detail)
@@ -651,6 +719,7 @@ class EvChargingController:
         self, config: EvChargingConfig, device_id: str | None, balancing: bool
     ) -> None:
         self.plan, self.committed_until, self.lb_paused = None, None, False
+        self.car_max_kw, self._car_limited_since = None, None
         self._command_attempts, self._command_wanted = 0, None
         if self.paused_by_us:
             self.paused_by_us = False
@@ -696,6 +765,10 @@ class EvChargingController:
             "fuse_a": config.fuse_a,
             "margin_a": config.margin_a,
             "max_charge_power_kw": round(config.max_power_kw, 2),
+            "charge_power_now_kw": round(
+                self.power_at(self.clock(), self.clock() + timedelta(minutes=1)), 2
+            ),
+            "car_max_power_kw": None if self.car_max_kw is None else round(self.car_max_kw, 2),
             "recent_actions": list(self.recent),
             **({} if plan is None else plan.attributes()),
             "next_planned_start": next(

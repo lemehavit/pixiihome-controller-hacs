@@ -419,3 +419,39 @@ async def test_chosen_start_pause_and_current_entities_replace_easee_actions() -
     tick[0] = 30
     await controller.tick()
     assert controller.status == "car_not_connected"
+
+
+def test_plan_uses_the_power_available_per_interval() -> None:
+    # Fuse room halves the power in the two cheapest hours, so a third hour is needed.
+    cheap = {NOW + timedelta(hours=5), NOW + timedelta(hours=6)}
+
+    def power_at(start, end):
+        hour = start.replace(minute=0, second=0, microsecond=0)
+        return 5.5 if hour in cheap else 11.0
+
+    result = plan(power_at=power_at)
+    assert [s.start.hour for s in result.slots] == [23, 0, 1]
+    assert result.attributes()["planned_slots"][0]["power_kw"] == pytest.approx(7.33, abs=0.01)
+    # With almost no power left before the deadline, it charges now.
+    starved = plan(power_at=lambda start, end: 1.0)
+    assert starved.charge and starved.reason == "deadline"
+
+
+@pytest.mark.asyncio
+async def test_controller_power_follows_fuse_house_forecast_and_car() -> None:
+    controller, hass, tick = make_controller({"ev_load_balancing_enabled": True})
+    controller.runtime.energy_forecast.load_kw = lambda start, end: 3.45  # 5 A/phase * 1.5
+    later = NOW + timedelta(hours=3)
+    # 18 A room - 7.5 A house = 10 A on three phases
+    assert controller.power_at(later, later + timedelta(hours=1)) == pytest.approx(6.9)
+    # A car drawing 3.7 kW (one phase) for two minutes caps every interval.
+    hass.states.set("sensor.easee_status", "charging")
+    hass.states.set("sensor.easee_power", 3.7, unit_of_measurement="kW")
+    await controller.tick()
+    tick[0] = 130
+    await controller.tick()
+    assert controller.car_max_kw == pytest.approx(3.7)
+    assert controller.power_at(later, later + timedelta(hours=1)) == pytest.approx(3.7)
+    hass.states.set("sensor.easee_status", "disconnected")
+    await controller.tick()
+    assert controller.car_max_kw is None
