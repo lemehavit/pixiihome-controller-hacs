@@ -70,6 +70,7 @@ EV_ENTITY_FIELDS: tuple[tuple[str, str | list[str], str | None], ...] = (
     ("grid_power_entity", "sensor", "power"),
     ("grid_export_entity", "sensor", "power"),
     ("grid_import_entity", "sensor", "power"),
+    ("solar_power_entity", "sensor", "power"),
     ("solar_forecast_today", "sensor", None),
     ("solar_forecast_tomorrow", "sensor", None),
 )
@@ -90,7 +91,7 @@ EV_SECTIONS: dict[str, tuple[str, ...]] = {
     "load_balancing": ("current_l1", "current_l2", "current_l3", "fuse_a", "margin_a"),
     "solar": (
         "grid_power_entity", "grid_export_entity", "grid_import_entity",
-        "solar_forecast_today", "solar_forecast_tomorrow",
+        "solar_power_entity", "solar_forecast_today", "solar_forecast_tomorrow",
     ),
 }
 

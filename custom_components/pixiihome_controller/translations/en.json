@@ -168,6 +168,7 @@
               "grid_power_entity": "Grid power, + = import, − = export (optional, empty = Pixii's meter)",
               "grid_export_entity": "Grid export power (optional, together with import; empty = Pixii's meter)",
               "grid_import_entity": "Grid import power (optional, together with export)",
+              "solar_power_entity": "Solar production now, e.g. the inverter's power (optional, empty = energy forecast's); caps the surplus so battery export is not taken for sun",
               "solar_forecast_today": "Solar forecast today, e.g. Solcast (optional, empty = energy forecast's)",
               "solar_forecast_tomorrow": "Solar forecast tomorrow (optional, empty = energy forecast's)"
             }

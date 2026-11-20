@@ -17,7 +17,10 @@ Solladdning av elbilen, en egen funktion under *EV charging*.
   först).
 - Ny sektion *Solladdning* i konfigurationen: nätets effekt (en sensor med
   + köp/− export, eller export- och importsensorer; tomt = Pixiis mätare)
-  och solprognos idag/imorgon (tomt = energiprognosens, t.ex. Solcast).
+  solproduktion nu (växelriktarens effekt; tomt = energiprognosens) och
+  solprognos idag/imorgon (tomt = energiprognosens, t.ex. Solcast).
+  Överskottet blir aldrig större än solproduktionen, och hembatteriets
+  urladdning dras bort, så export från batteriet räknas aldrig som sol.
 - Med solladdning på räknar smartladdningen med solprognosen: prognosens
   överskott kostar bara spotpriset, medan nätel även kostar nätavgiften från
   prisoptimeringens inställningar, så soliga kvartar väljs före samma pris på

@@ -124,6 +124,7 @@ class EvChargingController:
         self.solar_export_w: float | None = None
         self.solar_available_w: float | None = None
         self.solar_limit_a: int | None = None
+        self.solar_production_w: float | None = None
         self._solar_ok_since: float | None = None
         self._solar_low_since: float | None = None
         self._solar_driving = False
@@ -383,6 +384,28 @@ class EvChargingController:
         ):
             raise ValueError("ev_grid_power_unavailable")
         return -float(meter), "Pixii meter"
+
+    def _battery_discharge_w(self) -> float:
+        """Power the home battery discharges with now; it is not solar surplus."""
+        battery = getattr(self.runtime, "battery", None)
+        power = None if battery is None else getattr(battery, "power_w", None)
+        if isinstance(power, bool) or not isinstance(power, (int, float)) or power != power:
+            return 0.0
+        return max(0.0, -float(power))
+
+    def _solar_power_w(self, config: EvChargingConfig) -> tuple[float | None, str | None]:
+        """Solar production now from the chosen sensor, else the energy forecast's."""
+        entity = config.solar_power_entity
+        if not entity:
+            forecast = getattr(self.runtime, "energy_forecast", None)
+            forecast_config = None if forecast is None else getattr(forecast, "config", None)
+            entity = getattr(forecast_config, "solar_power_entity_id", None) or ""
+        if not entity:
+            return None, None
+        value = self._power_w(entity)
+        if value is None:
+            raise ValueError("ev_solar_power_unavailable")
+        return abs(value), entity
 
     def _battery_solar_w(self) -> float:
         """Solar power the home battery charges with, when the car may take it first."""
@@ -673,24 +696,32 @@ class EvChargingController:
         try:
             export, source = self._export_w(config)
             credit = self._battery_solar_w()
+            discharge = self._battery_discharge_w()
+            solar_w, solar_source = self._solar_power_w(config)
             ev_kw = self._measured_kw(config) if self.charger_phase == "charging" else 0.0
             amps, available = solar_current(
-                export_w=export + credit,
+                export_w=export + credit - discharge,
                 ev_power_w=max(0.0, (ev_kw or 0.0) * 1000),
                 phases=config.phases,
                 voltage_v=config.voltage_v,
                 min_current_a=config.min_current_a,
                 max_current_a=config.max_current_a,
                 grid_allowance_w=float(self._setting("ev_solar_grid_allowance_kw")) * 1000,
+                solar_w=solar_w,
             )
         except ValueError as error:
             self.solar_export_w = self.solar_available_w = None
             return self._solar_stop(
                 "solar_data_unavailable",
-                f"the grid power is unavailable ({error}), so solar surplus is unknown",
+                f"a measurement is unavailable ({error}), so the solar surplus is unknown",
             )
         self.solar_export_w, self.solar_available_w = export, available
         battery = "" if credit <= 0 else f" plus {credit / 1000:.1f} kW the home battery gives up"
+        if discharge > 0:
+            battery += f", not counting {discharge / 1000:.1f} kW the home battery discharges"
+        if solar_w is not None:
+            battery += f", at most the {solar_w / 1000:.1f} kW solar production ({solar_source})"
+        self.solar_production_w = solar_w
         now = self.monotonic()
         if amps is None:
             self._solar_ok_since = None
@@ -1080,6 +1111,9 @@ class EvChargingController:
                 None if self.solar_available_w is None else round(self.solar_available_w)
             ),
             "solar_current_a": self.solar_limit_a,
+            "solar_production_now_w": (
+                None if self.solar_production_w is None else round(self.solar_production_w)
+            ),
             "solar_target_soc_percent": self._setting("ev_solar_target_soc_percent"),
             "sell_instead_price_sek_per_kwh": self._setting("ev_solar_sell_price_sek_per_kwh"),
             "car_before_home_battery": self._setting("ev_solar_car_before_battery") is True,

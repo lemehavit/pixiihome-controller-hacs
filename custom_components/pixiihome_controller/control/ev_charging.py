@@ -47,6 +47,7 @@ class EvChargingConfig:
     grid_power_entity: str = ""
     grid_export_entity: str = ""
     grid_import_entity: str = ""
+    solar_power_entity: str = ""
     solar_forecast_today: str = ""
     solar_forecast_tomorrow: str = ""
     phases: int = 3
@@ -77,6 +78,7 @@ class EvChargingConfig:
             "grid_power_entity": ("sensor.",),
             "grid_export_entity": ("sensor.",),
             "grid_import_entity": ("sensor.",),
+            "solar_power_entity": ("sensor.",),
             "solar_forecast_today": ("sensor.",),
             "solar_forecast_tomorrow": ("sensor.",),
         }
@@ -543,16 +545,22 @@ def solar_current(
     min_current_a: int,
     max_current_a: int,
     grid_allowance_w: float = 0.0,
+    solar_w: float | None = None,
 ) -> tuple[int | None, float]:
     """Charger current the solar surplus pays for, or None below the minimum.
 
     ``export_w`` is the net power leaving the house now (negative = import);
     it already includes what the car draws, ``ev_power_w``. Returns the
-    current and the power available to the car in W.
+    current and the power available to the car in W. ``solar_w``, the solar
+    production now, caps the surplus so that export from a discharging
+    battery is never taken for sun.
     """
     if not _finite(export_w) or not _finite(ev_power_w):
         raise ValueError("solar_data_invalid")
-    available = max(0.0, ev_power_w) + export_w + max(0.0, grid_allowance_w)
+    surplus = max(0.0, ev_power_w) + export_w
+    if solar_w is not None and _finite(solar_w):
+        surplus = min(surplus, max(0.0, solar_w))
+    available = surplus + max(0.0, grid_allowance_w)
     amps = floor(available / (phases * voltage_v) + 1e-9) if available > 0 else 0
     if amps < min_current_a:
         return None, available

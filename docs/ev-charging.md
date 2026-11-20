@@ -45,6 +45,7 @@ The form has five sections:
 | Load balancing | Grid current L1–L3 | Empty = Pixii load balancing measurements |
 | Load balancing | Main fuse per phase, margin | Taken from Pixii load balancing when it is configured |
 | Solar charging | Grid power (+ import, − export), or export plus import sensors | Empty = Pixii's grid meter |
+| Solar charging | Solar production now (inverter power) | Empty = the energy forecast's solar power sensor |
 | Solar charging | Solar forecast today / tomorrow | Empty = the energy forecast's (for example Solcast) |
 
 On the **EV charging** device:
@@ -125,7 +126,9 @@ A function of its own, independent of smart charging. When **EV solar
 charging** is on and the car is plugged in:
 
 - The surplus is what leaves the house now (grid export minus import) plus
-  what the car already draws. The charger current is the surplus divided by
+  what the car already draws, never more than the solar production now, and
+  minus what the home battery discharges, so export from a discharging battery
+  (for example a planned price export) is not taken for sun. The charger current is the surplus divided by
   230 V × phases, between the minimum and maximum current. It rises at most
   4 A a minute and falls at once.
 - It starts when the surplus has paid for at least the minimum current for the

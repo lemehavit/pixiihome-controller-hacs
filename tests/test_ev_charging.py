@@ -673,3 +673,41 @@ async def test_solar_reads_pixii_meter_when_no_grid_entity_is_chosen() -> None:
     assert controller.solar_active
     assert controller.solar_limit_a == 8  # 6 kW / 690 V
     assert controller.attributes()["grid_power_source"] == "Pixii meter"
+
+
+def test_solar_production_caps_the_surplus() -> None:
+    from custom_components.pixiihome_controller.control.ev_charging import solar_current
+
+    # 8 kW exported but the panels make only 3 kW: the rest is the battery.
+    assert solar_current(export_w=8000, ev_power_w=0, phases=1, voltage_v=230,
+                         min_current_a=6, max_current_a=32, solar_w=3000)[0] == 13
+
+
+@pytest.mark.asyncio
+async def test_battery_discharge_export_is_not_taken_for_sun() -> None:
+    controller, hass, tick = make_controller(
+        {"ev_solar_charging_enabled": True, "ev_solar_start_delay_minutes": 0},
+        {**SOLAR_OPTIONS, "solar_power_entity": "sensor.inverter"},
+        prices=hourly(NOW, [0.5] * 24),
+    )
+    hass.states.set("sensor.easee_status", "awaiting_start")
+    hass.states.set("sensor.car_soc", 60)
+    hass.states.set("sensor.export", 6000, unit_of_measurement="W")
+    hass.states.set("sensor.import", 0, unit_of_measurement="W")
+    hass.states.set("sensor.inverter", 0, unit_of_measurement="W")
+    await controller.tick()
+    assert not controller.solar_active
+    assert controller.solar_reason == "waiting_for_sun"
+    # Without a solar sensor, the Pixii battery's own discharge is subtracted.
+    controller2, hass2, _ = make_controller(
+        {"ev_solar_charging_enabled": True, "ev_solar_start_delay_minutes": 0},
+        SOLAR_OPTIONS, prices=hourly(NOW, [0.5] * 24),
+    )
+    controller2.runtime.battery = SimpleNamespace(power_w=-6000.0)
+    hass2.states.set("sensor.easee_status", "awaiting_start")
+    hass2.states.set("sensor.car_soc", 60)
+    hass2.states.set("sensor.export", 6000, unit_of_measurement="W")
+    hass2.states.set("sensor.import", 0, unit_of_measurement="W")
+    await controller2.tick()
+    assert not controller2.solar_active
+    assert "discharges" in controller2.solar_detail

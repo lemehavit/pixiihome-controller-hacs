@@ -167,6 +167,7 @@
               "grid_power_entity": "Nätets effekt, + = köp, − = export (valfritt, tomt = Pixiis mätare)",
               "grid_export_entity": "Exporterad effekt till nätet (valfritt, ihop med import; tomt = Pixiis mätare)",
               "grid_import_entity": "Köpt effekt från nätet (valfritt, ihop med export)",
+              "solar_power_entity": "Solproduktion nu, t.ex. växelriktarens effekt (valfritt, tomt = energiprognosens); taket för överskottet så att export från batteriet inte tas för sol",
               "solar_forecast_today": "Solprognos idag, t.ex. Solcast (valfritt, tomt = energiprognosens)",
               "solar_forecast_tomorrow": "Solprognos imorgon (valfritt, tomt = energiprognosens)"
             }
