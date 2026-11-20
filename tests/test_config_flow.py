@@ -452,7 +452,7 @@ async def test_ev_charging_options_default_to_load_balancing_fuse_and_save():
     flow = _options_flow(options=existing)
     form = await flow.async_step_ev_charging()
     sections = {str(key): value.schema.schema for key, value in form["data_schema"].schema.items()}
-    assert list(sections) == ["charger", "car", "price", "load_balancing"]
+    assert list(sections) == ["charger", "car", "price", "load_balancing", "solar"]
     defaults = {
         str(key): key.default() for key in sections["load_balancing"] if callable(key.default)
     }

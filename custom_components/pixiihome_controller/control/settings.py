@@ -173,6 +173,19 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "ev_target_soc_percent": SettingSpec("ev_target_soc_percent", 80.0, 10.0, 100.0, 1.0, "%"),
     "ev_min_soc_percent": SettingSpec("ev_min_soc_percent", 20.0, 0.0, 100.0, 1.0, "%"),
     "ev_ready_by_hour": SettingSpec("ev_ready_by_hour", 7, 0, 23, 1, "h"),
+    "ev_solar_charging_enabled": SettingSpec("ev_solar_charging_enabled", False),
+    "ev_solar_car_before_battery": SettingSpec("ev_solar_car_before_battery", False),
+    "ev_solar_sell_price_sek_per_kwh": SettingSpec(
+        "ev_solar_sell_price_sek_per_kwh", 1.0, 0.0, 20.0, 0.05, "SEK/kWh"
+    ),
+    "ev_solar_target_soc_percent": SettingSpec(
+        "ev_solar_target_soc_percent", 100.0, 10.0, 100.0, 1.0, "%"
+    ),
+    "ev_solar_grid_allowance_kw": SettingSpec(
+        "ev_solar_grid_allowance_kw", 0.0, 0.0, 11.0, 0.1, "kW"
+    ),
+    "ev_solar_start_delay_minutes": SettingSpec("ev_solar_start_delay_minutes", 3, 0, 60, 1, "min"),
+    "ev_solar_stop_delay_minutes": SettingSpec("ev_solar_stop_delay_minutes", 5, 0, 60, 1, "min"),
 }
 
 

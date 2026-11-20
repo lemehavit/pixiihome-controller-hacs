@@ -110,12 +110,13 @@
       },
       "ev_charging": {
         "title": "EV charging",
-        "description": "Choose the charger and car devices: their entities are found automatically and nothing new has to be created. Entities chosen below a device override what was found. Charger: without start/pause or current entities, the Easee actions of the charger device are used. Price: leave empty to use the price sensor of price optimization. Load balancing: grid currents per phase (empty = Pixii measurements), main fuse and margin.",
+        "description": "Choose the charger and car devices: their entities are found automatically and nothing new has to be created. Entities chosen below a device override what was found. Charger: without start/pause or current entities, the Easee actions of the charger device are used. Price: leave empty to use the price sensor of price optimization. Load balancing: grid currents per phase (empty = Pixii measurements), main fuse and margin. Solar charging: grid power to read the surplus from (empty = Pixii's meter) and solar forecast (empty = the energy forecast's).",
         "data": {
           "charger": "Charger",
           "car": "Car",
           "price": "Price",
-          "load_balancing": "EV load balancing (separate from the battery)"
+          "load_balancing": "EV load balancing (separate from the battery)",
+          "solar": "Solar charging (grid power and solar forecast)"
         },
         "sections": {
           "charger": {
@@ -160,6 +161,16 @@
               "fuse_a": "Main fuse per phase",
               "margin_a": "Safety margin"
             }
+          },
+          "solar": {
+            "name": "Solar charging (grid power and solar forecast)",
+            "data": {
+              "grid_power_entity": "Grid power, + = import, − = export (optional, empty = Pixii's meter)",
+              "grid_export_entity": "Grid export power (optional, together with import; empty = Pixii's meter)",
+              "grid_import_entity": "Grid import power (optional, together with export)",
+              "solar_forecast_today": "Solar forecast today, e.g. Solcast (optional, empty = energy forecast's)",
+              "solar_forecast_tomorrow": "Solar forecast tomorrow (optional, empty = energy forecast's)"
+            }
           }
         }
       }
@@ -172,7 +183,8 @@
       "invalid_price_optimization": "Check the price sensor, source ID and planning intervals.",
       "invalid_energy_forecast": "Select sensors (and a weather entity for temperature only).",
       "invalid_ev_charging": "Check the EV charging entities and limits.",
-      "charger_start_and_pause_required": "Choose both a start and a pause entity, or neither."
+      "charger_start_and_pause_required": "Choose both a start and a pause entity, or neither.",
+      "grid_import_and_export_required": "Choose both a grid export and a grid import sensor, or neither."
     }
   },
   "services": {
@@ -375,7 +387,8 @@
           "waiting": "Waiting",
           "target_reached": "Target reached",
           "paused_for_load": "Paused for high load",
-          "completed": "Completed"
+          "completed": "Completed",
+          "solar_charging": "Charging on solar"
         }
       },
       "ev_charger_current": {
@@ -541,6 +554,21 @@
       },
       "ev_ready_by_hour": {
         "name": "EV ready by (hour)"
+      },
+      "ev_solar_sell_price_sek_per_kwh": {
+        "name": "EV sell solar instead from"
+      },
+      "ev_solar_target_soc_percent": {
+        "name": "EV solar charging target"
+      },
+      "ev_solar_grid_allowance_kw": {
+        "name": "EV solar charging allowed grid import"
+      },
+      "ev_solar_start_delay_minutes": {
+        "name": "EV solar start delay"
+      },
+      "ev_solar_stop_delay_minutes": {
+        "name": "EV solar stop delay"
       }
     },
     "button": {
@@ -611,6 +639,12 @@
       },
       "ev_allow_battery_discharge": {
         "name": "EV may charge from home battery"
+      },
+      "ev_solar_charging_enabled": {
+        "name": "EV solar charging"
+      },
+      "ev_solar_car_before_battery": {
+        "name": "EV before home battery on solar surplus"
       }
     }
   }

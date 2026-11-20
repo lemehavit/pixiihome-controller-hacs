@@ -109,12 +109,13 @@
       },
       "ev_charging": {
         "title": "Elbilsladdning",
-        "description": "Välj laddboxens och bilens enheter: deras entiteter hittas automatiskt och inget nytt behöver skapas. Entiteter du väljer under en enhet går före det som hittades. Laddbox: utan start-/paus- eller strömentiteter används laddboxenhetens Easee-actions. Pris: lämna tomt för att använda prisoptimeringens prissensor. Lastbalansering: nätström per fas (tomt = Pixiis mätning), huvudsäkring och marginal.",
+        "description": "Välj laddboxens och bilens enheter: deras entiteter hittas automatiskt och inget nytt behöver skapas. Entiteter du väljer under en enhet går före det som hittades. Laddbox: utan start-/paus- eller strömentiteter används laddboxenhetens Easee-actions. Pris: lämna tomt för att använda prisoptimeringens prissensor. Lastbalansering: nätström per fas (tomt = Pixiis mätning), huvudsäkring och marginal. Solladdning: nätets effekt som överskottet läses från (tomt = Pixiis mätare) och solprognos (tomt = energiprognosens).",
         "data": {
           "charger": "Laddbox",
           "car": "Bil",
           "price": "Pris",
-          "load_balancing": "Lastbalansering elbil (separat från batteriet)"
+          "load_balancing": "Lastbalansering elbil (separat från batteriet)",
+          "solar": "Solladdning (nätets effekt och solprognos)"
         },
         "sections": {
           "charger": {
@@ -159,6 +160,16 @@
               "fuse_a": "Huvudsäkring per fas",
               "margin_a": "Säkerhetsmarginal"
             }
+          },
+          "solar": {
+            "name": "Solladdning (nätets effekt och solprognos)",
+            "data": {
+              "grid_power_entity": "Nätets effekt, + = köp, − = export (valfritt, tomt = Pixiis mätare)",
+              "grid_export_entity": "Exporterad effekt till nätet (valfritt, ihop med import; tomt = Pixiis mätare)",
+              "grid_import_entity": "Köpt effekt från nätet (valfritt, ihop med export)",
+              "solar_forecast_today": "Solprognos idag, t.ex. Solcast (valfritt, tomt = energiprognosens)",
+              "solar_forecast_tomorrow": "Solprognos imorgon (valfritt, tomt = energiprognosens)"
+            }
           }
         }
       }
@@ -171,7 +182,8 @@
       "invalid_price_optimization": "Kontrollera prissensor, käll-ID och planeringsintervall.",
       "invalid_energy_forecast": "Välj sensorer (och endast väderentitet för temperatur).",
       "invalid_ev_charging": "Kontrollera entiteter och gränser för elbilsladdning.",
-      "charger_start_and_pause_required": "Välj både start- och pausentitet, eller ingen av dem."
+      "charger_start_and_pause_required": "Välj både start- och pausentitet, eller ingen av dem.",
+      "grid_import_and_export_required": "Välj både sensor för export och import till nätet, eller ingen av dem."
     }
   },
   "services": {
@@ -364,7 +376,8 @@
           "waiting": "Väntar",
           "target_reached": "Målnivå nådd",
           "paused_for_load": "Pausad, hög last",
-          "completed": "Klar"
+          "completed": "Klar",
+          "solar_charging": "Laddar med sol"
         }
       },
       "ev_charger_current": {
@@ -455,6 +468,21 @@
       },
       "ev_ready_by_hour": {
         "name": "Elbil klar till (timme)"
+      },
+      "ev_solar_sell_price_sek_per_kwh": {
+        "name": "Elbil sälj solel hellre från"
+      },
+      "ev_solar_target_soc_percent": {
+        "name": "Elbil målnivå solladdning"
+      },
+      "ev_solar_grid_allowance_kw": {
+        "name": "Elbil tillåtet nätköp vid solladdning"
+      },
+      "ev_solar_start_delay_minutes": {
+        "name": "Elbil solstart fördröjning"
+      },
+      "ev_solar_stop_delay_minutes": {
+        "name": "Elbil solstopp fördröjning"
       }
     },
     "switch": {
@@ -487,6 +515,12 @@
       },
       "ev_allow_battery_discharge": {
         "name": "Elbil får ladda från hembatteriet"
+      },
+      "ev_solar_charging_enabled": {
+        "name": "Solladdning elbil"
+      },
+      "ev_solar_car_before_battery": {
+        "name": "Elbil före hembatteri vid solöverskott"
       }
     },
     "button": {

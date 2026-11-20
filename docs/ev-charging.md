@@ -27,7 +27,7 @@ device's Easee actions, so no helper entities are needed. An entity chosen in
 a field below wins over the one found; the sensor attribute `used_entities`
 shows what is used.
 
-The form has four sections:
+The form has five sections:
 
 | Section | Field | Example (Easee + MySkoda) |
 | --- | --- | --- |
@@ -44,6 +44,8 @@ The form has four sections:
 | Price | Price sensor | Empty = the price sensor of price optimization |
 | Load balancing | Grid current L1–L3 | Empty = Pixii load balancing measurements |
 | Load balancing | Main fuse per phase, margin | Taken from Pixii load balancing when it is configured |
+| Solar charging | Grid power (+ import, − export), or export plus import sensors | Empty = Pixii's grid meter |
+| Solar charging | Solar forecast today / tomorrow | Empty = the energy forecast's (for example Solcast) |
 
 On the **EV charging** device:
 
@@ -55,6 +57,12 @@ On the **EV charging** device:
 | EV target battery level | 80 % |
 | EV charge-now level | 20 % |
 | EV ready by (hour) | 7 |
+| EV solar charging | Off |
+| EV before home battery on solar surplus | Off |
+| EV sell solar instead from | 1.00 kr/kWh |
+| EV solar charging target | 100 % |
+| EV solar charging allowed grid import | 0 kW |
+| EV solar start delay / stop delay | 3 min / 5 min |
 
 ## Smart charging
 
@@ -111,6 +119,40 @@ battery.
 
 Turning EV load balancing off gives the charger its maximum current back.
 
+## Solar charging (0.5.36)
+
+A function of its own, independent of smart charging. When **EV solar
+charging** is on and the car is plugged in:
+
+- The surplus is what leaves the house now (grid export minus import) plus
+  what the car already draws. The charger current is the surplus divided by
+  230 V × phases, between the minimum and maximum current. It rises at most
+  4 A a minute and falls at once.
+- It starts when the surplus has paid for at least the minimum current for the
+  start delay, and pauses when it has been below that for the stop delay (the
+  minimum current is kept meanwhile). *Allowed grid import* lets it start and
+  keep going with that much bought from the grid, useful when the minimum
+  current needs more power than the sun gives (6 A on three phases is 4.1 kW).
+- When the price now is at or above *sell solar instead from*, the surplus is
+  sold and the car does not charge from it.
+- It stops at the *solar charging target*; the car's own charge limit is set to
+  the higher of the smart and solar targets.
+- The home battery takes the surplus first. With *EV before home battery*, the
+  power the battery is solar-charging with also counts for the car, and the
+  battery's own solar charging backs off as the car takes it.
+- With EV load balancing on, the fuse still decides: the lower of the two
+  currents is used.
+- When smart charging wants to charge (cheap price, below the charge-now level
+  or the deadline), smart charging decides and the current follows only load
+  balancing.
+
+When solar charging is on, smart charging also uses the solar forecast: the
+forecast surplus (solar minus forecast house load) in an interval is counted
+as costing only the spot price, while grid energy also costs the grid import
+cost from price optimization's settings. Intervals with sun therefore rank as
+cheaper than the same price at night, unless the price is at or above the
+sell-instead price. `planned_slots` show `solar_kw` for such intervals.
+
 ## Logbook
 
 Every action has a logbook line on **EV charging status** with *Who* and *Why*,
@@ -123,4 +165,5 @@ last actions.
 
 Turn off your own automations that do the same thing, or they will fight:
 dynamic current up/down, "start low", "pause if high current" and "resume when
-the battery is done".
+the battery is done", and for solar charging the solar increase/decrease,
+"start charging on solar" and "pause when no solar" automations.

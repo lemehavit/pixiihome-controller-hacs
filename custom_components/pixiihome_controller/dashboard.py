@@ -129,6 +129,13 @@ _ENTITY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "number.ev_ready_by_hour",
             "switch.ev_load_balancing_enabled",
             "sensor.ev_charger_current",
+            "switch.ev_solar_charging_enabled",
+            "switch.ev_solar_car_before_battery",
+            "number.ev_solar_sell_price_sek_per_kwh",
+            "number.ev_solar_target_soc_percent",
+            "number.ev_solar_grid_allowance_kw",
+            "number.ev_solar_start_delay_minutes",
+            "number.ev_solar_stop_delay_minutes",
         ),
     ),
     (
