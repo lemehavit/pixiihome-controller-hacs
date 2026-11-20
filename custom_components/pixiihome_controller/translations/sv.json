@@ -109,7 +109,7 @@
       },
       "ev_charging": {
         "title": "Elbilsladdning",
-        "description": "Välj vad elbilsladdningen läser och styr. Laddbox: statussensorn krävs. Start- och pausentiteter (knapp, skript eller switch) används om de väljs; annars Easee-åtgärderna på statussensorns enhet. Strömstyrning (number) sätter laddströmmen om den väljs; annars Easees dynamiska kretsgräns. Bil: batterinivå och laddgräns från bilintegrationen. Pris: lämna tomt för att använda prisoptimeringens prissensor. Lastbalansering: nätström per fas (tomt = Pixiis mätning), huvudsäkring och marginal.",
+        "description": "Välj laddboxens och bilens enheter: deras entiteter hittas automatiskt och inget nytt behöver skapas. Entiteter du väljer under en enhet går före det som hittades. Laddbox: utan start-/paus- eller strömentiteter används laddboxenhetens Easee-actions. Pris: lämna tomt för att använda prisoptimeringens prissensor. Lastbalansering: nätström per fas (tomt = Pixiis mätning), huvudsäkring och marginal.",
         "data": {
           "charger": "Laddbox",
           "car": "Bil",
@@ -120,6 +120,7 @@
           "charger": {
             "name": "Laddbox",
             "data": {
+              "charger_device": "Laddboxens enhet (hittar status, effekt och strömgräns; start, paus och ström går via dess actions)",
               "charger_status_entity": "Laddboxens statussensor",
               "charger_power_entity": "Laddboxens effektsensor",
               "charger_start_entity": "Starta laddning (knapp, skript eller switch)",
@@ -134,6 +135,7 @@
           "car": {
             "name": "Bil",
             "data": {
+              "car_device": "Bilens enhet (hittar batterinivå, laddgräns, laddswitch och kontakt)",
               "car_soc_entity": "Bilens batterinivå",
               "car_limit_entity": "Bilens laddgräns (number)",
               "car_charging_switch": "Bilens laddswitch",

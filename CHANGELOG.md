@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.34 — 2026-11-20
+
+Elbilsladdning med enheter i stället för egna entiteter.
+
+- Under *Elbilsladdning* kan du välja laddboxens enhet och bilens enhet.
+  Entiteterna hittas automatiskt: laddboxens status, effekt och dynamiska
+  strömgräns, bilens batterinivå, laddgräns, laddswitch och kontakt.
+  Start, paus och laddström går via laddboxenhetens egna Easee-actions, så
+  inga nya entiteter behöver skapas.
+- En entitet du väljer själv går före den som hittades. Vilka som används syns
+  i attributet `used_entities` på *EV charging status*.
+
 ## 0.5.33 — 2026-11-20
 
 Smart elbilsladdning och lastbalansering av laddboxen (Easee + MySkoda).

@@ -28,6 +28,7 @@ from .control.ev_charging import (
     EvPlan,
     car_limit_for_target,
     charger_current,
+    entities_from_devices,
     next_deadline,
     plan_charging,
 )
@@ -50,6 +51,7 @@ CAR_LIMIT_RETRY_SECONDS = 900
 CAR_SWITCH_RETRY_SECONDS = 900
 OBSERVER_MAX_AGE_SECONDS = 30
 RECENT_ACTIONS = 15
+DEVICE_RESOLVE_SECONDS = 60
 # Phase currents are rarely even; the forecast house load is spread as if the
 # busiest phase carries this much more than an even share.
 HOUSE_PHASE_IMBALANCE = 1.5
@@ -111,18 +113,48 @@ class EvChargingController:
         self._task: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
         self._listeners: list[Callable[[], None]] = []
+        self._resolved: tuple[EvChargingConfig, float, EvChargingConfig] | None = None
 
     # ----- configuration and lifecycle -------------------------------------------------
 
     @property
     def config(self) -> EvChargingConfig:
+        """Configured entities, with empty ones filled from the chosen devices."""
         entry = self.runtime.entry
         try:
-            return EvChargingConfig.from_mapping(
+            config = EvChargingConfig.from_mapping(
                 None if entry is None else entry.options.get(CONF_EV_CHARGING)
             )
         except (TypeError, ValueError):
             return EvChargingConfig()
+        if not (config.charger_device or config.car_device):
+            return config
+        now = self.monotonic()
+        if (
+            self._resolved is not None
+            and self._resolved[0] == config
+            and now - self._resolved[1] < DEVICE_RESOLVE_SECONDS
+        ):
+            return self._resolved[2]
+        resolved = entities_from_devices(
+            config,
+            self._device_entries(config.charger_device),
+            self._device_entries(config.car_device),
+        )
+        self._resolved = (config, now, resolved)
+        return resolved
+
+    def _device_entries(self, device_id: str) -> list[tuple[str, str | None]]:
+        if not device_id:
+            return []
+        from homeassistant.helpers import entity_registry as er
+
+        registry = er.async_get(self.runtime.hass)
+        return [
+            (entry.entity_id, entry.device_class or entry.original_device_class)
+            for entry in er.async_entries_for_device(registry, device_id)
+            if entry.disabled_by is None
+        ]
 
     def _setting(self, key: str) -> Any:
         try:
@@ -228,6 +260,10 @@ class EvChargingController:
         return value if value == value and abs(value) != float("inf") else None
 
     def _charger_device_id(self, config: EvChargingConfig) -> str | None:
+        if config.charger_device:
+            return config.charger_device
+        if not config.charger_status_entity:
+            return None
         from homeassistant.helpers import entity_registry as er
 
         entry = er.async_get(self.runtime.hass).async_get(config.charger_status_entity)
@@ -756,7 +792,16 @@ class EvChargingController:
             "min_soc_percent": self._setting("ev_min_soc_percent"),
             "ready_by_hour": self._setting("ev_ready_by_hour"),
             "battery_may_charge_car": self._setting("ev_allow_battery_discharge") is True,
-            "price_entity": self.config.price_entity or "price optimization's",
+            "price_entity": config.price_entity or "price optimization's",
+            "used_entities": {
+                key: getattr(config, key)
+                for key in (
+                    "charger_status_entity", "charger_power_entity", "charger_limit_entity",
+                    "car_soc_entity", "car_limit_entity", "car_charging_switch",
+                    "car_plugged_entity",
+                )
+            },
+            "charger_device_id": self._charger_device_id(config),
             "charger_current_limit_a": self.applied_limit_a,
             "phase_headroom_a": None if self.headroom_a is None else round(self.headroom_a, 1),
             "load_balancing_detail": self.balance_detail,
