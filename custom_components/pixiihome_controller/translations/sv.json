@@ -121,12 +121,12 @@
             "name": "Laddbox",
             "data": {
               "charger_device": "Laddboxens enhet (hittar status, effekt och strömgräns; start, paus och ström går via dess actions)",
-              "charger_status_entity": "Laddboxens statussensor",
-              "charger_power_entity": "Laddboxens effektsensor",
-              "charger_start_entity": "Starta laddning (knapp, skript eller switch)",
-              "charger_pause_entity": "Pausa laddning (knapp, skript eller switch)",
-              "charger_current_entity": "Styrning av laddström (number)",
-              "charger_limit_entity": "Sensor för laddboxens strömgräns",
+              "charger_status_entity": "Laddboxens statussensor (valfritt, ersätter den som hittades på enheten)",
+              "charger_power_entity": "Laddboxens effektsensor (valfritt, ersätter den som hittades på enheten)",
+              "charger_start_entity": "Starta laddning (knapp, skript eller switch, valfritt, tomt = laddboxenhetens Easee-actions)",
+              "charger_pause_entity": "Pausa laddning (knapp, skript eller switch, valfritt, tomt = laddboxenhetens Easee-actions)",
+              "charger_current_entity": "Styrning av laddström (number, valfritt, tomt = laddboxenhetens Easee-actions)",
+              "charger_limit_entity": "Sensor för laddboxens strömgräns (valfritt, ersätter den som hittades på enheten)",
               "phases": "Laddboxens faser",
               "min_current_a": "Lägsta laddström",
               "max_current_a": "Högsta laddström"
@@ -136,10 +136,10 @@
             "name": "Bil",
             "data": {
               "car_device": "Bilens enhet (hittar batterinivå, laddgräns, laddswitch och kontakt)",
-              "car_soc_entity": "Bilens batterinivå",
-              "car_limit_entity": "Bilens laddgräns (number)",
-              "car_charging_switch": "Bilens laddswitch",
-              "car_plugged_entity": "Bil ansluten (binärsensor)",
+              "car_soc_entity": "Bilens batterinivå (valfritt, ersätter den som hittades på enheten)",
+              "car_limit_entity": "Bilens laddgräns (number, valfritt, ersätter den som hittades på enheten)",
+              "car_charging_switch": "Bilens laddswitch (valfritt, ersätter den som hittades på enheten)",
+              "car_plugged_entity": "Bil ansluten (binärsensor, valfritt, ersätter den som hittades på enheten)",
               "battery_capacity_kwh": "Bilens batterikapacitet",
               "charge_efficiency_percent": "Laddverkningsgrad"
             }
@@ -147,15 +147,15 @@
           "price": {
             "name": "Pris",
             "data": {
-              "price_entity": "Prissensor (tomt = prisoptimeringens)"
+              "price_entity": "Prissensor (valfritt, tomt = prisoptimeringens)"
             }
           },
           "load_balancing": {
             "name": "Lastbalansering",
             "data": {
-              "current_l1": "Nätström L1",
-              "current_l2": "Nätström L2",
-              "current_l3": "Nätström L3",
+              "current_l1": "Nätström L1 (valfritt, tomt = Pixiis mätning)",
+              "current_l2": "Nätström L2 (valfritt, tomt = Pixiis mätning)",
+              "current_l3": "Nätström L3 (valfritt, tomt = Pixiis mätning)",
               "fuse_a": "Huvudsäkring per fas",
               "margin_a": "Säkerhetsmarginal"
             }

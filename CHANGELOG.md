@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.35 — 2026-11-20
+
+- Elbilsladdning: när laddboxens och bilens enheter är valda hittas alla
+  entiteter som behövs automatiskt (kontrollerat live med Easee och MySkoda).
+  Övriga entitetsfält är nu märkta *valfritt*. Ett ifyllt fält ersätter just
+  den entitet som hittades på enheten. Tomma start-, paus- och strömfält
+  betyder laddboxenhetens Easee-actions, tom prissensor betyder
+  prisoptimeringens och tomma fasströmmar betyder Pixiis mätning.
+
 ## 0.5.34 — 2026-11-20
 
 Elbilsladdning med enheter i stället för egna entiteter.
