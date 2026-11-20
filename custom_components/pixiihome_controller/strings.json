@@ -115,19 +115,19 @@
           "charger": "Charger",
           "car": "Car",
           "price": "Price",
-          "load_balancing": "Load balancing"
+          "load_balancing": "EV load balancing (separate from the battery)"
         },
         "sections": {
           "charger": {
             "name": "Charger",
             "data": {
               "charger_device": "Charger device (finds status, power and current limit; start, pause and current use its actions)",
-              "charger_status_entity": "Charger status sensor",
-              "charger_power_entity": "Charger power sensor",
-              "charger_start_entity": "Start charging (button, script or switch)",
-              "charger_pause_entity": "Pause charging (button, script or switch)",
-              "charger_current_entity": "Charger current control (number)",
-              "charger_limit_entity": "Charger current limit sensor",
+              "charger_status_entity": "Charger status sensor (optional, replaces the one found on the device)",
+              "charger_power_entity": "Charger power sensor (optional, replaces the one found on the device)",
+              "charger_start_entity": "Start charging (button, script or switch, optional, empty = the charger device's Easee actions)",
+              "charger_pause_entity": "Pause charging (button, script or switch, optional, empty = the charger device's Easee actions)",
+              "charger_current_entity": "Charger current control (number, optional, empty = the charger device's Easee actions)",
+              "charger_limit_entity": "Charger current limit sensor (optional, replaces the one found on the device)",
               "phases": "Charger phases",
               "min_current_a": "Minimum charger current",
               "max_current_a": "Maximum charger current"
@@ -137,10 +137,10 @@
             "name": "Car",
             "data": {
               "car_device": "Car device (finds battery level, charge limit, charging switch and plug)",
-              "car_soc_entity": "Car battery level sensor",
-              "car_limit_entity": "Car charge limit (number)",
-              "car_charging_switch": "Car charging switch",
-              "car_plugged_entity": "Car plugged in (binary sensor)",
+              "car_soc_entity": "Car battery level sensor (optional, replaces the one found on the device)",
+              "car_limit_entity": "Car charge limit (number, optional, replaces the one found on the device)",
+              "car_charging_switch": "Car charging switch (optional, replaces the one found on the device)",
+              "car_plugged_entity": "Car plugged in (binary sensor, optional, replaces the one found on the device)",
               "battery_capacity_kwh": "Car battery capacity",
               "charge_efficiency_percent": "Charging efficiency"
             }
@@ -148,15 +148,15 @@
           "price": {
             "name": "Price",
             "data": {
-              "price_entity": "Price sensor (empty = price optimization's)"
+              "price_entity": "Price sensor (optional, empty = price optimization's)"
             }
           },
           "load_balancing": {
-            "name": "Load balancing",
+            "name": "EV load balancing (separate from the battery)",
             "data": {
-              "current_l1": "Grid current L1",
-              "current_l2": "Grid current L2",
-              "current_l3": "Grid current L3",
+              "current_l1": "Grid current L1 (optional, empty = Pixii measurements)",
+              "current_l2": "Grid current L2 (optional, empty = Pixii measurements)",
+              "current_l3": "Grid current L3 (optional, empty = Pixii measurements)",
               "fuse_a": "Main fuse per phase",
               "margin_a": "Safety margin"
             }
@@ -377,6 +377,9 @@
           "paused_for_load": "Paused for high load",
           "completed": "Completed"
         }
+      },
+      "ev_charger_current": {
+        "name": "EV charger current"
       }
     },
     "number": {

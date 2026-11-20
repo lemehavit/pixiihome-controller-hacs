@@ -90,6 +90,10 @@ Turning smart charging off resumes a pause it made.
 
 ## Load balancing
 
+The **EV charger current** sensor (0.5.35, amperes, with phase room, fuse and
+margin) shows what EV load balancing set. It is separate from the battery's
+load balancing and never changes the battery.
+
 The tightest phase decides, because a one-phase car may use any phase:
 
 `new current = what the car draws now + min over phases (fuse − margin − measured current)`
