@@ -110,7 +110,7 @@
       },
       "ev_charging": {
         "title": "EV charging",
-        "description": "Choose what EV charging reads and controls. Charger: the status sensor is required. Start and pause entities (button, script or switch) are used if chosen; otherwise the Easee actions on the status sensor's device. Current control (number) sets the charger current if chosen; otherwise the Easee dynamic circuit limit. Car: battery level and charge limit from the car integration. Price: leave empty to use the price sensor of price optimization. Load balancing: grid currents per phase (empty = Pixii measurements), main fuse and margin.",
+        "description": "Choose the charger and car devices: their entities are found automatically and nothing new has to be created. Entities chosen below a device override what was found. Charger: without start/pause or current entities, the Easee actions of the charger device are used. Price: leave empty to use the price sensor of price optimization. Load balancing: grid currents per phase (empty = Pixii measurements), main fuse and margin.",
         "data": {
           "charger": "Charger",
           "car": "Car",
@@ -121,6 +121,7 @@
           "charger": {
             "name": "Charger",
             "data": {
+              "charger_device": "Charger device (finds status, power and current limit; start, pause and current use its actions)",
               "charger_status_entity": "Charger status sensor",
               "charger_power_entity": "Charger power sensor",
               "charger_start_entity": "Start charging (button, script or switch)",
@@ -135,6 +136,7 @@
           "car": {
             "name": "Car",
             "data": {
+              "car_device": "Car device (finds battery level, charge limit, charging switch and plug)",
               "car_soc_entity": "Car battery level sensor",
               "car_limit_entity": "Car charge limit (number)",
               "car_charging_switch": "Car charging switch",

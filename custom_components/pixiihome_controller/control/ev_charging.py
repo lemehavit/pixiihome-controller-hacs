@@ -8,7 +8,7 @@ the service calls.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from math import ceil, floor, isfinite
 from typing import Any
@@ -28,6 +28,8 @@ def _finite(value: object) -> bool:
 class EvChargingConfig:
     """Entity bindings and physical limits for one charger and one car."""
 
+    charger_device: str = ""
+    car_device: str = ""
     charger_status_entity: str = ""
     charger_power_entity: str = ""
     charger_limit_entity: str = ""
@@ -68,6 +70,9 @@ class EvChargingConfig:
             "current_l2": ("sensor.",),
             "current_l3": ("sensor.",),
         }
+        for key in ("charger_device", "car_device"):
+            if not isinstance(getattr(self, key), str):
+                raise ValueError("invalid_device")
         for key, prefixes in domains.items():
             value = getattr(self, key)
             if not isinstance(value, str) or (value and not value.startswith(prefixes)):
@@ -101,7 +106,7 @@ class EvChargingConfig:
 
     @property
     def configured(self) -> bool:
-        return bool(self.charger_status_entity)
+        return bool(self.charger_status_entity or self.charger_device)
 
     @property
     def current_entities(self) -> tuple[str, ...]:
@@ -132,6 +137,66 @@ class EvChargingConfig:
                 item = "" if isinstance(getattr(cls, key, ""), str) else item
             data[key] = item
         return cls(**data)
+
+
+# ----- entities found on a chosen device -------------------------------------------------
+
+# (role, domain, entity_id suffixes in preference order, device classes accepted)
+_CHARGER_ROLES: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
+    ("charger_status_entity", "sensor", ("_status",), ()),
+    ("charger_power_entity", "sensor", ("_power",), ("power",)),
+    ("charger_limit_entity", "sensor", ("_dynamic_circuit_limit", "_dynamic_charger_limit"),
+     ()),
+)
+_CAR_ROLES: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
+    ("car_soc_entity", "sensor", ("_battery_percentage", "_state_of_charge", "_battery_level",
+                                  "_soc"), ("battery",)),
+    ("car_limit_entity", "number", ("_charge_limit", "_target_soc", "_charging_limit"),
+     ("battery",)),
+    ("car_charging_switch", "switch", ("_charging",), ()),
+    ("car_plugged_entity", "binary_sensor", ("_charger_connected", "_plug", "_plugged_in",
+                                             "_charging_cable_connected"), ("plug",)),
+)
+
+
+def _pick(
+    entries: Sequence[tuple[str, str | None]], domain: str, suffixes: Sequence[str],
+    device_classes: Sequence[str],
+) -> str:
+    candidates = [
+        (entity_id, device_class) for entity_id, device_class in entries
+        if entity_id.startswith(f"{domain}.")
+        and "target" not in entity_id and "_ute_" not in entity_id
+    ]
+    for suffix in suffixes:
+        for entity_id, _ in candidates:
+            if entity_id.endswith(suffix):
+                return entity_id
+    for entity_id, device_class in candidates:
+        if device_class in device_classes:
+            return entity_id
+    return ""
+
+
+def entities_from_devices(
+    config: EvChargingConfig,
+    charger_entries: Sequence[tuple[str, str | None]],
+    car_entries: Sequence[tuple[str, str | None]],
+) -> EvChargingConfig:
+    """Fill empty entity fields from the chosen charger and car devices.
+
+    An entity chosen explicitly always wins. ``*_entries`` are
+    ``(entity_id, device_class)`` of the enabled entities on each device.
+    """
+    found: dict[str, str] = {}
+    for roles, entries in ((_CHARGER_ROLES, charger_entries), (_CAR_ROLES, car_entries)):
+        for role, domain, suffixes, classes in roles:
+            if getattr(config, role):
+                continue
+            entity_id = _pick(entries, domain, suffixes, classes)
+            if entity_id:
+                found[role] = entity_id
+    return replace(config, **found) if found else config
 
 
 # ----- price plan ------------------------------------------------------------------------
@@ -431,6 +496,7 @@ __all__ = [
     "car_limit_for_target",
     "charger_current",
     "energy_needed_kwh",
+    "entities_from_devices",
     "next_deadline",
     "plan_charging",
 ]

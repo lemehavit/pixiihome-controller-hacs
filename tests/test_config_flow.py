@@ -460,6 +460,7 @@ async def test_ev_charging_options_default_to_load_balancing_fuse_and_save():
     result = await flow.async_step_ev_charging(
         {
             "charger": {
+                "charger_device": "easee-device-id",
                 "charger_status_entity": "sensor.eh8pt4lg_status",
                 "charger_power_entity": "sensor.eh8pt4lg_power",
                 "phases": "3",
@@ -482,6 +483,7 @@ async def test_ev_charging_options_default_to_load_balancing_fuse_and_save():
     assert ev["charger_status_entity"] == "sensor.eh8pt4lg_status"
     assert ev["min_current_a"] == 7 and ev["phases"] == 3 and ev["current_l1"] == ""
     assert ev["price_entity"] == "sensor.nordpool"
+    assert ev["charger_device"] == "easee-device-id" and ev["car_device"] == ""
     half = await flow.async_step_ev_charging(
         {"charger": {"charger_status_entity": "sensor.x", "charger_start_entity": "button.go"}}
     )

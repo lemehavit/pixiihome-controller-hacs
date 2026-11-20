@@ -18,7 +18,16 @@ Both switches are off after installation.
 Everything has its own device, **EV charging**, under the Pixii Gateway, with
 its own switches and numbers. They do not change the battery's settings.
 
-Open **Configure → EV charging**. The form has four sections:
+Open **Configure → EV charging**. The simplest setup is to choose only the
+**charger device** and the **car device** (0.5.34). Their entities are found
+automatically (Easee: `…_status`, `…_power`, `…_dynamic_circuit_limit`;
+MySkoda: `…_battery_percentage`, `…_charge_limit`, `…_charging`,
+`…_charger_connected`), and start, pause and current go through the charger
+device's Easee actions, so no helper entities are needed. An entity chosen in
+a field below wins over the one found; the sensor attribute `used_entities`
+shows what is used.
+
+The form has four sections:
 
 | Section | Field | Example (Easee + MySkoda) |
 | --- | --- | --- |

@@ -455,3 +455,64 @@ async def test_controller_power_follows_fuse_house_forecast_and_car() -> None:
     hass.states.set("sensor.easee_status", "disconnected")
     await controller.tick()
     assert controller.car_max_kw is None
+
+
+EASEE = [
+    ("sensor.eh8pt4lg_status", None),
+    ("sensor.eh8pt4lg_power", "power"),
+    ("sensor.eh8pt4lg_dynamic_circuit_limit", "current"),
+    ("switch.eh8pt4lg_smart_charging", None),
+]
+SKODA = [
+    ("sensor.skoda_enyaq_target_battery_percentage", None),
+    ("sensor.skoda_enyaq_battery_percentage", "battery"),
+    ("number.skoda_enyaq_charge_limit", "battery"),
+    ("switch.skoda_enyaq_charging", "switch"),
+    ("switch.skoda_enyaq_battery_care", "switch"),
+    ("binary_sensor.skoda_enyaq_charger_connected", "plug"),
+]
+
+
+def test_entities_are_found_on_the_chosen_devices_and_explicit_ones_win() -> None:
+    from custom_components.pixiihome_controller.control.ev_charging import (
+        entities_from_devices,
+    )
+
+    config = EvChargingConfig(
+        charger_device="easee", car_device="skoda", car_soc_entity="sensor.my_soc"
+    )
+    assert config.configured
+    found = entities_from_devices(config, EASEE, SKODA)
+    assert found.charger_status_entity == "sensor.eh8pt4lg_status"
+    assert found.charger_power_entity == "sensor.eh8pt4lg_power"
+    assert found.charger_limit_entity == "sensor.eh8pt4lg_dynamic_circuit_limit"
+    assert found.car_soc_entity == "sensor.my_soc"
+    assert found.car_limit_entity == "number.skoda_enyaq_charge_limit"
+    assert found.car_charging_switch == "switch.skoda_enyaq_charging"
+    assert found.car_plugged_entity == "binary_sensor.skoda_enyaq_charger_connected"
+    soc = entities_from_devices(EvChargingConfig(car_device="skoda"), [], SKODA)
+    assert soc.car_soc_entity == "sensor.skoda_enyaq_battery_percentage"
+
+
+@pytest.mark.asyncio
+async def test_devices_alone_drive_the_easee_actions() -> None:
+    controller, hass, _ = make_controller(
+        {"ev_smart_charging_enabled": True},
+        options={
+            "charger_status_entity": "", "charger_power_entity": "",
+            "charger_limit_entity": "", "car_soc_entity": "", "car_limit_entity": "",
+            "charger_device": "easee-dev", "car_device": "skoda-dev",
+        },
+        prices=hourly(NOW, [0.1] + [3.0] * 13),
+    )
+    del controller._charger_device_id  # use the real lookup: the chosen device
+    controller._device_entries = lambda device: {  # type: ignore[method-assign]
+        "easee-dev": EASEE, "skoda-dev": SKODA,
+    }.get(device, [])
+    hass.states.set("sensor.eh8pt4lg_status", "awaiting_start")
+    hass.states.set("binary_sensor.skoda_enyaq_charger_connected", "on")
+    hass.states.set("sensor.skoda_enyaq_battery_percentage", 60)
+    hass.states.set("number.skoda_enyaq_charge_limit", 80, min=50, max=100, step=10)
+    await controller.tick()
+    assert ("easee", "action_command",
+            {"device_id": "easee-dev", "action_command": "resume"}) in hass.services.calls

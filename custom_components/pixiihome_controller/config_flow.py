@@ -68,15 +68,17 @@ EV_ENTITY_FIELDS: tuple[tuple[str, str | list[str], str | None], ...] = (
     ("current_l2", "sensor", "current"),
     ("current_l3", "sensor", "current"),
 )
-EVSTRING_FIELDS = tuple(key for key, _, _ in EV_ENTITY_FIELDS)
+EV_DEVICE_FIELDS = ("charger_device", "car_device")
+EVSTRING_FIELDS = (*EV_DEVICE_FIELDS, *(key for key, _, _ in EV_ENTITY_FIELDS))
 EV_SECTIONS: dict[str, tuple[str, ...]] = {
     "charger": (
-        "charger_status_entity", "charger_power_entity", "charger_start_entity",
+        "charger_device", "charger_status_entity", "charger_power_entity", "charger_start_entity",
         "charger_pause_entity", "charger_current_entity", "charger_limit_entity",
         "phases", "min_current_a", "max_current_a",
     ),
     "car": (
-        "car_soc_entity", "car_limit_entity", "car_charging_switch", "car_plugged_entity",
+        "car_device", "car_soc_entity", "car_limit_entity", "car_charging_switch",
+        "car_plugged_entity",
         "battery_capacity_kwh", "charge_efficiency_percent",
     ),
     "price": ("price_entity",),
@@ -456,7 +458,14 @@ class PixiihomeControllerOptionsFlow(config_entries.OptionsFlow):
         for name, keys in EV_SECTIONS.items():
             fields: dict[Any, Any] = {}
             for key in keys:
-                if key in entity_fields:
+                if key in EV_DEVICE_FIELDS:
+                    value = values[key]
+                    marker = (
+                        vol.Optional(key, description={"suggested_value": value})
+                        if value else vol.Optional(key)
+                    )
+                    fields[marker] = selector.DeviceSelector(selector.DeviceSelectorConfig())
+                elif key in entity_fields:
                     domain, device_class = entity_fields[key]
                     value = values[key]
                     marker = (
