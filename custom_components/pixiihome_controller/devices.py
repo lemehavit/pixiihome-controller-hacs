@@ -22,6 +22,7 @@ class PixiiFeature(StrEnum):
     ADAPTIVE_PEAK_SHAVING = "adaptive_peak_shaving"
     PRICE_OPTIMIZATION = "price_optimization"
     ENERGY_FORECAST = "energy_forecast"
+    EV_CHARGING = "ev_charging"
 
 
 FEATURE_NAMES: dict[PixiiFeature, str] = {
@@ -32,6 +33,7 @@ FEATURE_NAMES: dict[PixiiFeature, str] = {
     PixiiFeature.ADAPTIVE_PEAK_SHAVING: "Adaptive peak shaving",
     PixiiFeature.PRICE_OPTIMIZATION: "Price optimization",
     PixiiFeature.ENERGY_FORECAST: "Energy forecast",
+    PixiiFeature.EV_CHARGING: "EV charging",
 }
 
 
@@ -99,6 +101,8 @@ def setting_feature(key: str) -> PixiiFeature:
         return PixiiFeature.ADAPTIVE_PEAK_SHAVING
     if key.startswith("price_"):
         return PixiiFeature.PRICE_OPTIMIZATION
+    if key.startswith("ev_"):
+        return PixiiFeature.EV_CHARGING
     raise ValueError(f"Operational setting has no device group: {key}")
 
 

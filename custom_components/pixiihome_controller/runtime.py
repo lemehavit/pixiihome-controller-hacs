@@ -77,6 +77,7 @@ from .control.production import (
 )
 from .control.settings import ControllerState, OperationalSettings
 from .energy_forecast_service import CONF_ENERGY_FORECAST, EnergyForecastService
+from .ev_charging_controller import EvChargingController
 from .exceptions import SchedulerClientError, SchedulerConfigurationError
 from .load_balancing_observer import LoadBalancingObserver
 from .meter_limit_controller import MeterLimitLoadBalancer
@@ -219,6 +220,7 @@ class RuntimeData:
         init=False, default=None
     )
     energy_forecast: EnergyForecastService | None = field(init=False, default=None)
+    ev_charging: EvChargingController | None = field(init=False, default=None)
     battery_activity: BatteryActivityTracker | None = field(init=False, default=None)
     operational_settings_error: str | None = field(init=False, default=None)
     # Epoch when a manually started battery calibration ends; the automatic
@@ -1144,6 +1146,8 @@ class RuntimeData:
             and self.price_optimization_controller is not None
         ):
             self.price_optimization_controller.request_refresh()
+        if key.startswith("ev_") and self.ev_charging is not None:
+            self.ev_charging.request_tick()
 
     async def async_set_controller_enabled(
         self,
@@ -2042,6 +2046,8 @@ class RuntimeData:
             await stop_step("battery activity", self.battery_activity.stop)
         if self.energy_forecast is not None:
             await stop_step("energy forecast", self.energy_forecast.stop)
+        if self.ev_charging is not None:
+            await stop_step("ev charging", self.ev_charging.stop)
         if self.price_optimization_controller is not None:
             await stop_step("price SOC guard", self.price_optimization_controller.soc_guard.stop)
             await stop_step("price optimization", self.price_optimization_controller.stop)

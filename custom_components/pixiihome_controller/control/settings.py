@@ -167,6 +167,12 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "price_cycle_cost_sek_per_kwh": SettingSpec(
         "price_cycle_cost_sek_per_kwh", 0.0, 0.0, 20.0, 0.01, "SEK/kWh"
     ),
+    "ev_smart_charging_enabled": SettingSpec("ev_smart_charging_enabled", False),
+    "ev_load_balancing_enabled": SettingSpec("ev_load_balancing_enabled", False),
+    "ev_allow_battery_discharge": SettingSpec("ev_allow_battery_discharge", False),
+    "ev_target_soc_percent": SettingSpec("ev_target_soc_percent", 80.0, 10.0, 100.0, 1.0, "%"),
+    "ev_min_soc_percent": SettingSpec("ev_min_soc_percent", 20.0, 0.0, 100.0, 1.0, "%"),
+    "ev_ready_by_hour": SettingSpec("ev_ready_by_hour", 7, 0, 23, 1, "h"),
 }
 
 

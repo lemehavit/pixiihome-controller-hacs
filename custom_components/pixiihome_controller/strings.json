@@ -35,7 +35,8 @@
           "load_balancing": "Load balancing",
           "scheduler": "Scheduler and control policy",
           "price_optimization": "Price optimization",
-          "energy_forecast": "Energy forecast"
+          "energy_forecast": "Energy forecast",
+          "ev_charging": "EV charging"
         }
       },
       "scheduler": {
@@ -106,6 +107,59 @@
           "solar_power_entity_id": "Solar production power sensor",
           "temperature_entity_id": "Outdoor temperature (sensor or weather)"
         }
+      },
+      "ev_charging": {
+        "title": "EV charging",
+        "description": "Choose what EV charging reads and controls. Charger: the status sensor is required. Start and pause entities (button, script or switch) are used if chosen; otherwise the Easee actions on the status sensor's device. Current control (number) sets the charger current if chosen; otherwise the Easee dynamic circuit limit. Car: battery level and charge limit from the car integration. Price: leave empty to use the price sensor of price optimization. Load balancing: grid currents per phase (empty = Pixii measurements), main fuse and margin.",
+        "data": {
+          "charger": "Charger",
+          "car": "Car",
+          "price": "Price",
+          "load_balancing": "Load balancing"
+        },
+        "sections": {
+          "charger": {
+            "name": "Charger",
+            "data": {
+              "charger_status_entity": "Charger status sensor",
+              "charger_power_entity": "Charger power sensor",
+              "charger_start_entity": "Start charging (button, script or switch)",
+              "charger_pause_entity": "Pause charging (button, script or switch)",
+              "charger_current_entity": "Charger current control (number)",
+              "charger_limit_entity": "Charger current limit sensor",
+              "phases": "Charger phases",
+              "min_current_a": "Minimum charger current",
+              "max_current_a": "Maximum charger current"
+            }
+          },
+          "car": {
+            "name": "Car",
+            "data": {
+              "car_soc_entity": "Car battery level sensor",
+              "car_limit_entity": "Car charge limit (number)",
+              "car_charging_switch": "Car charging switch",
+              "car_plugged_entity": "Car plugged in (binary sensor)",
+              "battery_capacity_kwh": "Car battery capacity",
+              "charge_efficiency_percent": "Charging efficiency"
+            }
+          },
+          "price": {
+            "name": "Price",
+            "data": {
+              "price_entity": "Price sensor (empty = price optimization's)"
+            }
+          },
+          "load_balancing": {
+            "name": "Load balancing",
+            "data": {
+              "current_l1": "Grid current L1",
+              "current_l2": "Grid current L2",
+              "current_l3": "Grid current L3",
+              "fuse_a": "Main fuse per phase",
+              "margin_a": "Safety margin"
+            }
+          }
+        }
       }
     },
     "error": {
@@ -114,7 +168,9 @@
       "stale_interval_too_short": "Maximum measurement age must be at least twice the polling interval.",
       "invalid_meter_entities": "Select distinct current and voltage sensors for every phase. Each sensor can be selected only once.",
       "invalid_price_optimization": "Check the price sensor, source ID and planning intervals.",
-      "invalid_energy_forecast": "Select sensors (and a weather entity for temperature only)."
+      "invalid_energy_forecast": "Select sensors (and a weather entity for temperature only).",
+      "invalid_ev_charging": "Check the EV charging entities and limits.",
+      "charger_start_and_pause_required": "Choose both a start and a pause entity, or neither."
     }
   },
   "services": {
@@ -302,6 +358,23 @@
       },
       "battery_activity": {
         "name": "Battery activity"
+      },
+      "ev_charging_status": {
+        "name": "EV charging status",
+        "state": {
+          "disabled": "Disabled",
+          "not_configured": "Not configured",
+          "blocked": "Blocked",
+          "error": "Error",
+          "idle": "Idle",
+          "car_not_connected": "Car not connected",
+          "charging": "Charging",
+          "starting": "Starting charging",
+          "waiting": "Waiting",
+          "target_reached": "Target reached",
+          "paused_for_load": "Paused for high load",
+          "completed": "Completed"
+        }
       }
     },
     "number": {
@@ -454,6 +527,15 @@
       },
       "calibration_duration_seconds": {
         "name": "Calibration duration"
+      },
+      "ev_target_soc_percent": {
+        "name": "EV target battery level"
+      },
+      "ev_min_soc_percent": {
+        "name": "EV charge-now level"
+      },
+      "ev_ready_by_hour": {
+        "name": "EV ready by (hour)"
       }
     },
     "button": {
@@ -515,6 +597,15 @@
       },
       "solar_smart_enabled": {
         "name": "Smart solar charging"
+      },
+      "ev_smart_charging_enabled": {
+        "name": "Smart EV charging"
+      },
+      "ev_load_balancing_enabled": {
+        "name": "EV load balancing"
+      },
+      "ev_allow_battery_discharge": {
+        "name": "EV may charge from home battery"
       }
     }
   }
