@@ -355,7 +355,7 @@ class PixiiEvChargingSensor(SensorEntity):
 
 
 class PixiiEvChargerCurrentSensor(PixiiEvChargingSensor):
-    """EV charger current set by EV load balancing, shown with load balancing."""
+    """EV charger current set by EV load balancing."""
 
     _attr_translation_key = "ev_charger_current"
     _attr_native_unit_of_measurement = "A"
@@ -365,9 +365,6 @@ class PixiiEvChargerCurrentSensor(PixiiEvChargingSensor):
     def __init__(self, runtime: RuntimeData, parent_device_id: str | None = None) -> None:
         super().__init__(runtime, parent_device_id)
         self._attr_unique_id = f"{runtime.serial}_ev_charger_current"
-        self._attr_device_info = feature_device_info(
-            runtime.serial, PixiiFeature.LOAD_BALANCING, parent_device_id,
-        )
 
     @property
     def native_value(self) -> int | None:  # type: ignore[override]

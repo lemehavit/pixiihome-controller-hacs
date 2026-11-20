@@ -91,8 +91,7 @@ SWITCH_DESCRIPTIONS: tuple[PixiiSwitchDescription, ...] = (
     PixiiSwitchDescription(
         "ev_load_balancing_enabled",
         setting_key="ev_load_balancing_enabled",
-        # Shown with load balancing; it is its own setting and never changes the battery.
-        feature=PixiiFeature.LOAD_BALANCING,
+        feature=PixiiFeature.EV_CHARGING,
     ),
     PixiiSwitchDescription(
         "ev_allow_battery_discharge",
