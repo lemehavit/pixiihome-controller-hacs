@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.5.33 — 2026-11-20
+
+Smart elbilsladdning och lastbalansering av laddboxen (Easee + MySkoda).
+Guide: docs/ev-charging.md.
+
+- Egen underenhet *EV charging* under Pixii Gateway med egna switchar och
+  nummer, som inte påverkar batteriets inställningar.
+- Ny inställningssida *Elbilsladdning* i fyra delar: laddbox (status, effekt,
+  valfria start-/pausentiteter och strömstyrning, annars Easee-åtgärder),
+  bil (batterinivå, laddgräns, laddswitch, ansluten), pris (egen prissensor
+  eller prisoptimeringens) och lastbalansering (fasströmmar, säkring, marginal).
+- *Elbil får ladda från hembatteriet* (av som standard): när den är av laddar
+  bilen inte medan prisoptimeringen har en planerad batteriurladdning, utom
+  under *ladda direkt*-nivån eller när tiden till *klar till* inte räcker.
+- *Smart elbilsladdning* (av som standard) startar och pausar laddboxen så att
+  bilen når målnivån till *Elbil klar till* i de billigaste prisintervallen.
+  Under *Elbil ladda direkt under* eller när tiden inte räcker laddar den
+  direkt. Laddtiden räknas från bilens SOC, målet, kapaciteten och den
+  effekt som finns i varje kvart: säkringsutrymme minus husets
+  förbrukningsprognos, uppmätt fasutrymme just nu och den effekt bilen själv
+  tar emot (lärs in under laddningen). Väntar på morgondagens priser när de
+  hinner komma. Bilens egen laddgräns sätts till
+  målet avrundat uppåt (MySkoda tillåter 50–100 % i steg om 10); lägre mål nås
+  genom att laddboxen pausas.
+- *Lastbalansering elbil* (av som standard) sätter laddboxens dynamiska
+  strömgräns så att varje fas håller sig under säkring minus marginal. Sänker
+  direkt, höjer försiktigt, pausar när det inte räcker till minsta ström.
+  När Pixiis lastbalansering är aktiv får bilen företräde före batteriets
+  nätladdning.
+- Varje åtgärd loggas i loggboken med vem och varför; samma orsak syns på
+  laddboxens och bilens egna rader.
+
 ## 0.5.32 — 2026-11-12
 
 Rättningar efter genomgången 12 november.

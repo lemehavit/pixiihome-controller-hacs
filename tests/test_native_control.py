@@ -196,6 +196,7 @@ def test_dashboard_orders_settings_by_function_and_workflow() -> None:
         "Automatic solar charging",
         "Adaptive peak shaving",
         "Price optimization",
+        "EV charging",
     ]
     price_card = next(card for card in cards if card["title"] == "Price optimization")
     assert price_card["entities"][:4] == [

@@ -256,6 +256,7 @@ async def test_load_balancing_options_menu_and_preserved_authority():
         "load_balancing",
         "price_optimization",
         "energy_forecast",
+        "ev_charging",
         "scheduler",
     ]
     result = await flow.async_step_load_balancing(
@@ -437,3 +438,55 @@ async def test_options_flow_makes_no_mqtt_or_scheduler_calls(monkeypatch):
     result = await _options_flow().async_step_init({CONF_SCHEDULER_ENABLED: False})
 
     assert result["type"] == "create_entry"
+
+
+@pytest.mark.asyncio
+async def test_ev_charging_options_default_to_load_balancing_fuse_and_save():
+    from custom_components.pixiihome_controller.control.ev_charging import CONF_EV_CHARGING
+    from custom_components.pixiihome_controller.control.load_balancing import CONF_LOAD_BALANCING
+
+    existing = {
+        CONF_SCHEDULER_PASSWORD: "keep-private",
+        CONF_LOAD_BALANCING: {"fuse_l1": 20, "fuse_l2": 20, "fuse_l3": 20, "margin_a": 2},
+    }
+    flow = _options_flow(options=existing)
+    form = await flow.async_step_ev_charging()
+    sections = {str(key): value.schema.schema for key, value in form["data_schema"].schema.items()}
+    assert list(sections) == ["charger", "car", "price", "load_balancing"]
+    defaults = {
+        str(key): key.default() for key in sections["load_balancing"] if callable(key.default)
+    }
+    assert defaults["fuse_a"] == 20 and defaults["margin_a"] == 2
+    result = await flow.async_step_ev_charging(
+        {
+            "charger": {
+                "charger_status_entity": "sensor.eh8pt4lg_status",
+                "charger_power_entity": "sensor.eh8pt4lg_power",
+                "phases": "3",
+                "min_current_a": 7,
+                "max_current_a": 16,
+            },
+            "car": {
+                "car_soc_entity": "sensor.skoda_enyaq_battery_percentage",
+                "car_limit_entity": "number.skoda_enyaq_charge_limit",
+                "battery_capacity_kwh": 77,
+                "charge_efficiency_percent": 90,
+            },
+            "price": {"price_entity": "sensor.nordpool"},
+            "load_balancing": {"fuse_a": 20, "margin_a": 2},
+        }
+    )
+    saved = _result_data(result)
+    assert saved[CONF_SCHEDULER_PASSWORD] == "keep-private"
+    ev = cast(dict[str, Any], saved[CONF_EV_CHARGING])
+    assert ev["charger_status_entity"] == "sensor.eh8pt4lg_status"
+    assert ev["min_current_a"] == 7 and ev["phases"] == 3 and ev["current_l1"] == ""
+    assert ev["price_entity"] == "sensor.nordpool"
+    half = await flow.async_step_ev_charging(
+        {"charger": {"charger_status_entity": "sensor.x", "charger_start_entity": "button.go"}}
+    )
+    assert half["errors"] == {"base": "charger_start_and_pause_required"}
+    bad = await flow.async_step_ev_charging(
+        {"charger_status_entity": "sensor.x", "car_limit_entity": "sensor.y", "phases": "3"}
+    )
+    assert bad["errors"] == {"base": "invalid_ev_charging"}

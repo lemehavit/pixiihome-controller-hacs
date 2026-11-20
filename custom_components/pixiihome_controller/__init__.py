@@ -53,6 +53,7 @@ from .control.price_optimization import CONF_PRICE_OPTIMIZATION
 from .dashboard import generate_dashboard_config, resolve_dashboard_entity_ids
 from .energy_forecast_service import CONF_ENERGY_FORECAST, EnergyForecastService
 from .entity_cleanup import remove_retired_entities
+from .ev_charging_controller import EvChargingController
 from .exceptions import (
     SchedulerAuthenticationError,
     SchedulerClientError,
@@ -527,6 +528,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     runtime.price_optimization_controller = PriceOptimizationController(runtime)
     runtime.price_optimization_controller.soc_guard.start()
     runtime.energy_forecast = EnergyForecastService(runtime)
+    runtime.ev_charging = EvChargingController(runtime)
     runtime.battery_activity = BatteryActivityTracker(runtime)
     remove_retired_entities(hass, entry, runtime.serial)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
@@ -611,6 +613,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as error:  # noqa: BLE001 - forecasts are optional; never block setup
         runtime.energy_forecast.status = "error"
         runtime.energy_forecast.reason = str(error) or "forecast_start_failed"
+    try:
+        await runtime.ev_charging.start()
+    except Exception as error:  # noqa: BLE001 - EV charging is optional; never block setup
+        runtime.ev_charging.status, runtime.ev_charging.reason = "error", str(error)
     try:
         runtime.battery_activity.start()
     except Exception:  # noqa: BLE001 - the activity log is optional; never block setup

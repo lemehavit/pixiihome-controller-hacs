@@ -152,6 +152,8 @@ async def async_setup_entry(
             PixiiPriceScheduleSensor(runtime, key, parent_device_id)
             for key in ("price_next_charge", "price_next_discharge", "price_scheduled_count")
         )
+    if getattr(runtime, "ev_charging", None) is not None:
+        entities.append(PixiiEvChargingSensor(runtime, parent_device_id))
     if getattr(runtime, "battery_activity", None) is not None:
         entities.append(PixiiBatteryActivitySensor(runtime))
     if getattr(runtime, "energy_forecast", None) is not None:
@@ -289,6 +291,45 @@ class PixiiSolarChargingSensor(SensorEntity):
             runtime.serial,
             PixiiFeature.SOLAR_CHARGING,
             parent_device_id,
+        )
+        self._remove_listener = None
+
+    async def async_added_to_hass(self) -> None:
+        self._remove_listener = self.controller.add_listener(self._state_changed)
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._remove_listener is not None:
+            self._remove_listener()
+            self._remove_listener = None
+
+    def _state_changed(self) -> None:
+        self.schedule_update_ha_state()
+
+    @property
+    def native_value(self) -> str:
+        return self.controller.status
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self.controller.attributes()
+
+
+class PixiiEvChargingSensor(SensorEntity):
+    """EV charging state, the price plan and the charger current with reasons."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "ev_charging_status"
+    _unrecorded_attributes = frozenset({"planned_slots", "recent_actions"})
+
+    def __init__(self, runtime: RuntimeData, parent_device_id: str | None = None) -> None:
+        controller = runtime.ev_charging
+        if controller is None:
+            raise RuntimeError("EV charging sensor requires a controller")
+        self.runtime = runtime
+        self.controller = controller
+        self._attr_unique_id = f"{runtime.serial}_ev_charging_status"
+        self._attr_device_info = feature_device_info(
+            runtime.serial, PixiiFeature.EV_CHARGING, parent_device_id,
         )
         self._remove_listener = None
 

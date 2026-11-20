@@ -35,7 +35,8 @@
           "load_balancing": "Lastbalansering",
           "scheduler": "Scheman och styrpolicy",
           "price_optimization": "Prisoptimering",
-          "energy_forecast": "Energiprognos"
+          "energy_forecast": "Energiprognos",
+          "ev_charging": "Elbilsladdning"
         }
       },
       "scheduler": {
@@ -105,6 +106,59 @@
           "solar_power_entity_id": "Sensor för solproduktion (effekt)",
           "temperature_entity_id": "Utetemperatur (sensor eller väder)"
         }
+      },
+      "ev_charging": {
+        "title": "Elbilsladdning",
+        "description": "Välj vad elbilsladdningen läser och styr. Laddbox: statussensorn krävs. Start- och pausentiteter (knapp, skript eller switch) används om de väljs; annars Easee-åtgärderna på statussensorns enhet. Strömstyrning (number) sätter laddströmmen om den väljs; annars Easees dynamiska kretsgräns. Bil: batterinivå och laddgräns från bilintegrationen. Pris: lämna tomt för att använda prisoptimeringens prissensor. Lastbalansering: nätström per fas (tomt = Pixiis mätning), huvudsäkring och marginal.",
+        "data": {
+          "charger": "Laddbox",
+          "car": "Bil",
+          "price": "Pris",
+          "load_balancing": "Lastbalansering"
+        },
+        "sections": {
+          "charger": {
+            "name": "Laddbox",
+            "data": {
+              "charger_status_entity": "Laddboxens statussensor",
+              "charger_power_entity": "Laddboxens effektsensor",
+              "charger_start_entity": "Starta laddning (knapp, skript eller switch)",
+              "charger_pause_entity": "Pausa laddning (knapp, skript eller switch)",
+              "charger_current_entity": "Styrning av laddström (number)",
+              "charger_limit_entity": "Sensor för laddboxens strömgräns",
+              "phases": "Laddboxens faser",
+              "min_current_a": "Lägsta laddström",
+              "max_current_a": "Högsta laddström"
+            }
+          },
+          "car": {
+            "name": "Bil",
+            "data": {
+              "car_soc_entity": "Bilens batterinivå",
+              "car_limit_entity": "Bilens laddgräns (number)",
+              "car_charging_switch": "Bilens laddswitch",
+              "car_plugged_entity": "Bil ansluten (binärsensor)",
+              "battery_capacity_kwh": "Bilens batterikapacitet",
+              "charge_efficiency_percent": "Laddverkningsgrad"
+            }
+          },
+          "price": {
+            "name": "Pris",
+            "data": {
+              "price_entity": "Prissensor (tomt = prisoptimeringens)"
+            }
+          },
+          "load_balancing": {
+            "name": "Lastbalansering",
+            "data": {
+              "current_l1": "Nätström L1",
+              "current_l2": "Nätström L2",
+              "current_l3": "Nätström L3",
+              "fuse_a": "Huvudsäkring per fas",
+              "margin_a": "Säkerhetsmarginal"
+            }
+          }
+        }
       }
     },
     "error": {
@@ -113,7 +167,9 @@
       "stale_interval_too_short": "Högsta mätålder måste vara minst två mätintervall.",
       "invalid_meter_entities": "Välj olika ström- och spänningssensorer för varje fas. Samma sensor får bara användas en gång.",
       "invalid_price_optimization": "Kontrollera prissensor, käll-ID och planeringsintervall.",
-      "invalid_energy_forecast": "Välj sensorer (och endast väderentitet för temperatur)."
+      "invalid_energy_forecast": "Välj sensorer (och endast väderentitet för temperatur).",
+      "invalid_ev_charging": "Kontrollera entiteter och gränser för elbilsladdning.",
+      "charger_start_and_pause_required": "Välj både start- och pausentitet, eller ingen av dem."
     }
   },
   "services": {
@@ -291,6 +347,23 @@
       },
       "battery_activity": {
         "name": "Batteriaktivitet"
+      },
+      "ev_charging_status": {
+        "name": "Status för elbilsladdning",
+        "state": {
+          "disabled": "Avstängd",
+          "not_configured": "Inte konfigurerad",
+          "blocked": "Blockerad",
+          "error": "Fel",
+          "idle": "Vilar",
+          "car_not_connected": "Bilen inte ansluten",
+          "charging": "Laddar",
+          "starting": "Startar laddning",
+          "waiting": "Väntar",
+          "target_reached": "Målnivå nådd",
+          "paused_for_load": "Pausad, hög last",
+          "completed": "Klar"
+        }
       }
     },
     "number": {
@@ -368,6 +441,15 @@
       },
       "calibration_duration_seconds": {
         "name": "Kalibreringens längd"
+      },
+      "ev_target_soc_percent": {
+        "name": "Elbil målnivå"
+      },
+      "ev_min_soc_percent": {
+        "name": "Elbil ladda direkt under"
+      },
+      "ev_ready_by_hour": {
+        "name": "Elbil klar till (timme)"
       }
     },
     "switch": {
@@ -391,6 +473,15 @@
       },
       "solar_smart_enabled": {
         "name": "Smart solladdning"
+      },
+      "ev_smart_charging_enabled": {
+        "name": "Smart elbilsladdning"
+      },
+      "ev_load_balancing_enabled": {
+        "name": "Lastbalansering elbil"
+      },
+      "ev_allow_battery_discharge": {
+        "name": "Elbil får ladda från hembatteriet"
       }
     },
     "button": {

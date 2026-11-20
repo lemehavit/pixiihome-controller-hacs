@@ -18,6 +18,7 @@ configure it, and how to tell whether it is working. It describes the public
 10. [Actions, advanced controls and simulator](actions-and-simulator.md)
 11. [Worked examples](examples.md)
 12. [Status messages and troubleshooting](troubleshooting.md)
+13. [EV charging: smart charging and load balancing](ev-charging.md)
 
 Each feature guide follows the same sequence: purpose, prerequisites,
 configuration, expected behavior and what to check when it waits or blocks.

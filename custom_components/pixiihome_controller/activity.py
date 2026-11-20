@@ -20,13 +20,20 @@ EVENT_CAUSE = f"{DOMAIN}_cause"
 
 
 def log_activity(
-    runtime: Any, status_key: str, message: str, cause: str | None = None
+    runtime: Any,
+    status_key: str,
+    message: str,
+    cause: str | None = None,
+    *,
+    context: Any = None,
 ) -> None:
     """Fire one logbook entry attached to the feature's status sensor.
 
     ``cause`` says who did it and why. It is fired first as its own event in
     the same context, so the logbook shows it under *What happened* for the
     entry. Logging must never affect control, so every failure is swallowed.
+    Pass ``context`` to share it with a service call made for the same action,
+    so the changed entity's own logbook line shows the same *What happened*.
     """
     try:
         hass = getattr(runtime, "hass", None)
@@ -38,11 +45,15 @@ def log_activity(
         if entity_id is not None:
             data["entity_id"] = entity_id
         if not cause:
-            fire(EVENT_LOGBOOK_ENTRY, data)
+            if context is None:
+                fire(EVENT_LOGBOOK_ENTRY, data)
+            else:
+                fire(EVENT_LOGBOOK_ENTRY, data, context=context)
             return
-        from homeassistant.core import Context
+        if context is None:
+            from homeassistant.core import Context
 
-        context = Context()
+            context = Context()
         fire(EVENT_CAUSE, {"message": cause}, context=context)
         fire(EVENT_LOGBOOK_ENTRY, data, context=context)
     except Exception:  # noqa: BLE001 - activity logging is best effort only

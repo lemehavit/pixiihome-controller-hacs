@@ -8,6 +8,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.components.mqtt.util import async_wait_for_mqtt_client
+from homeassistant.data_entry_flow import section
 from homeassistant.helpers import selector
 
 from .const import (
@@ -25,6 +26,7 @@ from .const import (
     DOMAIN,
     NAME,
 )
+from .control.ev_charging import CONF_EV_CHARGING, EvChargingConfig
 from .control.load_balancing import CONF_LOAD_BALANCING, LoadBalancingConfig
 from .control.models import RuntimeMode
 from .control.policy import AutomationPolicy
@@ -48,6 +50,38 @@ _USER_SCHEMA = vol.Schema(
         vol.Optional(CONF_SERIAL): str,
     }
 )
+
+
+EV_ENTITY_FIELDS: tuple[tuple[str, str | list[str], str | None], ...] = (
+    ("charger_status_entity", "sensor", None),
+    ("charger_power_entity", "sensor", "power"),
+    ("charger_limit_entity", "sensor", "current"),
+    ("car_soc_entity", "sensor", None),
+    ("car_limit_entity", "number", None),
+    ("car_charging_switch", "switch", None),
+    ("car_plugged_entity", "binary_sensor", None),
+    ("charger_start_entity", ["button", "script", "switch", "input_boolean"], None),
+    ("charger_pause_entity", ["button", "script", "switch", "input_boolean"], None),
+    ("charger_current_entity", ["number", "input_number"], None),
+    ("price_entity", "sensor", None),
+    ("current_l1", "sensor", "current"),
+    ("current_l2", "sensor", "current"),
+    ("current_l3", "sensor", "current"),
+)
+EVSTRING_FIELDS = tuple(key for key, _, _ in EV_ENTITY_FIELDS)
+EV_SECTIONS: dict[str, tuple[str, ...]] = {
+    "charger": (
+        "charger_status_entity", "charger_power_entity", "charger_start_entity",
+        "charger_pause_entity", "charger_current_entity", "charger_limit_entity",
+        "phases", "min_current_a", "max_current_a",
+    ),
+    "car": (
+        "car_soc_entity", "car_limit_entity", "car_charging_switch", "car_plugged_entity",
+        "battery_capacity_kwh", "charge_efficiency_percent",
+    ),
+    "price": ("price_entity",),
+    "load_balancing": ("current_l1", "current_l2", "current_l3", "fuse_a", "margin_a"),
+}
 
 
 def normalize_serial(value: Any) -> str | None:
@@ -242,7 +276,8 @@ class PixiihomeControllerOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_menu(
             step_id="init",
             menu_options=[
-                "load_balancing", "price_optimization", "energy_forecast", "scheduler",
+                "load_balancing", "price_optimization", "energy_forecast", "ev_charging",
+                "scheduler",
             ],
         )
 
@@ -364,6 +399,94 @@ class PixiihomeControllerOptionsFlow(config_entries.OptionsFlow):
             )
         return self.async_show_form(
             step_id="energy_forecast", data_schema=vol.Schema(schema), errors=errors,
+        )
+
+    async def async_step_ev_charging(self, user_input: dict[str, Any] | None = None):
+        """Choose what EV charging reads and controls, grouped by charger, car, price, fuse."""
+        current = self._config_entry.options.get(CONF_EV_CHARGING)
+        try:
+            config = EvChargingConfig.from_mapping(current)
+        except (TypeError, ValueError):
+            config = EvChargingConfig()
+        if not isinstance(current, dict):
+            try:
+                balancing = LoadBalancingConfig.from_mapping(
+                    self._config_entry.options.get(CONF_LOAD_BALANCING)
+                )
+                config = EvChargingConfig(
+                    fuse_a=min(balancing.fuses), margin_a=balancing.margin_a
+                )
+            except (TypeError, ValueError):
+                pass
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            flat: dict[str, Any] = {}
+            for key, value in user_input.items():
+                if key in EV_SECTIONS and isinstance(value, dict):
+                    flat.update(value)
+                else:
+                    flat[key] = value
+            values = {key: flat.get(key, "") for key in EVSTRING_FIELDS}
+            values.update({k: v for k, v in flat.items() if k not in EVSTRING_FIELDS})
+            try:
+                if "phases" in values:
+                    values["phases"] = int(values["phases"])
+                config = EvChargingConfig.from_mapping(values)
+            except (TypeError, ValueError) as error:
+                errors["base"] = (
+                    str(error)
+                    if str(error) in {"margin_exceeds_fuse", "charger_start_and_pause_required"}
+                    else "invalid_ev_charging"
+                )
+            else:
+                options = {**self._config_entry.options, CONF_EV_CHARGING: config.as_dict()}
+                return self.async_create_entry(title="", data=options)
+        values = config.as_dict()
+        entity_fields = {key: (domain, device_class) for key, domain, device_class
+                         in EV_ENTITY_FIELDS}
+        numbers = {
+            "battery_capacity_kwh": (5, 250, 0.1, "kWh"),
+            "charge_efficiency_percent": (50, 100, 1, "%"),
+            "min_current_a": (6, 32, 1, "A"),
+            "max_current_a": (6, 63, 1, "A"),
+            "fuse_a": (6, 250, 1, "A"),
+            "margin_a": (0, 20, 0.5, "A"),
+        }
+        schema: dict[Any, Any] = {}
+        for name, keys in EV_SECTIONS.items():
+            fields: dict[Any, Any] = {}
+            for key in keys:
+                if key in entity_fields:
+                    domain, device_class = entity_fields[key]
+                    value = values[key]
+                    marker = (
+                        vol.Optional(key, description={"suggested_value": value})
+                        if value else vol.Optional(key)
+                    )
+                    filter_: selector.EntityWithDeviceFilterSelectorConfig = (
+                        {"domain": domain, "device_class": device_class}
+                        if device_class else {"domain": domain}
+                    )
+                    fields[marker] = selector.EntitySelector(
+                        selector.EntitySelectorConfig(filter=filter_)
+                    )
+                elif key == "phases":
+                    fields[vol.Required(key, default=str(values[key]))] = (
+                        selector.SelectSelector(selector.SelectSelectorConfig(options=["1", "3"]))
+                    )
+                else:
+                    low, high, step, unit = numbers[key]
+                    fields[vol.Required(key, default=values[key])] = selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=low, max=high, step=step, unit_of_measurement=unit,
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    )
+            schema[vol.Required(name)] = section(
+                vol.Schema(fields), {"collapsed": name == "load_balancing"}
+            )
+        return self.async_show_form(
+            step_id="ev_charging", data_schema=vol.Schema(schema), errors=errors
         )
 
     async def async_step_load_balancing(self, user_input: dict[str, Any] | None = None):
