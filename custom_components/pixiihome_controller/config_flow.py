@@ -67,6 +67,12 @@ EV_ENTITY_FIELDS: tuple[tuple[str, str | list[str], str | None], ...] = (
     ("current_l1", "sensor", "current"),
     ("current_l2", "sensor", "current"),
     ("current_l3", "sensor", "current"),
+    ("grid_power_entity", "sensor", "power"),
+    ("grid_export_entity", "sensor", "power"),
+    ("grid_import_entity", "sensor", "power"),
+    ("solar_power_entity", "sensor", "power"),
+    ("solar_forecast_today", "sensor", None),
+    ("solar_forecast_tomorrow", "sensor", None),
 )
 EV_DEVICE_FIELDS = ("charger_device", "car_device")
 EVSTRING_FIELDS = (*EV_DEVICE_FIELDS, *(key for key, _, _ in EV_ENTITY_FIELDS))
@@ -83,6 +89,10 @@ EV_SECTIONS: dict[str, tuple[str, ...]] = {
     ),
     "price": ("price_entity",),
     "load_balancing": ("current_l1", "current_l2", "current_l3", "fuse_a", "margin_a"),
+    "solar": (
+        "grid_power_entity", "grid_export_entity", "grid_import_entity",
+        "solar_power_entity", "solar_forecast_today", "solar_forecast_tomorrow",
+    ),
 }
 
 
@@ -437,7 +447,10 @@ class PixiihomeControllerOptionsFlow(config_entries.OptionsFlow):
             except (TypeError, ValueError) as error:
                 errors["base"] = (
                     str(error)
-                    if str(error) in {"margin_exceeds_fuse", "charger_start_and_pause_required"}
+                    if str(error) in {
+                        "margin_exceeds_fuse", "charger_start_and_pause_required",
+                        "grid_import_and_export_required",
+                    }
                     else "invalid_ev_charging"
                 )
             else:
@@ -492,7 +505,7 @@ class PixiihomeControllerOptionsFlow(config_entries.OptionsFlow):
                         )
                     )
             schema[vol.Required(name)] = section(
-                vol.Schema(fields), {"collapsed": name == "load_balancing"}
+                vol.Schema(fields), {"collapsed": name in {"load_balancing", "solar"}}
             )
         return self.async_show_form(
             step_id="ev_charging", data_schema=vol.Schema(schema), errors=errors

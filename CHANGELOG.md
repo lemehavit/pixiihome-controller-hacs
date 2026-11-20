@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.5.36 — 2026-11-20
+
+Solladdning av elbilen, en egen funktion under *EV charging*.
+
+- Ny switch *Solladdning elbil* (av som standard). När bilen är ansluten
+  följer laddströmmen solöverskottet (export minus köp plus det bilen redan
+  tar), mellan lägsta och högsta ström. Den startar när överskottet räckt till
+  lägsta strömmen i *solstart fördröjning* (3 min) och pausar när det inte
+  räckt i *solstopp fördröjning* (5 min).
+- *Elbil sälj solel hellre från* (1,00 kr/kWh): är priset nu minst så säljs
+  överskottet i stället.
+- *Elbil målnivå solladdning* (100 %), *Elbil tillåtet nätköp vid
+  solladdning* (0 kW, låter den starta och fortsätta med lite köpt el) och
+  *Elbil före hembatteri vid solöverskott* (av: hembatteriet tar överskottet
+  först).
+- Ny sektion *Solladdning* i konfigurationen: nätets effekt (en sensor med
+  + köp/− export, eller export- och importsensorer; tomt = Pixiis mätare)
+  solproduktion nu (växelriktarens effekt; tomt = energiprognosens) och
+  solprognos idag/imorgon (tomt = energiprognosens, t.ex. Solcast).
+  Överskottet blir aldrig större än solproduktionen, och hembatteriets
+  urladdning dras bort, så export från batteriet räknas aldrig som sol.
+- Med solladdning på räknar smartladdningen med solprognosen: prognosens
+  överskott kostar bara spotpriset, medan nätel även kostar nätavgiften från
+  prisoptimeringens inställningar, så soliga kvartar väljs före samma pris på
+  natten.
+- Elbilens lastbalansering gäller fortfarande: den lägsta av de två
+  strömmarna används. Alla starter, pauser och strömändringar loggas med vem
+  och varför.
+
 ## 0.5.35 — 2026-11-20
 
 - Elbilsladdning: när laddboxens och bilens enheter är valda hittas alla

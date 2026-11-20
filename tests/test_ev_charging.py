@@ -516,3 +516,198 @@ async def test_devices_alone_drive_the_easee_actions() -> None:
     await controller.tick()
     assert ("easee", "action_command",
             {"device_id": "easee-dev", "action_command": "resume"}) in hass.services.calls
+
+
+# ----- solar charging --------------------------------------------------------------------
+
+
+def test_solar_current_follows_the_surplus() -> None:
+    from custom_components.pixiihome_controller.control.ev_charging import solar_current
+
+    # 3 kW exported while the car draws nothing: 4.3 A on three phases, below 6 A.
+    assert solar_current(export_w=3000, ev_power_w=0, phases=3, voltage_v=230,
+                         min_current_a=6, max_current_a=16)[0] is None
+    # One phase: 13 A.
+    assert solar_current(export_w=3000, ev_power_w=0, phases=1, voltage_v=230,
+                         min_current_a=6, max_current_a=16)[0] == 13
+    # The car already draws 4.14 kW (6 A) and 1.4 kW is still exported: 8 A.
+    assert solar_current(export_w=1400, ev_power_w=4140, phases=3, voltage_v=230,
+                         min_current_a=6, max_current_a=16)[0] == 8
+    # Importing 1 kW while charging at 6 A: 4.5 A, unless 1 kW grid import is allowed.
+    assert solar_current(export_w=-1000, ev_power_w=4140, phases=3, voltage_v=230,
+                         min_current_a=6, max_current_a=16)[0] is None
+    assert solar_current(export_w=-1000, ev_power_w=4140, phases=3, voltage_v=230,
+                         min_current_a=6, max_current_a=16, grid_allowance_w=1000)[0] == 6
+
+
+def test_forecast_sun_makes_an_interval_cheaper_than_the_same_grid_price() -> None:
+    prices = hourly(NOW, [1.0] * 13)
+    sunny = NOW + timedelta(hours=8)
+
+    def solar(start: datetime, end: datetime) -> float:
+        return 11.0 if start >= sunny and end <= sunny + timedelta(hours=2) else 0.0
+
+    result = plan(soc=70.0, prices=prices, solar_kw_at=solar, grid_extra_cost=0.65,
+                  sell_price=2.0)
+    assert [s.start for s in result.slots] == [sunny]
+    assert result.slots[0].solar_kw == 11.0
+    assert result.slots[0].price == pytest.approx(1.0)
+    # At or above the sell-instead price the surplus is sold: no discount.
+    sold = plan(soc=70.0, prices=prices, solar_kw_at=solar, grid_extra_cost=0.65,
+                sell_price=1.0)
+    assert all(s.solar_kw == 0 for s in sold.slots)
+
+
+def test_grid_export_needs_import_too() -> None:
+    with pytest.raises(ValueError, match="grid_import_and_export_required"):
+        EvChargingConfig(grid_export_entity="sensor.export")
+    assert EvChargingConfig(
+        grid_export_entity="sensor.export", grid_import_entity="sensor.import"
+    ).grid_export_entity
+
+
+def test_solar_settings_default_off() -> None:
+    settings = OperationalSettings.defaults()
+    assert settings.get("ev_solar_charging_enabled") is False
+    assert settings.get("ev_solar_car_before_battery") is False
+    assert setting_feature("ev_solar_charging_enabled") is PixiiFeature.EV_CHARGING
+
+
+SOLAR_OPTIONS = {
+    "grid_export_entity": "sensor.export",
+    "grid_import_entity": "sensor.import",
+}
+
+
+@pytest.mark.asyncio
+async def test_solar_charging_starts_after_the_delay_follows_and_pauses_without_sun() -> None:
+    controller, hass, tick = make_controller(
+        {"ev_solar_charging_enabled": True}, SOLAR_OPTIONS, prices=hourly(NOW, [0.5] * 24)
+    )
+    hass.states.set("sensor.easee_status", "awaiting_start")
+    hass.states.set("sensor.car_soc", 60)
+    hass.states.set("sensor.export", 5000, unit_of_measurement="W")
+    hass.states.set("sensor.import", 0, unit_of_measurement="W")
+    await controller.tick()
+    # The car limit follows the solar target (100 %); nothing starts before the delay.
+    assert hass.services.calls == [
+        ("number", "set_value", {"entity_id": "number.car_limit", "value": 100.0})
+    ]
+    assert controller.solar_reason == "sun_confirming"
+
+    hass.services.calls.clear()
+    tick[0] = 181
+    await controller.tick()
+    assert hass.services.calls[0][:2] == ("easee", "set_circuit_dynamic_limit")
+    assert hass.services.calls[0][2]["current_p1"] == 7  # 5 kW / 690 V
+    assert hass.services.calls[1] == (
+        "easee", "action_command", {"device_id": "easee-device", "action_command": "resume"}
+    )
+    causes = [data["message"] for event, data in hass.bus.events if event.endswith("_cause")]
+    assert any("solar surplus" in cause for cause in causes)
+
+    # Charging at 7 A (4.83 kW) with 1.4 kW still exported: up to 9 A after a minute.
+    hass.services.calls.clear()
+    tick[0] = 260
+    hass.states.set("sensor.easee_status", "charging")
+    hass.states.set("sensor.easee_limit", 7)
+    hass.states.set("sensor.easee_power", 4.83, unit_of_measurement="kW")
+    hass.states.set("sensor.export", 1400, unit_of_measurement="W")
+    await controller.tick()
+    assert hass.services.calls[-1][2]["current_p1"] == 9
+    assert controller.status == "solar_charging"
+
+    # A cloud: importing 3 kW. The minimum current is held through the stop delay.
+    hass.services.calls.clear()
+    hass.states.set("sensor.easee_limit", 9)
+    hass.states.set("sensor.easee_power", 6.2, unit_of_measurement="kW")
+    hass.states.set("sensor.export", 0, unit_of_measurement="W")
+    hass.states.set("sensor.import", 3000, unit_of_measurement="W")
+    tick[0] = 300
+    await controller.tick()
+    assert hass.services.calls[-1][2]["current_p1"] == 6
+    assert controller.solar_reason == "solar_dipping"
+    hass.services.calls.clear()
+    tick[0] = 601
+    hass.states.set("sensor.easee_limit", 6)
+    await controller.tick()
+    assert ("easee", "action_command",
+            {"device_id": "easee-device", "action_command": "pause"}) in hass.services.calls
+    assert not controller.solar_active
+
+
+@pytest.mark.asyncio
+async def test_solar_surplus_is_sold_at_or_above_the_sell_price() -> None:
+    controller, hass, tick = make_controller(
+        {"ev_solar_charging_enabled": True, "ev_solar_start_delay_minutes": 0},
+        SOLAR_OPTIONS, prices=hourly(NOW, [1.5] * 24),
+    )
+    hass.states.set("sensor.easee_status", "charging")
+    hass.states.set("sensor.car_soc", 60)
+    hass.states.set("sensor.export", 8000, unit_of_measurement="W")
+    hass.states.set("sensor.import", 0, unit_of_measurement="W")
+    await controller.tick()
+    assert controller.solar_reason == "selling_is_better"
+    assert ("easee", "action_command",
+            {"device_id": "easee-device", "action_command": "pause"}) in hass.services.calls
+
+
+@pytest.mark.asyncio
+async def test_solar_reads_pixii_meter_when_no_grid_entity_is_chosen() -> None:
+    controller, hass, tick = make_controller(
+        {"ev_solar_charging_enabled": True, "ev_solar_start_delay_minutes": 0},
+        prices=hourly(NOW, [0.5] * 24),
+    )
+
+    class Telemetry:
+        def value(self, family: str, key: str) -> Any:
+            return -6000 if (family, key) == ("meter", "meter_w") else None
+
+        def is_fresh(self, family: str, **kwargs: Any) -> bool:
+            return family == "meter"
+
+    controller.runtime.telemetry = Telemetry()
+    hass.states.set("sensor.easee_status", "awaiting_start")
+    hass.states.set("sensor.car_soc", 60)
+    await controller.tick()
+    assert controller.solar_active
+    assert controller.solar_limit_a == 8  # 6 kW / 690 V
+    assert controller.attributes()["grid_power_source"] == "Pixii meter"
+
+
+def test_solar_production_caps_the_surplus() -> None:
+    from custom_components.pixiihome_controller.control.ev_charging import solar_current
+
+    # 8 kW exported but the panels make only 3 kW: the rest is the battery.
+    assert solar_current(export_w=8000, ev_power_w=0, phases=1, voltage_v=230,
+                         min_current_a=6, max_current_a=32, solar_w=3000)[0] == 13
+
+
+@pytest.mark.asyncio
+async def test_battery_discharge_export_is_not_taken_for_sun() -> None:
+    controller, hass, tick = make_controller(
+        {"ev_solar_charging_enabled": True, "ev_solar_start_delay_minutes": 0},
+        {**SOLAR_OPTIONS, "solar_power_entity": "sensor.inverter"},
+        prices=hourly(NOW, [0.5] * 24),
+    )
+    hass.states.set("sensor.easee_status", "awaiting_start")
+    hass.states.set("sensor.car_soc", 60)
+    hass.states.set("sensor.export", 6000, unit_of_measurement="W")
+    hass.states.set("sensor.import", 0, unit_of_measurement="W")
+    hass.states.set("sensor.inverter", 0, unit_of_measurement="W")
+    await controller.tick()
+    assert not controller.solar_active
+    assert controller.solar_reason == "waiting_for_sun"
+    # Without a solar sensor, the Pixii battery's own discharge is subtracted.
+    controller2, hass2, _ = make_controller(
+        {"ev_solar_charging_enabled": True, "ev_solar_start_delay_minutes": 0},
+        SOLAR_OPTIONS, prices=hourly(NOW, [0.5] * 24),
+    )
+    controller2.runtime.battery = SimpleNamespace(power_w=-6000.0)
+    hass2.states.set("sensor.easee_status", "awaiting_start")
+    hass2.states.set("sensor.car_soc", 60)
+    hass2.states.set("sensor.export", 6000, unit_of_measurement="W")
+    hass2.states.set("sensor.import", 0, unit_of_measurement="W")
+    await controller2.tick()
+    assert not controller2.solar_active
+    assert "discharges" in controller2.solar_detail

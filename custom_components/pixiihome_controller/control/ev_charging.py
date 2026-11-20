@@ -44,6 +44,12 @@ class EvChargingConfig:
     current_l1: str = ""
     current_l2: str = ""
     current_l3: str = ""
+    grid_power_entity: str = ""
+    grid_export_entity: str = ""
+    grid_import_entity: str = ""
+    solar_power_entity: str = ""
+    solar_forecast_today: str = ""
+    solar_forecast_tomorrow: str = ""
     phases: int = 3
     battery_capacity_kwh: float = 77.0
     charge_efficiency_percent: float = 90.0
@@ -69,6 +75,12 @@ class EvChargingConfig:
             "current_l1": ("sensor.",),
             "current_l2": ("sensor.",),
             "current_l3": ("sensor.",),
+            "grid_power_entity": ("sensor.",),
+            "grid_export_entity": ("sensor.",),
+            "grid_import_entity": ("sensor.",),
+            "solar_power_entity": ("sensor.",),
+            "solar_forecast_today": ("sensor.",),
+            "solar_forecast_tomorrow": ("sensor.",),
         }
         for key in ("charger_device", "car_device"):
             if not isinstance(getattr(self, key), str):
@@ -97,6 +109,8 @@ class EvChargingConfig:
             raise ValueError("invalid_config")
         if bool(self.charger_start_entity) != bool(self.charger_pause_entity):
             raise ValueError("charger_start_and_pause_required")
+        if bool(self.grid_export_entity) != bool(self.grid_import_entity):
+            raise ValueError("grid_import_and_export_required")
         if self.margin_a >= self.fuse_a:
             raise ValueError("margin_exceeds_fuse")
         if self.current_entities and len(self.current_entities) != len(
@@ -107,6 +121,10 @@ class EvChargingConfig:
     @property
     def configured(self) -> bool:
         return bool(self.charger_status_entity or self.charger_device)
+
+    @property
+    def solar_forecast_entities(self) -> tuple[str, ...]:
+        return tuple(e for e in (self.solar_forecast_today, self.solar_forecast_tomorrow) if e)
 
     @property
     def current_entities(self) -> tuple[str, ...]:
@@ -208,6 +226,7 @@ class EvSlot:
     end: datetime
     price: float
     power_kw: float = 0.0
+    solar_kw: float = 0.0
 
     @property
     def hours(self) -> float:
@@ -244,7 +263,8 @@ class EvPlan:
             ),
             "planned_slots": [
                 {"start": s.start.isoformat(), "end": s.end.isoformat(),
-                 "price": round(s.price, 3), "power_kw": round(s.power_kw, 2)}
+                 "price": round(s.price, 3), "power_kw": round(s.power_kw, 2),
+                 **({"solar_kw": round(s.solar_kw, 2)} if s.solar_kw > 0 else {})}
                 for s in _merge(self.slots)
             ],
             **self.extra,
@@ -283,6 +303,9 @@ def plan_charging(
     allow_battery: bool = False,
     committed_until: datetime | None = None,
     power_at: Callable[[datetime, datetime], float] | None = None,
+    solar_kw_at: Callable[[datetime, datetime], float | None] | None = None,
+    grid_extra_cost: float = 0.0,
+    sell_price: float | None = None,
 ) -> EvPlan:
     """Choose the cheapest price intervals before the deadline that cover the need.
 
@@ -294,6 +317,12 @@ def plan_charging(
     ``power_at(start, end)`` is the charging power available in that period
     (fuse room, house load, what the car accepts); ``power_kw`` is used when
     it is not given and for the time after the last known price.
+
+    ``solar_kw_at(start, end)`` is the forecast solar surplus (solar minus
+    house load). Solar the car uses costs only the spot price it would have
+    been sold for, while grid energy also costs ``grid_extra_cost`` (grid fee,
+    tax), so intervals with sun rank as cheaper. At or above ``sell_price``
+    the surplus is sold instead and gives no discount.
     """
     if soc is None:
         return EvPlan(False, "car_soc_unknown", deadline=deadline,
@@ -333,7 +362,19 @@ def plan_charging(
         if not allow_battery and any(a < end and start < b for a, b in discharges):
             known_end = end if known_end is None else max(known_end, end)
             continue
-        slots.append(EvSlot(start, end, float(price), max(0.0, power(start, end))))
+        slot_power = max(0.0, power(start, end))
+        solar_kw = 0.0
+        effective = float(price)
+        if solar_kw_at is not None and (sell_price is None or price < sell_price):
+            forecast = solar_kw_at(start, end)
+            if forecast is not None and _finite(forecast) and forecast > 0 and slot_power > 0:
+                solar_kw = min(float(forecast), slot_power)
+                effective += (1 - solar_kw / slot_power) * max(0.0, grid_extra_cost)
+            else:
+                effective += max(0.0, grid_extra_cost)
+        elif solar_kw_at is not None:
+            effective += max(0.0, grid_extra_cost)
+        slots.append(EvSlot(start, end, effective, slot_power, solar_kw))
         known_end = end if known_end is None else max(known_end, end)
     if known_end is None:
         return EvPlan(False, "waiting_for_prices", need, hours, deadline,
@@ -375,9 +416,13 @@ def plan_charging(
                       detail="Charging started in this price interval and finishes it"
                       + ("" if current_price is None else f" ({current_price:.2f} kr/kWh)"))
     if current is not None:
+        sun = (
+            "" if current.solar_kw <= 0
+            else f" (about {current.solar_kw:.1f} kW of it expected from solar surplus)"
+        )
         return EvPlan(True, "cheap_price", need, hours, deadline, tuple(chosen), average,
                       detail=f"{current.price:.2f} kr/kWh is among the cheapest "
-                             f"{weight:.1f} h before the ready-by time")
+                             f"{weight:.1f} h before the ready-by time{sun}")
     upcoming = next((s for s in chosen if s.start > now), None)
     if in_discharge:
         return EvPlan(False, "battery_discharging", need, hours, deadline, tuple(chosen),
@@ -412,7 +457,8 @@ def _merge(slots: Sequence[EvSlot]) -> list[EvSlot]:
             hours = last.hours + slot.hours
             price = (last.price * last.hours + slot.price * slot.hours) / hours
             power = (last.energy_kwh + slot.energy_kwh) / hours
-            merged[-1] = EvSlot(last.start, slot.end, price, power)
+            solar = (last.solar_kw * last.hours + slot.solar_kw * slot.hours) / hours
+            merged[-1] = EvSlot(last.start, slot.end, price, power, solar)
         else:
             merged.append(slot)
     return merged
@@ -487,6 +533,40 @@ def charger_current(
     )
 
 
+# ----- solar surplus ---------------------------------------------------------------------
+
+
+def solar_current(
+    *,
+    export_w: float,
+    ev_power_w: float,
+    phases: int,
+    voltage_v: float,
+    min_current_a: int,
+    max_current_a: int,
+    grid_allowance_w: float = 0.0,
+    solar_w: float | None = None,
+) -> tuple[int | None, float]:
+    """Charger current the solar surplus pays for, or None below the minimum.
+
+    ``export_w`` is the net power leaving the house now (negative = import);
+    it already includes what the car draws, ``ev_power_w``. Returns the
+    current and the power available to the car in W. ``solar_w``, the solar
+    production now, caps the surplus so that export from a discharging
+    battery is never taken for sun.
+    """
+    if not _finite(export_w) or not _finite(ev_power_w):
+        raise ValueError("solar_data_invalid")
+    surplus = max(0.0, ev_power_w) + export_w
+    if solar_w is not None and _finite(solar_w):
+        surplus = min(surplus, max(0.0, solar_w))
+    available = surplus + max(0.0, grid_allowance_w)
+    amps = floor(available / (phases * voltage_v) + 1e-9) if available > 0 else 0
+    if amps < min_current_a:
+        return None, available
+    return min(max_current_a, amps), available
+
+
 __all__ = [
     "CONF_EV_CHARGING",
     "CurrentDecision",
@@ -499,4 +579,5 @@ __all__ = [
     "entities_from_devices",
     "next_deadline",
     "plan_charging",
+    "solar_current",
 ]

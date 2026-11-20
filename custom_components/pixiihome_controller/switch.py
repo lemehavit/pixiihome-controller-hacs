@@ -99,6 +99,16 @@ SWITCH_DESCRIPTIONS: tuple[PixiiSwitchDescription, ...] = (
         feature=PixiiFeature.EV_CHARGING,
     ),
     PixiiSwitchDescription(
+        "ev_solar_charging_enabled",
+        setting_key="ev_solar_charging_enabled",
+        feature=PixiiFeature.EV_CHARGING,
+    ),
+    PixiiSwitchDescription(
+        "ev_solar_car_before_battery",
+        setting_key="ev_solar_car_before_battery",
+        feature=PixiiFeature.EV_CHARGING,
+    ),
+    PixiiSwitchDescription(
         "adaptive_peak_shaving",
         controller_key="adaptive_peak_shaving_enabled",
         # Reuse the old entity identity so existing dashboards keep working.
